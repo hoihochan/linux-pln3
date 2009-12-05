@@ -125,6 +125,8 @@ struct nf_conn
 	struct nf_ct_ext *ext;
 
 	struct rcu_head rcu;
+	/* add for hnat */
+	void *hnat_cb;
 };
 
 static inline struct nf_conn *

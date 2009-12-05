@@ -238,8 +238,34 @@ LEAF(csum_partial)
 	 andi	t0, a1, 2
 
 	/* Still a full word to go  */
+#if defined(CONFIG_MIPS_CAMELOT)
+	move	t1, zero
+
+	lbu	t2, (src)
+	PTR_ADDIU	src, 1
+	or	t1, t2
+	
+	lbu	t2, (src)
+	sll	t1, t1, 8
+	PTR_ADDIU	src, 1
+	or	t1, t2
+
+	lbu	t2, (src)
+	sll	t1, t1, 8
+	PTR_ADDIU	src, 1
+	or	t1, t2
+
+	lbu	t2, (src)
+	sll	t1, t1, 8
+	PTR_ADDIU	src, 1
+	or	t1, t2
+
+	nop
+#else
 	ulw	t1, (src)
 	PTR_ADDIU	src, 4
+#endif
+
 #ifdef USE_DOUBLE
 	dsll	t1, t1, 32			/* clear lower 32bit */
 #endif
@@ -250,8 +276,23 @@ LEAF(csum_partial)
 	 andi	t0, a1, 1
 
 	/* Still a halfword to go  */
+#if defined(CONFIG_MIPS_CAMELOT)
+	move	t1, zero
+
+	lbu	t2, (src)
+	PTR_ADDIU	src, 1
+	or	t1, t2
+	
+	lbu	t2, (src)
+	sll	t1, t1, 8
+	PTR_ADDIU	src, 1
+	or	t1, t2
+
+	nop	
+#else
 	ulhu	t1, (src)
 	PTR_ADDIU	src, 2
+#endif
 
 1:	beqz	t0, 1f
 	 sll	t1, t1, 16
@@ -417,6 +458,14 @@ FEXPORT(csum_partial_copy_nocheck)
 	 * Note: dst & src may be unaligned, len may be 0
 	 * Temps
 	 */
+#if defined(CONFIG_MIPS_CAMELOT)
+	sltu	t2, len, NBYTES
+	and	t1, dst, ADDRMASK
+	bnez	t2, .Lcopy_bytes_checklen
+	 and	t0, src, ADDRMASK
+	b	.Lcopy_bytes_csum
+	 nop
+#else
 	/*
 	 * The "issue break"s below are very approximate.
 	 * Issue delays for dcache fills will perturb the schedule, as will
@@ -628,6 +677,45 @@ EXC(	STORE	t0, 0(dst),		.Ls_exc)
 	bne	len, rem, 1b
 	.set	noreorder
 
+#endif
+#if defined(CONFIG_MIPS_CAMELOT)
+.Lcopy_bytes_csum: 
+#define rem t7	
+	/* len >= NBYTES */
+	 and	rem, len, NBYTES-1	    # rem = len % NBYTES
+	beq	rem, len, .Lcopy_bytes
+	 nop
+1:
+
+EXC(	lbu	t0, 0(src), .Ll_exc_copy)
+	move	t2, zero		    # zero t2 in 1st byte operation
+EXC(	sb	t0, 0(dst), .Ls_exc)
+	or	t2, t0
+
+EXC(	lbu	t0, 1(src), .Ll_exc_copy)
+	sll	t2, t2, 8		    # shift left 8 bits
+EXC(	sb	t0, 1(dst), .Ls_exc)
+	or	t2, t0			    # or 2nd byte
+
+EXC(	lbu	t0, 2(src), .Ll_exc_copy)
+	sll	t2, t2, 8		    # shift left 8 bits
+EXC(	sb	t0, 2(dst), .Ls_exc)
+	or	t2, t0			    # or 3rd byte
+
+EXC(	lbu	t0, 3(src), .Ll_exc_copy)
+	sll	t2, t2, 8		    # shift left 8 bits
+EXC(	sb	t0, 3(dst), .Ls_exc)
+	or	t2, t0			    # get full 4 bytes in t2
+
+	ADD	src, src, NBYTES
+	SUB	len, len, NBYTES
+	ADD 	dst, dst, NBYTES
+
+	ADDC(sum, t2)
+
+	bne	len, rem, 1b
+	nop
+#endif
 .Lcopy_bytes_checklen:
 	beqz	len, .Ldone
 	 nop

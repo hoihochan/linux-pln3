@@ -72,7 +72,12 @@ LEAF(memset)
 
 FEXPORT(__bzero)
 	sltiu		t0, a2, LONGSIZE	/* very small region? */
+#if defined(CONFIG_MIPS_CAMELOT)
+	/* force single byte bzero, optimize later */
+	b		.Lsmall_memset
+#else
 	bnez		t0, .Lsmall_memset
+#endif
 	 andi		t0, a0, LONGMASK	/* aligned? */
 
 #ifndef CONFIG_CPU_DADDI_WORKAROUNDS

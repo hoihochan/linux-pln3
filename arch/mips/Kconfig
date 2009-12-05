@@ -181,6 +181,28 @@ config LEMOTE_FULONG
 	  Lemote Fulong mini-PC board based on the Chinese Loongson-2E CPU and
 	  an FPGA northbridge
 
+config MIPS_CAMELOT
+	bool "Camelot Platform"
+	select BOOT_ELF32
+	select BOOT_RAW
+	#select CEVT_R4K
+	#select CSRC_R4K
+	select DMA_NONCOHERENT
+	#select GENERIC_ISA_DMA
+	select IRQ_CPU
+	#select IRQ_GIC
+	#select HW_HAS_PCI
+	#select SWAP_IO_SPACE
+	#select SYS_HAS_CPU_MIPS32_R1
+	select SYS_HAS_CPU_R3000
+	select SYS_HAS_EARLY_PRINTK
+	select SYS_SUPPORTS_32BIT_KERNEL
+	select SYS_SUPPORTS_BIG_ENDIAN
+	select NO_EXCEPT_FILL
+	select ZONE_DMA
+	help
+	  This enables support for the Camelot based platform.
+
 config MIPS_MALTA
 	bool "MIPS Malta board"
 	select ARCH_MAY_HAVE_PC_FDC

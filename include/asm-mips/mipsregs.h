@@ -936,6 +936,11 @@ do {									\
 #define read_c0_depc()		__read_ulong_c0_register($24, 0)
 #define write_c0_depc(val)	__write_ulong_c0_register($24, 0, val)
 
+#if defined(CONFIG_MIPS_CAMELOT)
+#define read_c0_cctl()		__read_ulong_c0_register($20, 0)
+#define write_c0_cctl(val)	__write_ulong_c0_register($20, 0, val)
+#endif
+
 /*
  * MIPS32 / MIPS64 performance counters
  */

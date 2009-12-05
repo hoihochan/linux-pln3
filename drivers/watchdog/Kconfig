@@ -704,6 +704,12 @@ config TXX9_WDT
 	help
 	  Hardware driver for the built-in watchdog timer on TXx9 MIPS SoCs.
 
+config CAMELOT_WDT
+	tristate "Camelot Watchdog Timer"
+	depends on MIPS_CAMELOT
+	help
+	  Hardware driver for the built-in watchdog timer on Camelot SoCs.
+
 # PARISC Architecture
 
 # POWERPC Architecture

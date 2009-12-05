@@ -1585,6 +1585,9 @@ void __init trap_init(void)
 	 * configuration.
 	 */
 	set_handler(0x180, &except_vec3_generic, 0x80);
+#if defined(CONFIG_MIPS_CAMELOT)
+	set_handler(0x80, &except_vec3_generic, 0x80);
+#endif
 
 	/*
 	 * Setup default vectors

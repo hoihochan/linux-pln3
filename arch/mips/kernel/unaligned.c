@@ -186,6 +186,19 @@ static void emulate_load_store_insn(struct pt_regs *regs,
 			goto sigbus;
 
 		__asm__ __volatile__ (
+#if defined(CONFIG_MIPS_CAMELOT)
+			"1: lbu $8, 0(%2)\n"
+			"sll $8, $8, 0x18\n"
+			"move %0, $8\n"
+			"lbu $8, 1(%2)\n"
+			"sll $8, $8, 0x10\n"
+			"or %0, %0, $8\n"
+			"2: lbu $8, 2(%2)\n"
+			"sll $8, $8, 8\n"
+			"or %0, %0, $8\n"
+			"lbu $8, 3(%2)\n"
+			"or %0, %0, $8\n"
+#else
 #ifdef __BIG_ENDIAN
 			"1:\tlwl\t%0, (%2)\n"
 			"2:\tlwr\t%0, 3(%2)\n\t"
@@ -193,6 +206,7 @@ static void emulate_load_store_insn(struct pt_regs *regs,
 #ifdef __LITTLE_ENDIAN
 			"1:\tlwl\t%0, 3(%2)\n"
 			"2:\tlwr\t%0, (%2)\n\t"
+#endif
 #endif
 			"li\t%1, 0\n"
 			"3:\t.section\t.fixup,\"ax\"\n\t"
@@ -204,7 +218,12 @@ static void emulate_load_store_insn(struct pt_regs *regs,
 			STR(PTR)"\t2b, 4b\n\t"
 			".previous"
 			: "=&r" (value), "=r" (res)
+#if defined(CONFIG_MIPS_CAMELOT)
+			: "r" (addr), "i" (-EFAULT)
+			: "$8");
+#else
 			: "r" (addr), "i" (-EFAULT));
+#endif
 		if (res)
 			goto fault;
 		compute_return_epc(regs);
@@ -374,6 +393,16 @@ static void emulate_load_store_insn(struct pt_regs *regs,
 
 		value = regs->regs[insn.i_format.rt];
 		__asm__ __volatile__ (
+#if defined(CONFIG_MIPS_CAMELOT)
+			"move $8, %1\n"
+			"1: sb $8, 3(%2)\n"
+			"srl $8, $8, 8\n"
+			"sb $8, 2(%2)\n"
+			"srl $8, $8, 8\n"
+			"2: sb $8, 1(%2)\n"
+			"srl $8, $8, 8\n"
+			"sb $8, 0(%2)\n"
+#else
 #ifdef __BIG_ENDIAN
 			"1:\tswl\t%1,(%2)\n"
 			"2:\tswr\t%1, 3(%2)\n\t"
@@ -381,6 +410,7 @@ static void emulate_load_store_insn(struct pt_regs *regs,
 #ifdef __LITTLE_ENDIAN
 			"1:\tswl\t%1, 3(%2)\n"
 			"2:\tswr\t%1, (%2)\n\t"
+#endif
 #endif
 			"li\t%0, 0\n"
 			"3:\n\t"
@@ -393,7 +423,12 @@ static void emulate_load_store_insn(struct pt_regs *regs,
 			STR(PTR)"\t2b, 4b\n\t"
 			".previous"
 		: "=r" (res)
+#if defined(CONFIG_MIPS_CAMELOT)
+		: "r" (value), "r" (addr), "i" (-EFAULT)
+		: "$8");
+#else
 		: "r" (value), "r" (addr), "i" (-EFAULT));
+#endif
 		if (res)
 			goto fault;
 		compute_return_epc(regs);

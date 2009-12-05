@@ -200,6 +200,21 @@ FEXPORT(__copy_user)
 #define rem t8
 
 	R10KCBARRIER(0(ra))
+
+#if defined(CONFIG_MIPS_CAMELOT)
+	b	.Lcopy_bytes_checklen
+	nop
+
+	/* unsafe: check and enable aligned copy path later */ 
+	sltu	t2, len, NBYTES
+	and	t1, dst, ADDRMASK
+	bnez	t2, .Lcopy_bytes_checklen
+	and	t2, src, ADDRMASK
+	bnez	t1, .Lcopy_bytes_checklen
+	nop
+	bnez	t2, .Lcopy_bytes_checklen
+	nop
+#else
 	/*
 	 * The "issue break"s below are very approximate.
 	 * Issue delays for dcache fills will perturb the schedule, as will
@@ -224,6 +239,7 @@ FEXPORT(__copy_user)
 	 * use delay slot for fall-through
 	 * src and dst are aligned; need to compute rem
 	 */
+#endif
 .Lboth_aligned:
 	 SRL	t0, len, LOG_NBYTES+3    # +3 for 8 units/iter
 	beqz	t0, .Lcleanup_both_aligned # len < 8*NBYTES
@@ -300,6 +316,7 @@ EXC(	STORE	t0, 0(dst),		.Ls_exc_p1u)
 	bne	rem, len, 1b
 	.set	noreorder
 
+#if !defined(CONFIG_MIPS_CAMELOT)
 	/*
 	 * src and dst are aligned, need to copy rem bytes (rem < NBYTES)
 	 * A loop would do only a byte at a time with possible branch
@@ -401,6 +418,20 @@ EXC(	STORE	t0, 0(dst),		.Ls_exc_p1u)
 	bne	len, rem, 1b
 	.set	noreorder
 
+#endif
+#if defined(CONFIG_MIPS_CAMELOT)
+.Lcopy_bytes_checklen:
+	beqz	len, .Ldone
+	 nop
+.Lcopy_bytes:
+EXC(	lb	t0, 0(src), .Ll_exc)
+ 	SUB	len, len, 1
+EXC(	sb	t0, 0(dst), .Ls_exc_p1)
+	ADD	dst, dst, 1
+	ADD	src, src, 1
+	bnez	len, .Lcopy_bytes
+	nop
+#else
 .Lcopy_bytes_checklen:
 	beqz	len, .Ldone
 	 nop
@@ -425,6 +456,7 @@ EXC(	lb	t0, NBYTES-2(src), .Ll_exc)
 	SUB	len, len, 1
 	jr	ra
 EXC(	 sb	t0, NBYTES-2(dst), .Ls_exc_p1)
+#endif
 .Ldone:
 	jr	ra
 	 nop

@@ -168,6 +168,9 @@ static void __cpuinit build_r3000_tlb_refill_handler(void)
 	uasm_i_sll(&p, K0, K0, 2);
 	uasm_i_addu(&p, K1, K1, K0);
 	uasm_i_mfc0(&p, K0, C0_CONTEXT);
+#if defined(CONFIG_MIPS_CAMELOT)
+	uasm_i_nop(&p); /* mfc0 delay */
+#endif		
 	uasm_i_lw(&p, K1, 0, K1); /* cp0 delay */
 	uasm_i_andi(&p, K0, K0, 0xffc); /* load delay */
 	uasm_i_addu(&p, K1, K1, K0);

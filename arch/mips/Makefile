@@ -305,6 +305,14 @@ load-$(CONFIG_LEMOTE_FULONG) +=0xffffffff80100000
 cflags-$(CONFIG_LEMOTE_FULONG) += -Iinclude/asm-mips/mach-lemote
 
 #
+# Camelot Platform
+#
+core-$(CONFIG_MIPS_CAMELOT)	+= arch/mips/camelot/generic/
+cflags-$(CONFIG_MIPS_CAMELOT)	+= -Iinclude/asm-mips/camelot
+load-$(CONFIG_MIPS_CAMELOT)	+= 0xffffffff80000400
+all-$(CONFIG_MIPS_CAMELOT)	:= kernel.img
+
+#
 # MIPS Malta board
 #
 core-$(CONFIG_MIPS_MALTA)	+= arch/mips/mti-malta/
@@ -680,6 +688,9 @@ vmlinux.ecoff: $(vmlinux-32)
 	+@$(call makeboot,$@)
 
 vmlinux.srec: $(vmlinux-32)
+	+@$(call makeboot,$@)
+
+kernel.img: $(vmlinux-32)
 	+@$(call makeboot,$@)
 
 CLEAN_FILES += vmlinux.ecoff \

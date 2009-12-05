@@ -183,6 +183,13 @@ void __devinit cpu_cache_init(void)
 		tx39_cache_init();
 	}
 
+#if defined(CONFIG_MIPS_CAMELOT)
+	{
+		extern void __weak camelot_cache_init(void);
+
+		camelot_cache_init();
+	}
+#endif
 	setup_protection_map();
 }
 
