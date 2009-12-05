@@ -694,7 +694,8 @@ kernel.img: $(vmlinux-32)
 	+@$(call makeboot,$@)
 
 CLEAN_FILES += vmlinux.ecoff \
-	       vmlinux.srec
+	       vmlinux.srec \
+	       kernel.img
 
 archprepare:
 ifdef CONFIG_MIPS32_N32

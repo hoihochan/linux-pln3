@@ -48,7 +48,6 @@ $(obj)/ih.o: $(obj)/ih_temp.c $(obj)/vmlinux.bin.lzma
 
 $(obj)/ih.bin: $(obj)/ih.o
 	$(OBJCOPY) -j .data -O binary $(obj)/ih.o $(obj)/ih.bin
-	rm -f $(obj)/ih.o
 
 kernel.img: $(obj)/ih.bin $(obj)/vmlinux.bin.lzma
 	cat $(obj)/ih.bin $(obj)/vmlinux.bin.lzma > kernel.img
@@ -58,6 +57,9 @@ $(obj)/addinitrd: $(obj)/addinitrd.c
 
 clean-files += addinitrd \
 	       elf2ecoff \
+	       vmlinux.bin.lzma \
+	       ih.bin \
+	       ih.o \
 	       vmlinux.bin \
 	       vmlinux.ecoff \
 	       vmlinux.srec
