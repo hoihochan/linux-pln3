@@ -298,14 +298,13 @@ static inline void cpu_probe_legacy(struct cpuinfo_mips *c, unsigned int cpu)
 			c->options |= MIPS_CPU_FPU;
 		c->tlbsize = 64;
 		break;
-#if defined(CONFIG_MIPS_CAMELOT)
 	case PRID_IMP_CAMELOT:
 		c->cputype = CPU_R3000;
+		__cpu_name[cpu] = "Camelot";
 		c->isa_level = MIPS_CPU_ISA_I;
 		c->options = MIPS_CPU_TLB | MIPS_CPU_3K_CACHE;
 		c->tlbsize = 16;
 		break;
-#endif
 	case PRID_IMP_R3000:
 		if ((c->processor_id & 0xff) == PRID_REV_R3000A) {
 			if (cpu_has_confreg()) {
