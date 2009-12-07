@@ -55,7 +55,7 @@ static ssize_t eisa_eeprom_read(struct file * file,
 	ssize_t ret;
 	int i;
 	
-	if (*ppos >= HPEE_MAX_LENGTH)
+	if (*ppos < 0 || *ppos >= HPEE_MAX_LENGTH)
 		return 0;
 	
 	count = *ppos + count < HPEE_MAX_LENGTH ? count : HPEE_MAX_LENGTH - *ppos;
@@ -86,7 +86,7 @@ static int eisa_eeprom_open(struct inode *inode, struct file *file)
 {
 	cycle_kernel_lock();
 
-	if (file->f_mode & 2)
+	if (file->f_mode & FMODE_WRITE)
 		return -EINVAL;
    
 	return 0;

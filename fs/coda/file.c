@@ -13,6 +13,7 @@
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/stat.h>
+#include <linux/cred.h>
 #include <linux/errno.h>
 #include <linux/smp_lock.h>
 #include <linux/string.h>
@@ -46,6 +47,8 @@ coda_file_splice_read(struct file *coda_file, loff_t *ppos,
 		      struct pipe_inode_info *pipe, size_t count,
 		      unsigned int flags)
 {
+	ssize_t (*splice_read)(struct file *, loff_t *,
+			       struct pipe_inode_info *, size_t, unsigned int);
 	struct coda_file_info *cfi;
 	struct file *host_file;
 
@@ -53,10 +56,11 @@ coda_file_splice_read(struct file *coda_file, loff_t *ppos,
 	BUG_ON(!cfi || cfi->cfi_magic != CODA_MAGIC);
 	host_file = cfi->cfi_container;
 
-	if (!host_file->f_op || !host_file->f_op->splice_read)
-		return -EINVAL;
+	splice_read = host_file->f_op->splice_read;
+	if (!splice_read)
+		splice_read = default_file_splice_read;
 
-	return host_file->f_op->splice_read(host_file, ppos, pipe, count,flags);
+	return splice_read(host_file, ppos, pipe, count, flags);
 }
 
 static ssize_t
@@ -174,7 +178,7 @@ int coda_release(struct inode *coda_inode, struct file *coda_file)
 	BUG_ON(!cfi || cfi->cfi_magic != CODA_MAGIC);
 
 	err = venus_close(coda_inode->i_sb, coda_i2f(coda_inode),
-			  coda_flags, coda_file->f_uid);
+			  coda_flags, coda_file->f_cred->fsuid);
 
 	host_inode = cfi->cfi_container->f_path.dentry->d_inode;
 	cii = ITOC(coda_inode);
@@ -200,8 +204,7 @@ int coda_release(struct inode *coda_inode, struct file *coda_file)
 int coda_fsync(struct file *coda_file, struct dentry *coda_dentry, int datasync)
 {
 	struct file *host_file;
-	struct dentry *host_dentry;
-	struct inode *host_inode, *coda_inode = coda_dentry->d_inode;
+	struct inode *coda_inode = coda_dentry->d_inode;
 	struct coda_file_info *cfi;
 	int err = 0;
 
@@ -213,14 +216,7 @@ int coda_fsync(struct file *coda_file, struct dentry *coda_dentry, int datasync)
 	BUG_ON(!cfi || cfi->cfi_magic != CODA_MAGIC);
 	host_file = cfi->cfi_container;
 
-	if (host_file->f_op && host_file->f_op->fsync) {
-		host_dentry = host_file->f_path.dentry;
-		host_inode = host_dentry->d_inode;
-		mutex_lock(&host_inode->i_mutex);
-		err = host_file->f_op->fsync(host_file, host_dentry, datasync);
-		mutex_unlock(&host_inode->i_mutex);
-	}
-
+	err = vfs_fsync(host_file, host_file->f_path.dentry, datasync);
 	if ( !err && !datasync ) {
 		lock_kernel();
 		err = venus_fsync(coda_inode->i_sb, coda_i2f(coda_inode));

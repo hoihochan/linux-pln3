@@ -23,8 +23,6 @@
 #include <linux/security.h>
 #include <linux/module.h>
 #include <acpi/acpi.h>
-#include <acpi/actypes.h>
-#include <acpi/actbl.h>
 #include "tpm.h"
 
 #define TCG_EVENT_NAME_LEN_MAX	255
@@ -345,14 +343,14 @@ static int tpm_ascii_bios_measurements_show(struct seq_file *m, void *v)
 	return 0;
 }
 
-static struct seq_operations tpm_ascii_b_measurments_seqops = {
+static const struct seq_operations tpm_ascii_b_measurments_seqops = {
 	.start = tpm_bios_measurements_start,
 	.next = tpm_bios_measurements_next,
 	.stop = tpm_bios_measurements_stop,
 	.show = tpm_ascii_bios_measurements_show,
 };
 
-static struct seq_operations tpm_binary_b_measurments_seqops = {
+static const struct seq_operations tpm_binary_b_measurments_seqops = {
 	.start = tpm_bios_measurements_start,
 	.next = tpm_bios_measurements_next,
 	.stop = tpm_bios_measurements_stop,

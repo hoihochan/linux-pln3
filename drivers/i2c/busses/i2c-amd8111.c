@@ -376,8 +376,10 @@ static int __devinit amd8111_probe(struct pci_dev *dev,
 	smbus->size = pci_resource_len(dev, 0);
 
 	error = acpi_check_resource_conflict(&dev->resource[0]);
-	if (error)
+	if (error) {
+		error = -ENODEV;
 		goto out_kfree;
+	}
 
 	if (!request_region(smbus->base, smbus->size, amd8111_driver.name)) {
 		error = -EBUSY;
@@ -387,7 +389,6 @@ static int __devinit amd8111_probe(struct pci_dev *dev,
 	smbus->adapter.owner = THIS_MODULE;
 	snprintf(smbus->adapter.name, sizeof(smbus->adapter.name),
 		"SMBus2 AMD8111 adapter at %04x", smbus->base);
-	smbus->adapter.id = I2C_HW_SMBUS_AMD8111;
 	smbus->adapter.class = I2C_CLASS_HWMON | I2C_CLASS_SPD;
 	smbus->adapter.algo = &smbus_algorithm;
 	smbus->adapter.algo_data = smbus;

@@ -92,6 +92,18 @@
 /* Keep this the last entry.  */
 #define R_390_NUM	61
 
+/* Bits present in AT_HWCAP. */
+#define HWCAP_S390_ESAN3	1
+#define HWCAP_S390_ZARCH	2
+#define HWCAP_S390_STFLE	4
+#define HWCAP_S390_MSA		8
+#define HWCAP_S390_LDISP	16
+#define HWCAP_S390_EIMM		32
+#define HWCAP_S390_DFP		64
+#define HWCAP_S390_HPAGE	128
+#define HWCAP_S390_ETF3EH	256
+#define HWCAP_S390_HIGH_GPRS	512
+
 /*
  * These are used to set parameters in the core dumps.
  */
@@ -119,6 +131,10 @@ typedef s390_compat_regs compat_elf_gregset_t;
 #include <linux/sched.h>	/* for task_struct */
 #include <asm/system.h>		/* for save_access_regs */
 #include <asm/mmu_context.h>
+
+#include <asm/vdso.h>
+
+extern unsigned int vdso_enabled;
 
 /*
  * This is used to ensure we don't load something for the wrong architecture.
@@ -166,18 +182,16 @@ extern char elf_platform[];
 #define ELF_PLATFORM (elf_platform)
 
 #ifndef __s390x__
-#define SET_PERSONALITY(ex, ibcs2) set_personality((ibcs2)?PER_SVR4:PER_LINUX)
+#define SET_PERSONALITY(ex) set_personality(PER_LINUX)
 #else /* __s390x__ */
-#define SET_PERSONALITY(ex, ibcs2)			\
-do {							\
-	if (ibcs2)					\
-		set_personality(PER_SVR4);		\
-	else if (current->personality != PER_LINUX32)	\
-		set_personality(PER_LINUX);		\
-	if ((ex).e_ident[EI_CLASS] == ELFCLASS32)	\
-		set_thread_flag(TIF_31BIT);		\
-	else						\
-		clear_thread_flag(TIF_31BIT);		\
+#define SET_PERSONALITY(ex)					\
+do {								\
+	if (personality(current->personality) != PER_LINUX32)	\
+		set_personality(PER_LINUX);			\
+	if ((ex).e_ident[EI_CLASS] == ELFCLASS32)		\
+		set_thread_flag(TIF_31BIT);			\
+	else							\
+		clear_thread_flag(TIF_31BIT);			\
 } while (0)
 #endif /* __s390x__ */
 
@@ -192,5 +206,17 @@ do {							\
 		disable_noexec(current->mm, current);	\
 	current->mm->context.noexec == 0;		\
 })
+
+#define ARCH_DLINFO							    \
+do {									    \
+	if (vdso_enabled)						    \
+		NEW_AUX_ENT(AT_SYSINFO_EHDR,				    \
+			    (unsigned long)current->mm->context.vdso_base); \
+} while (0)
+
+struct linux_binprm;
+
+#define ARCH_HAS_SETUP_ADDITIONAL_PAGES 1
+int arch_setup_additional_pages(struct linux_binprm *, int);
 
 #endif

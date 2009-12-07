@@ -95,7 +95,7 @@ static void ehca_mm_close(struct vm_area_struct *vma)
 		     vma->vm_start, vma->vm_end, *count);
 }
 
-static struct vm_operations_struct vm_ops = {
+static const struct vm_operations_struct vm_ops = {
 	.open =	ehca_mm_open,
 	.close = ehca_mm_close,
 };
@@ -114,7 +114,7 @@ static int ehca_mmap_fw(struct vm_area_struct *vma, struct h_galpas *galpas,
 
 	physical = galpas->user.fw_handle;
 	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
-	ehca_gen_dbg("vsize=%lx physical=%lx", vsize, physical);
+	ehca_gen_dbg("vsize=%llx physical=%llx", vsize, physical);
 	/* VM_IO | VM_RESERVED are set by remap_pfn_range() */
 	ret = remap_4k_pfn(vma, vma->vm_start, physical >> EHCA_PAGESHIFT,
 			   vma->vm_page_prot);

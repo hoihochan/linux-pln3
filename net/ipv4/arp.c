@@ -130,7 +130,7 @@ static void arp_solicit(struct neighbour *neigh, struct sk_buff *skb);
 static void arp_error_report(struct neighbour *neigh, struct sk_buff *skb);
 static void parp_redo(struct sk_buff *skb);
 
-static struct neigh_ops arp_generic_ops = {
+static const struct neigh_ops arp_generic_ops = {
 	.family =		AF_INET,
 	.solicit =		arp_solicit,
 	.error_report =		arp_error_report,
@@ -140,7 +140,7 @@ static struct neigh_ops arp_generic_ops = {
 	.queue_xmit =		dev_queue_xmit,
 };
 
-static struct neigh_ops arp_hh_ops = {
+static const struct neigh_ops arp_hh_ops = {
 	.family =		AF_INET,
 	.solicit =		arp_solicit,
 	.error_report =		arp_error_report,
@@ -150,7 +150,7 @@ static struct neigh_ops arp_hh_ops = {
 	.queue_xmit =		dev_queue_xmit,
 };
 
-static struct neigh_ops arp_direct_ops = {
+static const struct neigh_ops arp_direct_ops = {
 	.family =		AF_INET,
 	.output =		dev_queue_xmit,
 	.connected_output =	dev_queue_xmit,
@@ -158,7 +158,7 @@ static struct neigh_ops arp_direct_ops = {
 	.queue_xmit =		dev_queue_xmit,
 };
 
-struct neigh_ops arp_broken_ops = {
+const struct neigh_ops arp_broken_ops = {
 	.family =		AF_INET,
 	.solicit =		arp_solicit,
 	.error_report =		arp_error_report,
@@ -468,13 +468,13 @@ int arp_find(unsigned char *haddr, struct sk_buff *skb)
 	__be32 paddr;
 	struct neighbour *n;
 
-	if (!skb->dst) {
+	if (!skb_dst(skb)) {
 		printk(KERN_DEBUG "arp_find is called with dst==NULL\n");
 		kfree_skb(skb);
 		return 1;
 	}
 
-	paddr = skb->rtable->rt_gateway;
+	paddr = skb_rtable(skb)->rt_gateway;
 
 	if (arp_set_predefined(inet_addr_type(dev_net(dev), paddr), haddr, paddr, dev))
 		return 0;
@@ -506,7 +506,7 @@ int arp_bind_neighbour(struct dst_entry *dst)
 	if (dev == NULL)
 		return -EINVAL;
 	if (n == NULL) {
-		__be32 nexthop = ((struct rtable*)dst)->rt_gateway;
+		__be32 nexthop = ((struct rtable *)dst)->rt_gateway;
 		if (dev->flags&(IFF_LOOPBACK|IFF_POINTOPOINT))
 			nexthop = 0;
 		n = __neigh_lookup_errno(
@@ -640,14 +640,14 @@ struct sk_buff *arp_create(int type, int ptype, __be32 dest_ip,
 	arp_ptr=(unsigned char *)(arp+1);
 
 	memcpy(arp_ptr, src_hw, dev->addr_len);
-	arp_ptr+=dev->addr_len;
-	memcpy(arp_ptr, &src_ip,4);
-	arp_ptr+=4;
+	arp_ptr += dev->addr_len;
+	memcpy(arp_ptr, &src_ip, 4);
+	arp_ptr += 4;
 	if (target_hw != NULL)
 		memcpy(arp_ptr, target_hw, dev->addr_len);
 	else
 		memset(arp_ptr, 0, dev->addr_len);
-	arp_ptr+=dev->addr_len;
+	arp_ptr += dev->addr_len;
 	memcpy(arp_ptr, &dest_ip, 4);
 
 	return skb;
@@ -663,7 +663,7 @@ out:
 void arp_xmit(struct sk_buff *skb)
 {
 	/* Send it off, maybe filter it using firewalling first.  */
-	NF_HOOK(NF_ARP, NF_ARP_OUT, skb, NULL, skb->dev, dev_queue_xmit);
+	NF_HOOK(NFPROTO_ARP, NF_ARP_OUT, skb, NULL, skb->dev, dev_queue_xmit);
 }
 
 /*
@@ -814,22 +814,22 @@ static int arp_process(struct sk_buff *skb)
 	if (arp->ar_op == htons(ARPOP_REQUEST) &&
 	    ip_route_input(skb, tip, sip, 0, dev) == 0) {
 
-		rt = skb->rtable;
+		rt = skb_rtable(skb);
 		addr_type = rt->rt_type;
 
 		if (addr_type == RTN_LOCAL) {
-			n = neigh_event_ns(&arp_tbl, sha, &sip, dev);
-			if (n) {
-				int dont_send = 0;
+			int dont_send = 0;
 
-				if (!dont_send)
-					dont_send |= arp_ignore(in_dev,sip,tip);
-				if (!dont_send && IN_DEV_ARPFILTER(in_dev))
-					dont_send |= arp_filter(sip,tip,dev);
-				if (!dont_send)
+			if (!dont_send)
+				dont_send |= arp_ignore(in_dev,sip,tip);
+			if (!dont_send && IN_DEV_ARPFILTER(in_dev))
+				dont_send |= arp_filter(sip,tip,dev);
+			if (!dont_send) {
+				n = neigh_event_ns(&arp_tbl, sha, &sip, dev);
+				if (n) {
 					arp_send(ARPOP_REPLY,ETH_P_ARP,sip,dev,tip,sha,dev->dev_addr,sha);
-
-				neigh_release(n);
+					neigh_release(n);
+				}
 			}
 			goto out;
 		} else if (IN_DEV_FORWARD(in_dev)) {
@@ -892,7 +892,7 @@ static int arp_process(struct sk_buff *skb)
 out:
 	if (in_dev)
 		in_dev_put(in_dev);
-	kfree_skb(skb);
+	consume_skb(skb);
 	return 0;
 }
 
@@ -928,7 +928,7 @@ static int arp_rcv(struct sk_buff *skb, struct net_device *dev,
 
 	memset(NEIGH_CB(skb), 0, sizeof(struct neighbour_cb));
 
-	return NF_HOOK(NF_ARP, NF_ARP_IN, skb, dev, NULL, arp_process);
+	return NF_HOOK(NFPROTO_ARP, NF_ARP_IN, skb, dev, NULL, arp_process);
 
 freeskb:
 	kfree_skb(skb);
@@ -1225,8 +1225,8 @@ void arp_ifdown(struct net_device *dev)
  *	Called once on startup.
  */
 
-static struct packet_type arp_packet_type = {
-	.type =	__constant_htons(ETH_P_ARP),
+static struct packet_type arp_packet_type __read_mostly = {
+	.type =	cpu_to_be16(ETH_P_ARP),
 	.func =	arp_rcv,
 };
 
@@ -1304,11 +1304,13 @@ static void arp_format_neigh_entry(struct seq_file *seq,
 		hbuffer[k++] = hex_asc_lo(n->ha[j]);
 		hbuffer[k++] = ':';
 	}
-	hbuffer[--k] = 0;
+	if (k != 0)
+		--k;
+	hbuffer[k] = 0;
 #if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
 	}
 #endif
-	sprintf(tbuf, NIPQUAD_FMT, NIPQUAD(*(u32*)n->primary_key));
+	sprintf(tbuf, "%pI4", n->primary_key);
 	seq_printf(seq, "%-16s 0x%-10x0x%-10x%s     *        %s\n",
 		   tbuf, hatype, arp_state_to_flags(n), hbuffer, dev->name);
 	read_unlock(&n->lock);
@@ -1321,7 +1323,7 @@ static void arp_format_pneigh_entry(struct seq_file *seq,
 	int hatype = dev ? dev->type : 0;
 	char tbuf[16];
 
-	sprintf(tbuf, NIPQUAD_FMT, NIPQUAD(*(u32*)n->key));
+	sprintf(tbuf, "%pI4", n->key);
 	seq_printf(seq, "%-16s 0x%-10x0x%-10x%s     *        %s\n",
 		   tbuf, hatype, ATF_PUBL | ATF_PERM, "00:00:00:00:00:00",
 		   dev ? dev->name : "*");

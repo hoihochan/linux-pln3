@@ -2,7 +2,7 @@
  *	DDP:	An implementation of the AppleTalk DDP protocol for
  *		Ethernet 'ELAP'.
  *
- *		Alan Cox  <Alan.Cox@linux.org>
+ *		Alan Cox  <alan@lxorguk.ukuu.org.uk>
  *
  *		With more than a little assistance from
  *
@@ -54,6 +54,7 @@
 #include <linux/capability.h>
 #include <linux/module.h>
 #include <linux/if_arp.h>
+#include <linux/smp_lock.h>
 #include <linux/termios.h>	/* For TIOCOUTQ/INQ */
 #include <net/datalink.h>
 #include <net/psnap.h>
@@ -162,8 +163,7 @@ static void atalk_destroy_timer(unsigned long data)
 {
 	struct sock *sk = (struct sock *)data;
 
-	if (atomic_read(&sk->sk_wmem_alloc) ||
-	    atomic_read(&sk->sk_rmem_alloc)) {
+	if (sk_has_allocations(sk)) {
 		sk->sk_timer.expires = jiffies + SOCK_DESTROY_TIME;
 		add_timer(&sk->sk_timer);
 	} else
@@ -175,8 +175,7 @@ static inline void atalk_destroy_socket(struct sock *sk)
 	atalk_remove_socket(sk);
 	skb_queue_purge(&sk->sk_receive_queue);
 
-	if (atomic_read(&sk->sk_wmem_alloc) ||
-	    atomic_read(&sk->sk_rmem_alloc)) {
+	if (sk_has_allocations(sk)) {
 		setup_timer(&sk->sk_timer, atalk_destroy_timer,
 				(unsigned long)sk);
 		sk->sk_timer.expires	= jiffies + SOCK_DESTROY_TIME;
@@ -815,9 +814,6 @@ static int atif_ioctl(int cmd, void __user *arg)
 				return -EPERM;
 			if (sa->sat_family != AF_APPLETALK)
 				return -EINVAL;
-			if (!atif)
-				return -EADDRNOTAVAIL;
-
 			/*
 			 * for now, we only support proxy AARP on ELAP;
 			 * we should be able to do it for LocalTalk, too.
@@ -942,6 +938,7 @@ static unsigned long atalk_sum_skb(const struct sk_buff *skb, int offset,
 				   int len, unsigned long sum)
 {
 	int start = skb_headlen(skb);
+	struct sk_buff *frag_iter;
 	int i, copy;
 
 	/* checksum stuff in header space */
@@ -980,26 +977,22 @@ static unsigned long atalk_sum_skb(const struct sk_buff *skb, int offset,
 		start = end;
 	}
 
-	if (skb_shinfo(skb)->frag_list) {
-		struct sk_buff *list = skb_shinfo(skb)->frag_list;
+	skb_walk_frags(skb, frag_iter) {
+		int end;
 
-		for (; list; list = list->next) {
-			int end;
+		WARN_ON(start > offset + len);
 
-			WARN_ON(start > offset + len);
-
-			end = start + list->len;
-			if ((copy = end - offset) > 0) {
-				if (copy > len)
-					copy = len;
-				sum = atalk_sum_skb(list, offset - start,
-						    copy, sum);
-				if ((len -= copy) == 0)
-					return sum;
-				offset += copy;
-			}
-			start = end;
+		end = start + frag_iter->len;
+		if ((copy = end - offset) > 0) {
+			if (copy > len)
+				copy = len;
+			sum = atalk_sum_skb(frag_iter, offset - start,
+					    copy, sum);
+			if ((len -= copy) == 0)
+				return sum;
+			offset += copy;
 		}
+		start = end;
 	}
 
 	BUG_ON(len > 0);
@@ -1287,7 +1280,7 @@ static int handle_ip_over_ddp(struct sk_buff *skb)
 	skb->dev   = dev;
 	skb_reset_transport_header(skb);
 
-	stats = dev->priv;
+	stats = netdev_priv(dev);
 	stats->rx_packets++;
 	stats->rx_bytes += skb->len + 13;
 	return netif_rx(skb);  /* Send the SKB up to a higher place. */
@@ -1379,7 +1372,7 @@ static int atalk_route_packet(struct sk_buff *skb, struct net_device *dev,
 
 	if (aarp_send_ddp(rt->dev, skb, &ta, NULL) == NET_XMIT_DROP)
 		return NET_RX_DROP;
-	return NET_XMIT_SUCCESS;
+	return NET_RX_SUCCESS;
 free_it:
 	kfree_skb(skb);
 drop:
@@ -1409,7 +1402,7 @@ static int atalk_rcv(struct sk_buff *skb, struct net_device *dev,
 	__u16 len_hops;
 
 	if (!net_eq(dev_net(dev), &init_net))
-		goto freeit;
+		goto drop;
 
 	/* Don't mangle buffer if shared */
 	if (!(skb = skb_share_check(skb, GFP_ATOMIC)))
@@ -1417,7 +1410,7 @@ static int atalk_rcv(struct sk_buff *skb, struct net_device *dev,
 
 	/* Size check and make sure header is contiguous */
 	if (!pskb_may_pull(skb, sizeof(*ddp)))
-		goto freeit;
+		goto drop;
 
 	ddp = ddp_hdr(skb);
 
@@ -1435,7 +1428,7 @@ static int atalk_rcv(struct sk_buff *skb, struct net_device *dev,
 	if (skb->len < sizeof(*ddp) || skb->len < (len_hops & 1023)) {
 		pr_debug("AppleTalk: dropping corrupted frame (deh_len=%u, "
 			 "skb->len=%u)\n", len_hops & 1023, skb->len);
-		goto freeit;
+		goto drop;
 	}
 
 	/*
@@ -1445,7 +1438,7 @@ static int atalk_rcv(struct sk_buff *skb, struct net_device *dev,
 	if (ddp->deh_sum &&
 	    atalk_checksum(skb, len_hops & 1023) != ddp->deh_sum)
 		/* Not a valid AppleTalk frame - dustbin time */
-		goto freeit;
+		goto drop;
 
 	/* Check the packet is aimed at us */
 	if (!ddp->deh_dnet)	/* Net 0 is 'this network' */
@@ -1473,18 +1466,21 @@ static int atalk_rcv(struct sk_buff *skb, struct net_device *dev,
 
 	sock = atalk_search_socket(&tosat, atif);
 	if (!sock) /* But not one of our sockets */
-		goto freeit;
+		goto drop;
 
 	/* Queue packet (standard) */
 	skb->sk = sock;
 
 	if (sock_queue_rcv_skb(sock, skb) < 0)
-		goto freeit;
-out:
-	return 0;
-freeit:
+		goto drop;
+
+	return NET_RX_SUCCESS;
+
+drop:
 	kfree_skb(skb);
-	goto out;
+out:
+	return NET_RX_DROP;
+
 }
 
 /*
@@ -1576,14 +1572,10 @@ static int atalk_sendmsg(struct kiocb *iocb, struct socket *sock, struct msghdr 
 		    usat->sat_family != AF_APPLETALK)
 			return -EINVAL;
 
-		/* netatalk doesn't implement this check */
+		/* netatalk didn't implement this check */
 		if (usat->sat_addr.s_node == ATADDR_BCAST &&
 		    !sock_flag(sk, SOCK_BROADCAST)) {
-			printk(KERN_INFO "SO_BROADCAST: Fix your netatalk as "
-					 "it will break before 2.2\n");
-#if 0
 			return -EPERM;
-#endif
 		}
 	} else {
 		if (sk->sk_state != TCP_ESTABLISHED)
@@ -1763,8 +1755,7 @@ static int atalk_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 	switch (cmd) {
 		/* Protocol layer */
 		case TIOCOUTQ: {
-			long amount = sk->sk_sndbuf -
-				      atomic_read(&sk->sk_wmem_alloc);
+			long amount = sk->sk_sndbuf - sk_wmem_alloc_get(sk);
 
 			if (amount < 0)
 				amount = 0;
@@ -1866,13 +1857,13 @@ static struct notifier_block ddp_notifier = {
 	.notifier_call	= ddp_device_event,
 };
 
-static struct packet_type ltalk_packet_type = {
-	.type		= __constant_htons(ETH_P_LOCALTALK),
+static struct packet_type ltalk_packet_type __read_mostly = {
+	.type		= cpu_to_be16(ETH_P_LOCALTALK),
 	.func		= ltalk_rcv,
 };
 
-static struct packet_type ppptalk_packet_type = {
-	.type		= __constant_htons(ETH_P_PPPTALK),
+static struct packet_type ppptalk_packet_type __read_mostly = {
+	.type		= cpu_to_be16(ETH_P_PPPTALK),
 	.func		= atalk_rcv,
 };
 
@@ -1882,7 +1873,7 @@ static unsigned char ddp_snap_id[] = { 0x08, 0x00, 0x07, 0x80, 0x9B };
 EXPORT_SYMBOL(atrtr_get_dev);
 EXPORT_SYMBOL(atalk_find_dev_addr);
 
-static char atalk_err_snap[] __initdata =
+static const char atalk_err_snap[] __initconst =
 	KERN_CRIT "Unable to register DDP with SNAP.\n";
 
 /* Called by proto.c on kernel start up */
@@ -1936,6 +1927,6 @@ static void __exit atalk_exit(void)
 module_exit(atalk_exit);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Alan Cox <Alan.Cox@linux.org>");
+MODULE_AUTHOR("Alan Cox <alan@lxorguk.ukuu.org.uk>");
 MODULE_DESCRIPTION("AppleTalk 0.20\n");
 MODULE_ALIAS_NETPROTO(PF_APPLETALK);

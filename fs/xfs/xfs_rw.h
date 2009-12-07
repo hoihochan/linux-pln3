@@ -28,7 +28,6 @@ struct xfs_mount;
  * file is a real time file or not, because the bmap code
  * does.
  */
-#define	XFS_FSB_TO_DB(ip,fsb)	xfs_fsb_to_db(ip,fsb)
 static inline xfs_daddr_t
 xfs_fsb_to_db(struct xfs_inode *ip, xfs_fsblock_t fsb)
 {
@@ -69,7 +68,6 @@ xfs_get_extsz_hint(
  * Prototypes for functions in xfs_rw.c.
  */
 extern int xfs_write_clear_setuid(struct xfs_inode *ip);
-extern int xfs_write_sync_logforce(struct xfs_mount *mp, struct xfs_inode *ip);
 extern int xfs_bwrite(struct xfs_mount *mp, struct xfs_buf *bp);
 extern int xfs_bioerror(struct xfs_buf *bp);
 extern int xfs_bioerror_relse(struct xfs_buf *bp);
@@ -78,11 +76,5 @@ extern int xfs_read_buf(struct xfs_mount *mp, xfs_buftarg_t *btp,
 			struct xfs_buf **bpp);
 extern void xfs_ioerror_alert(char *func, struct xfs_mount *mp,
 				xfs_buf_t *bp, xfs_daddr_t blkno);
-
-/*
- * Prototypes for functions in xfs_vnodeops.c.
- */
-extern int xfs_free_eofblocks(struct xfs_mount *mp, struct xfs_inode *ip,
-			int flags);
 
 #endif /* __XFS_RW_H__ */

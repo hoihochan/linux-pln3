@@ -19,7 +19,7 @@
 #include <linux/vmalloc.h>
 #include <linux/spinlock.h>
 #include <linux/cpu.h>
-#include <linux/delay.h>
+#include <linux/workqueue.h>
 
 #include <asm/uaccess.h>
 #include <asm/io.h>
@@ -208,6 +208,7 @@ void pSeries_log_error(char *buf, unsigned int err_type, int fatal)
 		break;
 	case ERR_TYPE_KERNEL_PANIC:
 	default:
+		WARN_ON_ONCE(!irqs_disabled()); /* @@@ DEBUG @@@ */
 		spin_unlock_irqrestore(&rtasd_log_lock, s);
 		return;
 	}
@@ -227,6 +228,7 @@ void pSeries_log_error(char *buf, unsigned int err_type, int fatal)
 	/* Check to see if we need to or have stopped logging */
 	if (fatal || !logging_enabled) {
 		logging_enabled = 0;
+		WARN_ON_ONCE(!irqs_disabled()); /* @@@ DEBUG @@@ */
 		spin_unlock_irqrestore(&rtasd_log_lock, s);
 		return;
 	}
@@ -249,11 +251,13 @@ void pSeries_log_error(char *buf, unsigned int err_type, int fatal)
 		else
 			rtas_log_start += 1;
 
+		WARN_ON_ONCE(!irqs_disabled()); /* @@@ DEBUG @@@ */
 		spin_unlock_irqrestore(&rtasd_log_lock, s);
 		wake_up_interruptible(&rtas_log_wait);
 		break;
 	case ERR_TYPE_KERNEL_PANIC:
 	default:
+		WARN_ON_ONCE(!irqs_disabled()); /* @@@ DEBUG @@@ */
 		spin_unlock_irqrestore(&rtasd_log_lock, s);
 		return;
 	}
@@ -295,19 +299,29 @@ static ssize_t rtas_log_read(struct file * file, char __user * buf,
 	if (!tmp)
 		return -ENOMEM;
 
-
 	spin_lock_irqsave(&rtasd_log_lock, s);
 	/* if it's 0, then we know we got the last one (the one in NVRAM) */
-	if (rtas_log_size == 0 && logging_enabled)
+	while (rtas_log_size == 0) {
+		if (file->f_flags & O_NONBLOCK) {
+			spin_unlock_irqrestore(&rtasd_log_lock, s);
+			error = -EAGAIN;
+			goto out;
+		}
+
+		if (!logging_enabled) {
+			spin_unlock_irqrestore(&rtasd_log_lock, s);
+			error = -ENODATA;
+			goto out;
+		}
 		nvram_clear_error_log();
-	spin_unlock_irqrestore(&rtasd_log_lock, s);
 
+		spin_unlock_irqrestore(&rtasd_log_lock, s);
+		error = wait_event_interruptible(rtas_log_wait, rtas_log_size);
+		if (error)
+			goto out;
+		spin_lock_irqsave(&rtasd_log_lock, s);
+	}
 
-	error = wait_event_interruptible(rtas_log_wait, rtas_log_size);
-	if (error)
-		goto out;
-
-	spin_lock_irqsave(&rtasd_log_lock, s);
 	offset = rtas_error_log_buffer_max * (rtas_log_start & LOG_NUMBER_MASK);
 	memcpy(tmp, &rtas_log_buf[offset], count);
 
@@ -373,35 +387,50 @@ static void do_event_scan(void)
 	} while(error == 0);
 }
 
-static void do_event_scan_all_cpus(long delay)
+static void rtas_event_scan(struct work_struct *w);
+DECLARE_DELAYED_WORK(event_scan_work, rtas_event_scan);
+
+/*
+ * Delay should be at least one second since some machines have problems if
+ * we call event-scan too quickly.
+ */
+static unsigned long event_scan_delay = 1*HZ;
+static int first_pass = 1;
+
+static void rtas_event_scan(struct work_struct *w)
 {
-	int cpu;
+	unsigned int cpu;
+
+	do_event_scan();
 
 	get_online_cpus();
-	cpu = first_cpu(cpu_online_map);
-	for (;;) {
-		set_cpus_allowed(current, cpumask_of_cpu(cpu));
-		do_event_scan();
-		set_cpus_allowed(current, CPU_MASK_ALL);
 
-		/* Drop hotplug lock, and sleep for the specified delay */
-		put_online_cpus();
-		msleep_interruptible(delay);
-		get_online_cpus();
+	cpu = next_cpu(smp_processor_id(), cpu_online_map);
+	if (cpu == NR_CPUS) {
+		cpu = first_cpu(cpu_online_map);
 
-		cpu = next_cpu(cpu, cpu_online_map);
-		if (cpu == NR_CPUS)
-			break;
+		if (first_pass) {
+			first_pass = 0;
+			event_scan_delay = 30*HZ/rtas_event_scan_rate;
+
+			if (surveillance_timeout != -1) {
+				pr_debug("rtasd: enabling surveillance\n");
+				enable_surveillance(surveillance_timeout);
+				pr_debug("rtasd: surveillance enabled\n");
+			}
+		}
 	}
+
+	schedule_delayed_work_on(cpu, &event_scan_work,
+		__round_jiffies_relative(event_scan_delay, cpu));
+
 	put_online_cpus();
 }
 
-static int rtasd(void *unused)
+static void start_event_scan(void)
 {
 	unsigned int err_type;
 	int rc;
-
-	daemonize("rtasd");
 
 	printk(KERN_DEBUG "RTAS daemon started\n");
 	pr_debug("rtasd: will sleep for %d milliseconds\n",
@@ -420,22 +449,8 @@ static int rtasd(void *unused)
 		}
 	}
 
-	/* First pass. */
-	do_event_scan_all_cpus(1000);
-
-	if (surveillance_timeout != -1) {
-		pr_debug("rtasd: enabling surveillance\n");
-		enable_surveillance(surveillance_timeout);
-		pr_debug("rtasd: surveillance enabled\n");
-	}
-
-	/* Delay should be at least one second since some
-	 * machines have problems if we call event-scan too
-	 * quickly. */
-	for (;;)
-		do_event_scan_all_cpus(30000/rtas_event_scan_rate);
-
-	return -EINVAL;
+	schedule_delayed_work_on(first_cpu(cpu_online_map), &event_scan_work,
+				 event_scan_delay);
 }
 
 static int __init rtas_init(void)
@@ -473,8 +488,7 @@ static int __init rtas_init(void)
 	if (!entry)
 		printk(KERN_ERR "Failed to create error_log proc entry\n");
 
-	if (kernel_thread(rtasd, NULL, CLONE_FS) < 0)
-		printk(KERN_ERR "Failed to start RTAS daemon\n");
+	start_event_scan();
 
 	return 0;
 }

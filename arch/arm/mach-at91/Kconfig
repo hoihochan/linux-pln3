@@ -7,36 +7,55 @@ choice
 
 config ARCH_AT91RM9200
 	bool "AT91RM9200"
+	select CPU_ARM920T
 	select GENERIC_TIME
 	select GENERIC_CLOCKEVENTS
 
 config ARCH_AT91SAM9260
 	bool "AT91SAM9260 or AT91SAM9XE"
+	select CPU_ARM926T
 	select GENERIC_TIME
 	select GENERIC_CLOCKEVENTS
 
 config ARCH_AT91SAM9261
 	bool "AT91SAM9261"
+	select CPU_ARM926T
+	select GENERIC_TIME
+	select GENERIC_CLOCKEVENTS
+
+config ARCH_AT91SAM9G10
+	bool "AT91SAM9G10"
+	select CPU_ARM926T
 	select GENERIC_TIME
 	select GENERIC_CLOCKEVENTS
 
 config ARCH_AT91SAM9263
 	bool "AT91SAM9263"
+	select CPU_ARM926T
 	select GENERIC_TIME
 	select GENERIC_CLOCKEVENTS
 
 config ARCH_AT91SAM9RL
 	bool "AT91SAM9RL"
+	select CPU_ARM926T
 	select GENERIC_TIME
 	select GENERIC_CLOCKEVENTS
 
 config ARCH_AT91SAM9G20
 	bool "AT91SAM9G20"
+	select CPU_ARM926T
+	select GENERIC_TIME
+	select GENERIC_CLOCKEVENTS
+
+config ARCH_AT91SAM9G45
+	bool "AT91SAM9G45"
+	select CPU_ARM926T
 	select GENERIC_TIME
 	select GENERIC_CLOCKEVENTS
 
 config ARCH_AT91CAP9
 	bool "AT91CAP9"
+	select CPU_ARM926T
 	select GENERIC_TIME
 	select GENERIC_CLOCKEVENTS
 
@@ -137,6 +156,13 @@ config MACH_YL9200
 	help
 	  Select this if you are using the ucDragon YL-9200 board.
 
+config MACH_CPUAT91
+	bool "Eukrea CPUAT91"
+	depends on ARCH_AT91RM9200
+	help
+	  Select this if you are using the Eukrea Electromatique's
+	  CPUAT91 board <http://www.eukrea.com/>.
+
 endif
 
 # ----------------------------------------------------------
@@ -175,6 +201,15 @@ config MACH_SAM9_L9260
 	  Select this if you are using Olimex's SAM9-L9260 board based on the Atmel AT91SAM9260.
 	  <http://www.olimex.com/dev/sam9-L9260.html>
 
+config MACH_AFEB9260
+	bool "Custom afeb9260 board v1"
+	depends on ARCH_AT91SAM9260
+	help
+	  Select this if you are using custom afeb9260 board based on
+	  open hardware design. Select this for revision 1 of the board.
+	  <svn://194.85.238.22/home/users/george/svn/arm9eb>
+	  <http://groups.google.com/group/arm9fpga-evolution-board>
+
 config MACH_USB_A9260
 	bool "CALAO USB-A9260"
 	depends on ARCH_AT91SAM9260
@@ -188,6 +223,13 @@ config MACH_QIL_A9260
 	help
 	  Select this if you are using a Calao Systems QIL-A9260 Board.
 	  <http://www.calao-systems.com>
+
+config MACH_CPU9260
+	bool "Eukrea CPU9260 board"
+	depends on ARCH_AT91SAM9260
+	help
+	  Select this if you are using a Eukrea Electromatique's
+	  CPU9260 Board <http://www.eukrea.com/>
 
 endif
 
@@ -203,6 +245,21 @@ config MACH_AT91SAM9261EK
 	help
 	  Select this if you are using Atmel's AT91SAM9261-EK Evaluation Kit.
 	  <http://www.atmel.com/dyn/products/tools_card.asp?tool_id=3820>
+
+endif
+
+# ----------------------------------------------------------
+
+if ARCH_AT91SAM9G10
+
+comment "AT91SAM9G10 Board Type"
+
+config MACH_AT91SAM9G10EK
+	bool "Atmel AT91SAM9G10-EK Evaluation Kit"
+	depends on ARCH_AT91SAM9G10
+	help
+	  Select this if you are using Atmel's AT91SAM9G10-EK Evaluation Kit.
+	  <http://www.atmel.com/dyn/products/tools_card.asp?tool_id=4588>
 
 endif
 
@@ -225,6 +282,12 @@ config MACH_USB_A9263
 	help
 	  Select this if you are using a Calao Systems USB-A9263.
 	  <http://www.calao-systems.com>
+
+config MACH_NEOCORE926
+	bool "Adeneo NEOCORE926"
+	depends on ARCH_AT91SAM9263
+	help
+	  Select this if you are using the Adeneo Neocore 926 board.
 
 endif
 
@@ -252,7 +315,39 @@ config MACH_AT91SAM9G20EK
 	bool "Atmel AT91SAM9G20-EK Evaluation Kit"
 	depends on ARCH_AT91SAM9G20
 	help
-	  Select this if you are using Atmel's AT91SAM9G20-EK Evaluation Kit.
+	  Select this if you are using Atmel's AT91SAM9G20-EK Evaluation Kit
+	  that embeds only one SD/MMC slot.
+
+config MACH_AT91SAM9G20EK_2MMC
+	bool "Atmel AT91SAM9G20-EK Evaluation Kit with 2 SD/MMC Slots"
+	depends on ARCH_AT91SAM9G20
+	help
+	  Select this if you are using an Atmel AT91SAM9G20-EK Evaluation Kit
+	  with 2 SD/MMC Slots. This is the case for AT91SAM9G20-EK rev. C and
+	  onwards.
+
+config MACH_CPU9G20
+	bool "Eukrea CPU9G20 board"
+	depends on ARCH_AT91SAM9G20
+	help
+	  Select this if you are using a Eukrea Electromatique's
+	  CPU9G20 Board <http://www.eukrea.com/>
+
+endif
+
+# ----------------------------------------------------------
+
+if ARCH_AT91SAM9G45
+
+comment "AT91SAM9G45 Board Type"
+
+config MACH_AT91SAM9G45EKES
+	bool "Atmel AT91SAM9G45-EKES Evaluation Kit"
+	depends on ARCH_AT91SAM9G45
+	help
+	  Select this if you are using Atmel's AT91SAM9G45-EKES Evaluation Kit.
+	  "ES" at the end of the name means that this board is an
+	  Engineering Sample.
 
 endif
 
@@ -293,13 +388,13 @@ comment "AT91 Board Options"
 
 config MTD_AT91_DATAFLASH_CARD
 	bool "Enable DataFlash Card support"
-	depends on (ARCH_AT91RM9200DK || MACH_AT91RM9200EK || MACH_AT91SAM9260EK || MACH_AT91SAM9261EK || MACH_AT91SAM9263EK || MACH_AT91SAM9G20EK || MACH_ECBAT91 || MACH_SAM9_L9260 || MACH_AT91CAP9ADK)
+	depends on (ARCH_AT91RM9200DK || MACH_AT91RM9200EK || MACH_AT91SAM9260EK || MACH_AT91SAM9261EK || MACH_AT91SAM9G10EK || MACH_AT91SAM9263EK || MACH_AT91SAM9G20EK || MACH_ECBAT91 || MACH_SAM9_L9260 || MACH_AT91CAP9ADK || MACH_NEOCORE926)
 	help
 	  Enable support for the DataFlash card.
 
 config MTD_NAND_ATMEL_BUSWIDTH_16
 	bool "Enable 16-bit data bus interface to NAND flash"
-	depends on (MACH_AT91SAM9260EK || MACH_AT91SAM9261EK || MACH_AT91SAM9263EK || MACH_AT91SAM9G20EK || MACH_AT91CAP9ADK)
+	depends on (MACH_AT91SAM9260EK || MACH_AT91SAM9261EK || MACH_AT91SAM9G10EK || MACH_AT91SAM9263EK || MACH_AT91SAM9G20EK || MACH_AT91SAM9G20EK_2MMC || MACH_AT91SAM9G45EKES || MACH_AT91CAP9ADK)
 	help
 	  On AT91SAM926x boards both types of NAND flash can be present
 	  (8 and 16 bit data bus width).
@@ -313,6 +408,19 @@ config AT91_PROGRAMMABLE_CLOCKS
 	help
 	  Select this if you need to program one or more of the PCK0..PCK3
 	  programmable clock outputs.
+
+config AT91_SLOW_CLOCK
+	bool "Suspend-to-RAM disables main oscillator"
+	depends on SUSPEND
+	help
+	  Select this if you want Suspend-to-RAM to save the most power
+	  possible (without powering off the CPU) by disabling the PLLs
+	  and main oscillator so that only the 32 KiHz clock is available.
+
+	  When only that slow-clock is available, some peripherals lose
+	  functionality.  Many can't issue wakeup events unless faster
+	  clocks are available.  Some lose their operating state and
+	  need to be completely re-initialized.
 
 config AT91_TIMER_HZ
        int "Kernel HZ (jiffies per second)"
@@ -348,7 +456,7 @@ config AT91_EARLY_USART2
 
 config AT91_EARLY_USART3
 	bool "USART3"
-	depends on (ARCH_AT91RM9200 || ARCH_AT91SAM9RL || ARCH_AT91SAM9260 || ARCH_AT91SAM9G20)
+	depends on (ARCH_AT91RM9200 || ARCH_AT91SAM9RL || ARCH_AT91SAM9260 || ARCH_AT91SAM9G20 || ARCH_AT91SAM9G45)
 
 config AT91_EARLY_USART4
 	bool "USART4"

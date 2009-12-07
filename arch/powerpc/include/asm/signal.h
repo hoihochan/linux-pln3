@@ -94,7 +94,7 @@ typedef struct {
 #define MINSIGSTKSZ	2048
 #define SIGSTKSZ	8192
 
-#include <asm-generic/signal.h>
+#include <asm-generic/signal-defs.h>
 
 struct old_sigaction {
 	__sighandler_t sa_handler;
@@ -122,7 +122,6 @@ typedef struct sigaltstack {
 
 #ifdef __KERNEL__
 struct pt_regs;
-extern void do_signal(struct pt_regs *regs, unsigned long thread_info_flags);
 #define ptrace_signal_deliver(regs, cookie) do { } while (0)
 #endif /* __KERNEL__ */
 

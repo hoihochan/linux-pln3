@@ -34,7 +34,7 @@ int gg2_read_config(struct pci_bus *bus, unsigned int devfn, int off,
 			   int len, u32 *val)
 {
 	volatile void __iomem *cfg_data;
-	struct pci_controller *hose = bus->sysdata;
+	struct pci_controller *hose = pci_bus_to_host(bus);
 
 	if (bus->number > 7)
 		return PCIBIOS_DEVICE_NOT_FOUND;
@@ -61,7 +61,7 @@ int gg2_write_config(struct pci_bus *bus, unsigned int devfn, int off,
 			    int len, u32 val)
 {
 	volatile void __iomem *cfg_data;
-	struct pci_controller *hose = bus->sysdata;
+	struct pci_controller *hose = pci_bus_to_host(bus);
 
 	if (bus->number > 7)
 		return PCIBIOS_DEVICE_NOT_FOUND;
@@ -96,7 +96,7 @@ static struct pci_ops gg2_pci_ops =
 int rtas_read_config(struct pci_bus *bus, unsigned int devfn, int offset,
 		     int len, u32 *val)
 {
-	struct pci_controller *hose = bus->sysdata;
+	struct pci_controller *hose = pci_bus_to_host(bus);
 	unsigned long addr = (offset & 0xff) | ((devfn & 0xff) << 8)
 		| (((bus->number - hose->first_busno) & 0xff) << 16)
 		| (hose->global_number << 24);
@@ -111,7 +111,7 @@ int rtas_read_config(struct pci_bus *bus, unsigned int devfn, int offset,
 int rtas_write_config(struct pci_bus *bus, unsigned int devfn, int offset,
 		      int len, u32 val)
 {
-	struct pci_controller *hose = bus->sysdata;
+	struct pci_controller *hose = pci_bus_to_host(bus);
 	unsigned long addr = (offset & 0xff) | ((devfn & 0xff) << 8)
 		| (((bus->number - hose->first_busno) & 0xff) << 16)
 		| (hose->global_number << 24);
@@ -141,6 +141,7 @@ hydra_init(void)
 		of_node_put(np);
 		return 0;
 	}
+	of_node_put(np);
 	Hydra = ioremap(r.start, r.end-r.start);
 	printk("Hydra Mac I/O at %llx\n", (unsigned long long)r.start);
 	printk("Hydra Feature_Control was %x",
@@ -198,7 +199,7 @@ static void __init setup_peg2(struct pci_controller *hose, struct device_node *d
 		printk ("RTAS supporting Pegasos OF not found, please upgrade"
 			" your firmware\n");
 	}
-	ppc_pci_flags |= PPC_PCI_REASSIGN_ALL_BUS;
+	ppc_pci_add_flags(PPC_PCI_REASSIGN_ALL_BUS);
 	/* keep the reference to the root node */
 }
 
@@ -260,13 +261,13 @@ chrp_find_bridges(void)
 				dev->full_name);
 			continue;
 		}
-		hose->first_busno = bus_range[0];
+		hose->first_busno = hose->self_busno = bus_range[0];
 		hose->last_busno = bus_range[1];
 
 		model = of_get_property(dev, "model", NULL);
 		if (model == NULL)
 			model = "<none>";
-		if (of_device_is_compatible(dev, "IBM,python")) {
+		if (strncmp(model, "IBM, Python", 11) == 0) {
 			setup_python(hose, dev);
 		} else if (is_mot
 			   || strncmp(model, "Motorola, Grackle", 17) == 0) {

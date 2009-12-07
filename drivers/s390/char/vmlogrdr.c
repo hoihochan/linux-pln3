@@ -3,13 +3,17 @@
  *	character device driver for reading z/VM system service records
  *
  *
- *	Copyright 2004 IBM Corporation
+ *	Copyright IBM Corp. 2004, 2009
  *	character device driver for reading z/VM system service records,
  *	Version 1.0
  *	Author(s): Xenia Tkatschow <xenia@us.ibm.com>
  *		   Stefan Weinhuber <wein@de.ibm.com>
  *
  */
+
+#define KMSG_COMPONENT "vmlogrdr"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/errno.h>
@@ -27,8 +31,6 @@
 #include <linux/device.h>
 #include <linux/smp_lock.h>
 #include <linux/string.h>
-
-
 
 MODULE_AUTHOR
 	("(C) 2004 IBM Corporation by Xenia Tkatschow (xenia@us.ibm.com)\n"
@@ -174,8 +176,7 @@ static void vmlogrdr_iucv_path_severed(struct iucv_path *path, u8 ipuser[16])
 	struct vmlogrdr_priv_t * logptr = path->private;
 	u8 reason = (u8) ipuser[8];
 
-	printk (KERN_ERR "vmlogrdr: connection severed with"
-		" reason %i\n", reason);
+	pr_err("vmlogrdr: connection severed with reason %i\n", reason);
 
 	iucv_path_sever(path, NULL);
 	kfree(path);
@@ -333,8 +334,8 @@ static int vmlogrdr_open (struct inode *inode, struct file *filp)
 	if (logptr->autorecording) {
 		ret = vmlogrdr_recording(logptr,1,logptr->autopurge);
 		if (ret)
-			printk (KERN_WARNING "vmlogrdr: failed to start "
-				"recording automatically\n");
+			pr_warning("vmlogrdr: failed to start "
+				   "recording automatically\n");
 	}
 
 	/* create connection to the system service */
@@ -345,9 +346,9 @@ static int vmlogrdr_open (struct inode *inode, struct file *filp)
 				       logptr->system_service, NULL, NULL,
 				       logptr);
 	if (connect_rc) {
-		printk (KERN_ERR "vmlogrdr: iucv connection to %s "
-			"failed with rc %i \n", logptr->system_service,
-			connect_rc);
+		pr_err("vmlogrdr: iucv connection to %s "
+		       "failed with rc %i \n",
+		       logptr->system_service, connect_rc);
 		goto out_path;
 	}
 
@@ -388,8 +389,8 @@ static int vmlogrdr_release (struct inode *inode, struct file *filp)
 	if (logptr->autorecording) {
 		ret = vmlogrdr_recording(logptr,0,logptr->autopurge);
 		if (ret)
-			printk (KERN_WARNING "vmlogrdr: failed to stop "
-				"recording automatically\n");
+			pr_warning("vmlogrdr: failed to stop "
+				   "recording automatically\n");
 	}
 	logptr->dev_in_use = 0;
 
@@ -426,7 +427,7 @@ static int vmlogrdr_receive_data(struct vmlogrdr_priv_t *priv)
 			buffer = priv->buffer + sizeof(int);
 		}
 		/*
-		 * If the record is bigger then our buffer, we receive only
+		 * If the record is bigger than our buffer, we receive only
 		 * a part of it. We can get the rest later.
 		 */
 		if (iucv_data_count > NET_BUFFER_SIZE)
@@ -436,7 +437,7 @@ static int vmlogrdr_receive_data(struct vmlogrdr_priv_t *priv)
 					  0, buffer, iucv_data_count,
 					  &priv->residual_length);
 		spin_unlock_bh(&priv->priv_lock);
-		/* An rc of 5 indicates that the record was bigger then
+		/* An rc of 5 indicates that the record was bigger than
 		 * the buffer, which is OK for us. A 9 indicates that the
 		 * record was purged befor we could receive it.
 		 */
@@ -503,7 +504,7 @@ static ssize_t vmlogrdr_autopurge_store(struct device * dev,
 					struct device_attribute *attr,
 					const char * buf, size_t count)
 {
-	struct vmlogrdr_priv_t *priv = dev->driver_data;
+	struct vmlogrdr_priv_t *priv = dev_get_drvdata(dev);
 	ssize_t ret = count;
 
 	switch (buf[0]) {
@@ -524,7 +525,7 @@ static ssize_t vmlogrdr_autopurge_show(struct device *dev,
 				       struct device_attribute *attr,
 				       char *buf)
 {
-	struct vmlogrdr_priv_t *priv = dev->driver_data;
+	struct vmlogrdr_priv_t *priv = dev_get_drvdata(dev);
 	return sprintf(buf, "%u\n", priv->autopurge);
 }
 
@@ -540,7 +541,7 @@ static ssize_t vmlogrdr_purge_store(struct device * dev,
 
 	char cp_command[80];
 	char cp_response[80];
-	struct vmlogrdr_priv_t *priv = dev->driver_data;
+	struct vmlogrdr_priv_t *priv = dev_get_drvdata(dev);
 
 	if (buf[0] != '1')
 		return -EINVAL;
@@ -577,7 +578,7 @@ static ssize_t vmlogrdr_autorecording_store(struct device *dev,
 					    struct device_attribute *attr,
 					    const char *buf, size_t count)
 {
-	struct vmlogrdr_priv_t *priv = dev->driver_data;
+	struct vmlogrdr_priv_t *priv = dev_get_drvdata(dev);
 	ssize_t ret = count;
 
 	switch (buf[0]) {
@@ -598,7 +599,7 @@ static ssize_t vmlogrdr_autorecording_show(struct device *dev,
 					   struct device_attribute *attr,
 					   char *buf)
 {
-	struct vmlogrdr_priv_t *priv = dev->driver_data;
+	struct vmlogrdr_priv_t *priv = dev_get_drvdata(dev);
 	return sprintf(buf, "%u\n", priv->autorecording);
 }
 
@@ -611,7 +612,7 @@ static ssize_t vmlogrdr_recording_store(struct device * dev,
 					struct device_attribute *attr,
 					const char * buf, size_t count)
 {
-	struct vmlogrdr_priv_t *priv = dev->driver_data;
+	struct vmlogrdr_priv_t *priv = dev_get_drvdata(dev);
 	ssize_t ret;
 
 	switch (buf[0]) {
@@ -659,6 +660,29 @@ static struct attribute *vmlogrdr_attrs[] = {
 	NULL,
 };
 
+static int vmlogrdr_pm_prepare(struct device *dev)
+{
+	int rc;
+	struct vmlogrdr_priv_t *priv = dev_get_drvdata(dev);
+
+	rc = 0;
+	if (priv) {
+		spin_lock_bh(&priv->priv_lock);
+		if (priv->dev_in_use)
+			rc = -EBUSY;
+		spin_unlock_bh(&priv->priv_lock);
+	}
+	if (rc)
+		pr_err("vmlogrdr: device %s is busy. Refuse to suspend.\n",
+		       dev_name(dev));
+	return rc;
+}
+
+
+static struct dev_pm_ops vmlogrdr_pm_ops = {
+	.prepare = vmlogrdr_pm_prepare,
+};
+
 static struct attribute_group vmlogrdr_attr_group = {
 	.attrs = vmlogrdr_attrs,
 };
@@ -667,6 +691,7 @@ static struct class *vmlogrdr_class;
 static struct device_driver vmlogrdr_driver = {
 	.name = "vmlogrdr",
 	.bus  = &iucv_bus,
+	.pm = &vmlogrdr_pm_ops,
 };
 
 
@@ -724,11 +749,11 @@ static int vmlogrdr_register_device(struct vmlogrdr_priv_t *priv)
 
 	dev = kzalloc(sizeof(struct device), GFP_KERNEL);
 	if (dev) {
-		snprintf(dev->bus_id, BUS_ID_SIZE, "%s",
-			 priv->internal_name);
+		dev_set_name(dev, priv->internal_name);
 		dev->bus = &iucv_bus;
 		dev->parent = iucv_root;
 		dev->driver = &vmlogrdr_driver;
+		dev_set_drvdata(dev, priv);
 		/*
 		 * The release function could be called after the
 		 * module has been unloaded. It's _only_ task is to
@@ -740,18 +765,20 @@ static int vmlogrdr_register_device(struct vmlogrdr_priv_t *priv)
 	} else
 		return -ENOMEM;
 	ret = device_register(dev);
-	if (ret)
+	if (ret) {
+		put_device(dev);
 		return ret;
+	}
 
 	ret = sysfs_create_group(&dev->kobj, &vmlogrdr_attr_group);
 	if (ret) {
 		device_unregister(dev);
 		return ret;
 	}
-	priv->class_device = device_create_drvdata(vmlogrdr_class, dev,
-						   MKDEV(vmlogrdr_major,
-							 priv->minor_num),
-						   priv, "%s", dev->bus_id);
+	priv->class_device = device_create(vmlogrdr_class, dev,
+					   MKDEV(vmlogrdr_major,
+						 priv->minor_num),
+					   priv, "%s", dev_name(dev));
 	if (IS_ERR(priv->class_device)) {
 		ret = PTR_ERR(priv->class_device);
 		priv->class_device=NULL;
@@ -824,8 +851,7 @@ static int __init vmlogrdr_init(void)
 	dev_t dev;
 
 	if (! MACHINE_IS_VM) {
-		printk (KERN_ERR "vmlogrdr: not running under VM, "
-				"driver not loaded.\n");
+		pr_err("not running under VM, driver not loaded.\n");
 		return -ENODEV;
 	}
 

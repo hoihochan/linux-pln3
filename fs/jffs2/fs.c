@@ -20,6 +20,7 @@
 #include <linux/vmalloc.h>
 #include <linux/vfs.h>
 #include <linux/crc32.h>
+#include <linux/smp_lock.h>
 #include "nodelist.h"
 
 static int jffs2_flash_setup(struct jffs2_sb_info *c);
@@ -207,6 +208,8 @@ int jffs2_statfs(struct dentry *dentry, struct kstatfs *buf)
 	buf->f_files = 0;
 	buf->f_ffree = 0;
 	buf->f_namelen = JFFS2_MAX_NAME_LEN;
+	buf->f_fsid.val[0] = JFFS2_SUPER_MAGIC;
+	buf->f_fsid.val[1] = c->mtd->index;
 
 	spin_lock(&c->erase_completion_lock);
 	avail = c->dirty_size + c->free_size;
@@ -385,6 +388,7 @@ int jffs2_remount_fs (struct super_block *sb, int *flags, char *data)
 	   This also catches the case where it was stopped and this
 	   is just a remount to restart it.
 	   Flush the writebuffer, if neccecary, else we loose it */
+	lock_kernel();
 	if (!(sb->s_flags & MS_RDONLY)) {
 		jffs2_stop_garbage_collect_thread(c);
 		mutex_lock(&c->alloc_sem);
@@ -397,23 +401,9 @@ int jffs2_remount_fs (struct super_block *sb, int *flags, char *data)
 
 	*flags |= MS_NOATIME;
 
+	unlock_kernel();
 	return 0;
 }
-
-void jffs2_write_super (struct super_block *sb)
-{
-	struct jffs2_sb_info *c = JFFS2_SB_INFO(sb);
-	sb->s_dirt = 0;
-
-	if (sb->s_flags & MS_RDONLY)
-		return;
-
-	D1(printk(KERN_DEBUG "jffs2_write_super()\n"));
-	jffs2_garbage_collect_trigger(c);
-	jffs2_erase_pending_blocks(c, 0);
-	jffs2_flush_wbuf_gc(c, 0);
-}
-
 
 /* jffs2_new_inode: allocate a new inode and inocache, add it to the hash,
    fill in the raw_inode while you're at it. */
@@ -440,14 +430,14 @@ struct inode *jffs2_new_inode (struct inode *dir_i, int mode, struct jffs2_raw_i
 
 	memset(ri, 0, sizeof(*ri));
 	/* Set OS-specific defaults for new inodes */
-	ri->uid = cpu_to_je16(current->fsuid);
+	ri->uid = cpu_to_je16(current_fsuid());
 
 	if (dir_i->i_mode & S_ISGID) {
 		ri->gid = cpu_to_je16(dir_i->i_gid);
 		if (S_ISDIR(mode))
 			mode |= S_ISGID;
 	} else {
-		ri->gid = cpu_to_je16(current->fsgid);
+		ri->gid = cpu_to_je16(current_fsgid());
 	}
 
 	/* POSIX ACLs have to be processed now, at least partly.

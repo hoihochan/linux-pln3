@@ -426,8 +426,10 @@ _GLOBAL(kernel_thread)
 	li	r4,0		/* new sp (unused) */
 	li	r0,__NR_clone
 	sc
-	cmpdi	0,r3,0		/* parent or child? */
-	bne	1f		/* return if parent */
+	bns+	1f		/* did system call indicate error? */
+	neg	r3,r3		/* if so, make return code negative */
+1:	cmpdi	0,r3,0		/* parent or child? */
+	bne	2f		/* return if parent */
 	li	r0,0
 	stdu	r0,-STACK_FRAME_OVERHEAD(r1)
 	ld	r2,8(r29)
@@ -438,7 +440,7 @@ _GLOBAL(kernel_thread)
 	li	r0,__NR_exit	/* exit after child exits */
         li	r3,0
 	sc
-1:	addi	r1,r1,STACK_FRAME_OVERHEAD	
+2:	addi	r1,r1,STACK_FRAME_OVERHEAD
 	ld	r29,-24(r1)
 	ld	r30,-16(r1)
 	blr
@@ -454,90 +456,6 @@ _GLOBAL(disable_kernel_fp)
 	mtmsrd	r3			/* disable use of fpu now */
 	isync
 	blr
-
-#ifdef CONFIG_ALTIVEC
-
-#if 0 /* this has no callers for now */
-/*
- * disable_kernel_altivec()
- * Disable the VMX.
- */
-_GLOBAL(disable_kernel_altivec)
-	mfmsr	r3
-	rldicl	r0,r3,(63-MSR_VEC_LG),1
-	rldicl	r3,r0,(MSR_VEC_LG+1),0
-	mtmsrd	r3			/* disable use of VMX now */
-	isync
-	blr
-#endif /* 0 */
-
-/*
- * giveup_altivec(tsk)
- * Disable VMX for the task given as the argument,
- * and save the vector registers in its thread_struct.
- * Enables the VMX for use in the kernel on return.
- */
-_GLOBAL(giveup_altivec)
-	mfmsr	r5
-	oris	r5,r5,MSR_VEC@h
-	mtmsrd	r5			/* enable use of VMX now */
-	isync
-	cmpdi	0,r3,0
-	beqlr-				/* if no previous owner, done */
-	addi	r3,r3,THREAD		/* want THREAD of task */
-	ld	r5,PT_REGS(r3)
-	cmpdi	0,r5,0
-	SAVE_32VRS(0,r4,r3)
-	mfvscr	vr0
-	li	r4,THREAD_VSCR
-	stvx	vr0,r4,r3
-	beq	1f
-	ld	r4,_MSR-STACK_FRAME_OVERHEAD(r5)
-	lis	r3,MSR_VEC@h
-	andc	r4,r4,r3		/* disable FP for previous task */
-	std	r4,_MSR-STACK_FRAME_OVERHEAD(r5)
-1:
-#ifndef CONFIG_SMP
-	li	r5,0
-	ld	r4,last_task_used_altivec@got(r2)
-	std	r5,0(r4)
-#endif /* CONFIG_SMP */
-	blr
-
-#endif /* CONFIG_ALTIVEC */
-
-#ifdef CONFIG_VSX
-/*
- * __giveup_vsx(tsk)
- * Disable VSX for the task given as the argument.
- * Does NOT save vsx registers.
- * Enables the VSX for use in the kernel on return.
- */
-_GLOBAL(__giveup_vsx)
-	mfmsr	r5
-	oris	r5,r5,MSR_VSX@h
-	mtmsrd	r5			/* enable use of VSX now */
-	isync
-
-	cmpdi	0,r3,0
-	beqlr-				/* if no previous owner, done */
-	addi	r3,r3,THREAD		/* want THREAD of task */
-	ld	r5,PT_REGS(r3)
-	cmpdi	0,r5,0
-	beq	1f
-	ld	r4,_MSR-STACK_FRAME_OVERHEAD(r5)
-	lis	r3,MSR_VSX@h
-	andc	r4,r4,r3		/* disable VSX for previous task */
-	std	r4,_MSR-STACK_FRAME_OVERHEAD(r5)
-1:
-#ifndef CONFIG_SMP
-	li	r5,0
-	ld	r4,last_task_used_vsx@got(r2)
-	std	r5,0(r4)
-#endif /* CONFIG_SMP */
-	blr
-
-#endif /* CONFIG_VSX */
 
 /* kexec_wait(phys_cpu)
  *

@@ -9,6 +9,10 @@
  *		 Martin Schwidefsky (schwidefsky@de.ibm.com)
  */
 
+#define KMSG_COMPONENT "cio"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+
+#include <linux/ftrace.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/slab.h>
@@ -25,8 +29,10 @@
 #include <asm/chpid.h>
 #include <asm/airq.h>
 #include <asm/isc.h>
-#include <asm/cpu.h>
+#include <asm/cputime.h>
 #include <asm/fcx.h>
+#include <asm/nmi.h>
+#include <asm/crw.h>
 #include "cio.h"
 #include "css.h"
 #include "chsc.h"
@@ -35,7 +41,6 @@
 #include "blacklist.h"
 #include "cio_debug.h"
 #include "chp.h"
-#include "../s390mach.h"
 
 debug_info_t *cio_debug_msg_id;
 debug_info_t *cio_debug_trace_id;
@@ -104,40 +109,6 @@ cio_get_options (struct subchannel *sch)
        return flags;
 }
 
-/*
- * Use tpi to get a pending interrupt, call the interrupt handler and
- * return a pointer to the subchannel structure.
- */
-static int
-cio_tpi(void)
-{
-	struct tpi_info *tpi_info;
-	struct subchannel *sch;
-	struct irb *irb;
-
-	tpi_info = (struct tpi_info *) __LC_SUBCHANNEL_ID;
-	if (tpi (NULL) != 1)
-		return 0;
-	irb = (struct irb *) __LC_IRB;
-	/* Store interrupt response block to lowcore. */
-	if (tsch (tpi_info->schid, irb) != 0)
-		/* Not status pending or not operational. */
-		return 1;
-	sch = (struct subchannel *)(unsigned long)tpi_info->intparm;
-	if (!sch)
-		return 1;
-	local_bh_disable();
-	irq_enter ();
-	spin_lock(sch->lock);
-	memcpy(&sch->schib.scsw, &irb->scsw, sizeof(union scsw));
-	if (sch->driver && sch->driver->irq)
-		sch->driver->irq(sch);
-	spin_unlock(sch->lock);
-	irq_exit ();
-	_local_bh_enable();
-	return 1;
-}
-
 static int
 cio_start_handle_notoper(struct subchannel *sch, __u8 lpm)
 {
@@ -148,12 +119,14 @@ cio_start_handle_notoper(struct subchannel *sch, __u8 lpm)
 	else
 		sch->lpm = 0;
 
-	stsch (sch->schid, &sch->schib);
-
 	CIO_MSG_EVENT(2, "cio_start: 'not oper' status for "
 		      "subchannel 0.%x.%04x!\n", sch->schid.ssid,
 		      sch->schid.sch_no);
-	sprintf(dbf_text, "no%s", sch->dev.bus_id);
+
+	if (cio_update_schib(sch))
+		return -ENODEV;
+
+	sprintf(dbf_text, "no%s", dev_name(&sch->dev));
 	CIO_TRACE_EVENT(0, dbf_text);
 	CIO_HEX_EVENT(0, &sch->schib, sizeof (struct schib));
 
@@ -166,12 +139,11 @@ cio_start_key (struct subchannel *sch,	/* subchannel structure */
 	       __u8 lpm,		/* logical path mask */
 	       __u8 key)                /* storage key */
 {
-	char dbf_txt[15];
 	int ccode;
 	union orb *orb;
 
-	CIO_TRACE_EVENT(4, "stIO");
-	CIO_TRACE_EVENT(4, sch->dev.bus_id);
+	CIO_TRACE_EVENT(5, "stIO");
+	CIO_TRACE_EVENT(5, dev_name(&sch->dev));
 
 	orb = &to_io_private(sch)->orb;
 	memset(orb, 0, sizeof(union orb));
@@ -196,8 +168,7 @@ cio_start_key (struct subchannel *sch,	/* subchannel structure */
 	ccode = ssch(sch->schid, orb);
 
 	/* process condition code */
-	sprintf(dbf_txt, "ccode:%d", ccode);
-	CIO_TRACE_EVENT(4, dbf_txt);
+	CIO_HEX_EVENT(5, &ccode, sizeof(ccode));
 
 	switch (ccode) {
 	case 0:
@@ -228,16 +199,14 @@ cio_start (struct subchannel *sch, struct ccw1 *cpa, __u8 lpm)
 int
 cio_resume (struct subchannel *sch)
 {
-	char dbf_txt[15];
 	int ccode;
 
-	CIO_TRACE_EVENT (4, "resIO");
-	CIO_TRACE_EVENT (4, sch->dev.bus_id);
+	CIO_TRACE_EVENT(4, "resIO");
+	CIO_TRACE_EVENT(4, dev_name(&sch->dev));
 
 	ccode = rsch (sch->schid);
 
-	sprintf (dbf_txt, "ccode:%d", ccode);
-	CIO_TRACE_EVENT (4, dbf_txt);
+	CIO_HEX_EVENT(4, &ccode, sizeof(ccode));
 
 	switch (ccode) {
 	case 0:
@@ -262,22 +231,20 @@ cio_resume (struct subchannel *sch)
 int
 cio_halt(struct subchannel *sch)
 {
-	char dbf_txt[15];
 	int ccode;
 
 	if (!sch)
 		return -ENODEV;
 
-	CIO_TRACE_EVENT (2, "haltIO");
-	CIO_TRACE_EVENT (2, sch->dev.bus_id);
+	CIO_TRACE_EVENT(2, "haltIO");
+	CIO_TRACE_EVENT(2, dev_name(&sch->dev));
 
 	/*
 	 * Issue "Halt subchannel" and process condition code
 	 */
 	ccode = hsch (sch->schid);
 
-	sprintf (dbf_txt, "ccode:%d", ccode);
-	CIO_TRACE_EVENT (2, dbf_txt);
+	CIO_HEX_EVENT(2, &ccode, sizeof(ccode));
 
 	switch (ccode) {
 	case 0:
@@ -297,22 +264,20 @@ cio_halt(struct subchannel *sch)
 int
 cio_clear(struct subchannel *sch)
 {
-	char dbf_txt[15];
 	int ccode;
 
 	if (!sch)
 		return -ENODEV;
 
-	CIO_TRACE_EVENT (2, "clearIO");
-	CIO_TRACE_EVENT (2, sch->dev.bus_id);
+	CIO_TRACE_EVENT(2, "clearIO");
+	CIO_TRACE_EVENT(2, dev_name(&sch->dev));
 
 	/*
 	 * Issue "Clear subchannel" and process condition code
 	 */
 	ccode = csch (sch->schid);
 
-	sprintf (dbf_txt, "ccode:%d", ccode);
-	CIO_TRACE_EVENT (2, dbf_txt);
+	CIO_HEX_EVENT(2, &ccode, sizeof(ccode));
 
 	switch (ccode) {
 	case 0:
@@ -333,24 +298,23 @@ cio_clear(struct subchannel *sch)
 int
 cio_cancel (struct subchannel *sch)
 {
-	char dbf_txt[15];
 	int ccode;
 
 	if (!sch)
 		return -ENODEV;
 
-	CIO_TRACE_EVENT (2, "cancelIO");
-	CIO_TRACE_EVENT (2, sch->dev.bus_id);
+	CIO_TRACE_EVENT(2, "cancelIO");
+	CIO_TRACE_EVENT(2, dev_name(&sch->dev));
 
 	ccode = xsch (sch->schid);
 
-	sprintf (dbf_txt, "ccode:%d", ccode);
-	CIO_TRACE_EVENT (2, dbf_txt);
+	CIO_HEX_EVENT(2, &ccode, sizeof(ccode));
 
 	switch (ccode) {
 	case 0:		/* success */
 		/* Update information in scsw. */
-		stsch (sch->schid, &sch->schib);
+		if (cio_update_schib(sch))
+			return -ENODEV;
 		return 0;
 	case 1:		/* status pending */
 		return -EBUSY;
@@ -361,35 +325,92 @@ cio_cancel (struct subchannel *sch)
 	}
 }
 
-/*
- * Function: cio_modify
- * Issues a "Modify Subchannel" on the specified subchannel
- */
-int
-cio_modify (struct subchannel *sch)
-{
-	int ccode, retry, ret;
 
-	ret = 0;
+static void cio_apply_config(struct subchannel *sch, struct schib *schib)
+{
+	schib->pmcw.intparm = sch->config.intparm;
+	schib->pmcw.mbi = sch->config.mbi;
+	schib->pmcw.isc = sch->config.isc;
+	schib->pmcw.ena = sch->config.ena;
+	schib->pmcw.mme = sch->config.mme;
+	schib->pmcw.mp = sch->config.mp;
+	schib->pmcw.csense = sch->config.csense;
+	schib->pmcw.mbfc = sch->config.mbfc;
+	if (sch->config.mbfc)
+		schib->mba = sch->config.mba;
+}
+
+static int cio_check_config(struct subchannel *sch, struct schib *schib)
+{
+	return (schib->pmcw.intparm == sch->config.intparm) &&
+		(schib->pmcw.mbi == sch->config.mbi) &&
+		(schib->pmcw.isc == sch->config.isc) &&
+		(schib->pmcw.ena == sch->config.ena) &&
+		(schib->pmcw.mme == sch->config.mme) &&
+		(schib->pmcw.mp == sch->config.mp) &&
+		(schib->pmcw.csense == sch->config.csense) &&
+		(schib->pmcw.mbfc == sch->config.mbfc) &&
+		(!sch->config.mbfc || (schib->mba == sch->config.mba));
+}
+
+/*
+ * cio_commit_config - apply configuration to the subchannel
+ */
+int cio_commit_config(struct subchannel *sch)
+{
+	struct schib schib;
+	int ccode, retry, ret = 0;
+
+	if (stsch(sch->schid, &schib) || !css_sch_is_valid(&schib))
+		return -ENODEV;
+
 	for (retry = 0; retry < 5; retry++) {
-		ccode = msch_err (sch->schid, &sch->schib);
-		if (ccode < 0)	/* -EIO if msch gets a program check. */
+		/* copy desired changes to local schib */
+		cio_apply_config(sch, &schib);
+		ccode = msch_err(sch->schid, &schib);
+		if (ccode < 0) /* -EIO if msch gets a program check. */
 			return ccode;
 		switch (ccode) {
-		case 0: /* successfull */
-			return 0;
-		case 1:	/* status pending */
+		case 0: /* successful */
+			if (stsch(sch->schid, &schib) ||
+			    !css_sch_is_valid(&schib))
+				return -ENODEV;
+			if (cio_check_config(sch, &schib)) {
+				/* commit changes from local schib */
+				memcpy(&sch->schib, &schib, sizeof(schib));
+				return 0;
+			}
+			ret = -EAGAIN;
+			break;
+		case 1: /* status pending */
 			return -EBUSY;
-		case 2:	/* busy */
-			udelay (100);	/* allow for recovery */
+		case 2: /* busy */
+			udelay(100); /* allow for recovery */
 			ret = -EBUSY;
 			break;
-		case 3:	/* not operational */
+		case 3: /* not operational */
 			return -ENODEV;
 		}
 	}
 	return ret;
 }
+
+/**
+ * cio_update_schib - Perform stsch and update schib if subchannel is valid.
+ * @sch: subchannel on which to perform stsch
+ * Return zero on success, -ENODEV otherwise.
+ */
+int cio_update_schib(struct subchannel *sch)
+{
+	struct schib schib;
+
+	if (stsch(sch->schid, &schib) || !css_sch_is_valid(&schib))
+		return -ENODEV;
+
+	memcpy(&sch->schib, &schib, sizeof(schib));
+	return 0;
+}
+EXPORT_SYMBOL_GPL(cio_update_schib);
 
 /**
  * cio_enable_subchannel - enable a subchannel.
@@ -398,46 +419,37 @@ cio_modify (struct subchannel *sch)
  */
 int cio_enable_subchannel(struct subchannel *sch, u32 intparm)
 {
-	char dbf_txt[15];
-	int ccode;
 	int retry;
 	int ret;
 
-	CIO_TRACE_EVENT (2, "ensch");
-	CIO_TRACE_EVENT (2, sch->dev.bus_id);
+	CIO_TRACE_EVENT(2, "ensch");
+	CIO_TRACE_EVENT(2, dev_name(&sch->dev));
 
 	if (sch_is_pseudo_sch(sch))
 		return -EINVAL;
-	ccode = stsch (sch->schid, &sch->schib);
-	if (ccode)
+	if (cio_update_schib(sch))
 		return -ENODEV;
 
-	for (retry = 5, ret = 0; retry > 0; retry--) {
-		sch->schib.pmcw.ena = 1;
-		sch->schib.pmcw.isc = sch->isc;
-		sch->schib.pmcw.intparm = intparm;
-		ret = cio_modify(sch);
-		if (ret == -ENODEV)
-			break;
-		if (ret == -EIO)
+	sch->config.ena = 1;
+	sch->config.isc = sch->isc;
+	sch->config.intparm = intparm;
+
+	for (retry = 0; retry < 3; retry++) {
+		ret = cio_commit_config(sch);
+		if (ret == -EIO) {
 			/*
-			 * Got a program check in cio_modify. Try without
+			 * Got a program check in msch. Try without
 			 * the concurrent sense bit the next time.
 			 */
-			sch->schib.pmcw.csense = 0;
-		if (ret == 0) {
-			stsch (sch->schid, &sch->schib);
-			if (sch->schib.pmcw.ena)
-				break;
-		}
-		if (ret == -EBUSY) {
+			sch->config.csense = 0;
+		} else if (ret == -EBUSY) {
 			struct irb irb;
 			if (tsch(sch->schid, &irb) != 0)
 				break;
-		}
+		} else
+			break;
 	}
-	sprintf (dbf_txt, "ret:%d", ret);
-	CIO_TRACE_EVENT (2, dbf_txt);
+	CIO_HEX_EVENT(2, &ret, sizeof(ret));
 	return ret;
 }
 EXPORT_SYMBOL_GPL(cio_enable_subchannel);
@@ -448,47 +460,29 @@ EXPORT_SYMBOL_GPL(cio_enable_subchannel);
  */
 int cio_disable_subchannel(struct subchannel *sch)
 {
-	char dbf_txt[15];
-	int ccode;
 	int retry;
 	int ret;
 
-	CIO_TRACE_EVENT (2, "dissch");
-	CIO_TRACE_EVENT (2, sch->dev.bus_id);
+	CIO_TRACE_EVENT(2, "dissch");
+	CIO_TRACE_EVENT(2, dev_name(&sch->dev));
 
 	if (sch_is_pseudo_sch(sch))
 		return 0;
-	ccode = stsch (sch->schid, &sch->schib);
-	if (ccode == 3)		/* Not operational. */
+	if (cio_update_schib(sch))
 		return -ENODEV;
 
-	if (scsw_actl(&sch->schib.scsw) != 0)
-		/*
-		 * the disable function must not be called while there are
-		 *  requests pending for completion !
-		 */
-		return -EBUSY;
+	sch->config.ena = 0;
 
-	for (retry = 5, ret = 0; retry > 0; retry--) {
-		sch->schib.pmcw.ena = 0;
-		ret = cio_modify(sch);
-		if (ret == -ENODEV)
-			break;
-		if (ret == -EBUSY)
-			/*
-			 * The subchannel is busy or status pending.
-			 * We'll disable when the next interrupt was delivered
-			 * via the state machine.
-			 */
-			break;
-		if (ret == 0) {
-			stsch (sch->schid, &sch->schib);
-			if (!sch->schib.pmcw.ena)
+	for (retry = 0; retry < 3; retry++) {
+		ret = cio_commit_config(sch);
+		if (ret == -EBUSY) {
+			struct irb irb;
+			if (tsch(sch->schid, &irb) != 0)
 				break;
-		}
+		} else
+			break;
 	}
-	sprintf (dbf_txt, "ret:%d", ret);
-	CIO_TRACE_EVENT (2, dbf_txt);
+	CIO_HEX_EVENT(2, &ret, sizeof(ret));
 	return ret;
 }
 EXPORT_SYMBOL_GPL(cio_disable_subchannel);
@@ -570,9 +564,6 @@ int cio_validate_subchannel(struct subchannel *sch, struct subchannel_id schid)
 			goto out;
 	}
 	mutex_init(&sch->reg_mutex);
-	/* Set a name for the subchannel */
-	snprintf (sch->dev.bus_id, BUS_ID_SIZE, "0.%x.%04x", schid.ssid,
-		  schid.sch_no);
 
 	/*
 	 * The first subchannel that is not-operational (ccode==3)
@@ -617,8 +608,7 @@ out:
  *	    handlers).
  *
  */
-void
-do_IRQ (struct pt_regs *regs)
+void __irq_entry do_IRQ(struct pt_regs *regs)
 {
 	struct tpi_info *tpi_info;
 	struct subchannel *sch;
@@ -626,8 +616,8 @@ do_IRQ (struct pt_regs *regs)
 	struct pt_regs *old_regs;
 
 	old_regs = set_irq_regs(regs);
-	irq_enter();
 	s390_idle_check();
+	irq_enter();
 	if (S390_lowcore.int_clock >= S390_lowcore.clock_comparator)
 		/* Serve timer interrupts first. */
 		clock_comparator_work();
@@ -679,6 +669,43 @@ do_IRQ (struct pt_regs *regs)
 static struct subchannel console_subchannel;
 static struct io_subchannel_private console_priv;
 static int console_subchannel_in_use;
+
+/*
+ * Use tpi to get a pending interrupt, call the interrupt handler and
+ * return a pointer to the subchannel structure.
+ */
+static int cio_tpi(void)
+{
+	struct tpi_info *tpi_info;
+	struct subchannel *sch;
+	struct irb *irb;
+	int irq_context;
+
+	tpi_info = (struct tpi_info *) __LC_SUBCHANNEL_ID;
+	if (tpi(NULL) != 1)
+		return 0;
+	irb = (struct irb *) __LC_IRB;
+	/* Store interrupt response block to lowcore. */
+	if (tsch(tpi_info->schid, irb) != 0)
+		/* Not status pending or not operational. */
+		return 1;
+	sch = (struct subchannel *)(unsigned long)tpi_info->intparm;
+	if (!sch)
+		return 1;
+	irq_context = in_interrupt();
+	if (!irq_context)
+		local_bh_disable();
+	irq_enter();
+	spin_lock(sch->lock);
+	memcpy(&sch->schib.scsw, &irb->scsw, sizeof(union scsw));
+	if (sch->driver && sch->driver->irq)
+		sch->driver->irq(sch);
+	spin_unlock(sch->lock);
+	irq_exit();
+	if (!irq_context)
+		_local_bh_enable();
+	return 1;
+}
 
 void *cio_get_console_priv(void)
 {
@@ -773,7 +800,7 @@ cio_probe_console(void)
 	sch_no = cio_get_console_sch_no();
 	if (sch_no == -1) {
 		console_subchannel_in_use = 0;
-		printk(KERN_WARNING "cio: No ccw console found!\n");
+		pr_warning("No CCW console was found\n");
 		return ERR_PTR(-ENODEV);
 	}
 	memset(&console_subchannel, 0, sizeof(struct subchannel));
@@ -789,10 +816,9 @@ cio_probe_console(void)
 	 * enable console I/O-interrupt subclass
 	 */
 	isc_register(CONSOLE_ISC);
-	console_subchannel.schib.pmcw.isc = CONSOLE_ISC;
-	console_subchannel.schib.pmcw.intparm =
-		(u32)(addr_t)&console_subchannel;
-	ret = cio_modify(&console_subchannel);
+	console_subchannel.config.isc = CONSOLE_ISC;
+	console_subchannel.config.intparm = (u32)(addr_t)&console_subchannel;
+	ret = cio_commit_config(&console_subchannel);
 	if (ret) {
 		isc_unregister(CONSOLE_ISC);
 		console_subchannel_in_use = 0;
@@ -804,8 +830,8 @@ cio_probe_console(void)
 void
 cio_release_console(void)
 {
-	console_subchannel.schib.pmcw.intparm = 0;
-	cio_modify(&console_subchannel);
+	console_subchannel.config.intparm = 0;
+	cio_commit_config(&console_subchannel);
 	isc_unregister(CONSOLE_ISC);
 	console_subchannel_in_use = 0;
 }
@@ -839,24 +865,12 @@ __disable_subchannel_easy(struct subchannel_id schid, struct schib *schib)
 		cc = msch(schid, schib);
 		if (cc)
 			return (cc==3?-ENODEV:-EBUSY);
-		stsch(schid, schib);
+		if (stsch(schid, schib) || !css_sch_is_valid(schib))
+			return -ENODEV;
 		if (!schib->pmcw.ena)
 			return 0;
 	}
 	return -EBUSY; /* uhm... */
-}
-
-/* we can't use the normal udelay here, since it enables external interrupts */
-
-static void udelay_reset(unsigned long usecs)
-{
-	uint64_t start_cc, end_cc;
-
-	asm volatile ("STCK %0" : "=m" (start_cc));
-	do {
-		cpu_relax();
-		asm volatile ("STCK %0" : "=m" (end_cc));
-	} while (((end_cc - start_cc)/4096) < usecs);
 }
 
 static int
@@ -874,7 +888,7 @@ __clear_io_subchannel_easy(struct subchannel_id schid)
 			if (schid_equal(&ti.schid, &schid))
 				return 0;
 		}
-		udelay_reset(100);
+		udelay_simple(100);
 	}
 	return -EBUSY;
 }
@@ -882,7 +896,7 @@ __clear_io_subchannel_easy(struct subchannel_id schid)
 static void __clear_chsc_subchannel_easy(void)
 {
 	/* It seems we can only wait for a bit here :/ */
-	udelay_reset(100);
+	udelay_simple(100);
 }
 
 static int pgm_check_occured;
@@ -892,7 +906,7 @@ static void cio_reset_pgm_check_handler(void)
 	pgm_check_occured = 1;
 }
 
-static int stsch_reset(struct subchannel_id schid, volatile struct schib *addr)
+static int stsch_reset(struct subchannel_id schid, struct schib *addr)
 {
 	int rc;
 

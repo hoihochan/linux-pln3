@@ -12,6 +12,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/smp_lock.h>
 #include <linux/init.h>
 #include <linux/list.h>
 #include <linux/fs.h>
@@ -22,6 +23,7 @@
 #include <linux/mtd/super.h>
 #include <linux/ctype.h>
 #include <linux/namei.h>
+#include <linux/exportfs.h>
 #include "compr.h"
 #include "nodelist.h"
 
@@ -52,15 +54,80 @@ static void jffs2_i_init_once(void *foo)
 	inode_init_once(&f->vfs_inode);
 }
 
+static void jffs2_write_super(struct super_block *sb)
+{
+	struct jffs2_sb_info *c = JFFS2_SB_INFO(sb);
+
+	lock_super(sb);
+	sb->s_dirt = 0;
+
+	if (!(sb->s_flags & MS_RDONLY)) {
+		D1(printk(KERN_DEBUG "jffs2_write_super()\n"));
+		jffs2_garbage_collect_trigger(c);
+		jffs2_erase_pending_blocks(c, 0);
+		jffs2_flush_wbuf_gc(c, 0);
+	}
+
+	unlock_super(sb);
+}
+
 static int jffs2_sync_fs(struct super_block *sb, int wait)
 {
 	struct jffs2_sb_info *c = JFFS2_SB_INFO(sb);
+
+	jffs2_write_super(sb);
 
 	mutex_lock(&c->alloc_sem);
 	jffs2_flush_wbuf_pad(c);
 	mutex_unlock(&c->alloc_sem);
 	return 0;
 }
+
+static struct inode *jffs2_nfs_get_inode(struct super_block *sb, uint64_t ino,
+					 uint32_t generation)
+{
+	/* We don't care about i_generation. We'll destroy the flash
+	   before we start re-using inode numbers anyway. And even
+	   if that wasn't true, we'd have other problems...*/
+	return jffs2_iget(sb, ino);
+}
+
+static struct dentry *jffs2_fh_to_dentry(struct super_block *sb, struct fid *fid,
+					 int fh_len, int fh_type)
+{
+        return generic_fh_to_dentry(sb, fid, fh_len, fh_type,
+                                    jffs2_nfs_get_inode);
+}
+
+static struct dentry *jffs2_fh_to_parent(struct super_block *sb, struct fid *fid,
+					 int fh_len, int fh_type)
+{
+        return generic_fh_to_parent(sb, fid, fh_len, fh_type,
+                                    jffs2_nfs_get_inode);
+}
+
+static struct dentry *jffs2_get_parent(struct dentry *child)
+{
+	struct jffs2_inode_info *f;
+	uint32_t pino;
+
+	BUG_ON(!S_ISDIR(child->d_inode->i_mode));
+
+	f = JFFS2_INODE_INFO(child->d_inode);
+
+	pino = f->inocache->pino_nlink;
+
+	JFFS2_DEBUG("Parent of directory ino #%u is #%u\n",
+		    f->inocache->ino, pino);
+
+	return d_obtain_alias(jffs2_iget(child->d_inode->i_sb, pino));
+}
+
+static const struct export_operations jffs2_export_ops = {
+	.get_parent = jffs2_get_parent,
+	.fh_to_dentry = jffs2_fh_to_dentry,
+	.fh_to_parent = jffs2_fh_to_parent,
+};
 
 static const struct super_operations jffs2_super_operations =
 {
@@ -104,6 +171,7 @@ static int jffs2_fill_super(struct super_block *sb, void *data, int silent)
 	spin_lock_init(&c->inocache_lock);
 
 	sb->s_op = &jffs2_super_operations;
+	sb->s_export_op = &jffs2_export_ops;
 	sb->s_flags = sb->s_flags | MS_NOATIME;
 	sb->s_xattr = jffs2_xattr_handlers;
 #ifdef CONFIG_JFFS2_FS_POSIX_ACL
@@ -126,6 +194,11 @@ static void jffs2_put_super (struct super_block *sb)
 
 	D2(printk(KERN_DEBUG "jffs2: jffs2_put_super()\n"));
 
+	lock_kernel();
+
+	if (sb->s_dirt)
+		jffs2_write_super(sb);
+
 	mutex_lock(&c->alloc_sem);
 	jffs2_flush_wbuf_pad(c);
 	mutex_unlock(&c->alloc_sem);
@@ -143,6 +216,8 @@ static void jffs2_put_super (struct super_block *sb)
 	jffs2_clear_xattr_subsystem(c);
 	if (c->mtd->sync)
 		c->mtd->sync(c->mtd);
+
+	unlock_kernel();
 
 	D1(printk(KERN_DEBUG "jffs2_put_super returning\n"));
 }

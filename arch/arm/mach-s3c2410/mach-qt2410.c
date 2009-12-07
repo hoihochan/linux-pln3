@@ -27,12 +27,13 @@
 #include <linux/list.h>
 #include <linux/timer.h>
 #include <linux/init.h>
+#include <linux/gpio.h>
 #include <linux/sysdev.h>
 #include <linux/platform_device.h>
 #include <linux/serial_core.h>
 #include <linux/spi/spi.h>
 #include <linux/spi/spi_bitbang.h>
-
+#include <linux/io.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/nand.h>
 #include <linux/mtd/nand_ecc.h>
@@ -43,23 +44,23 @@
 #include <asm/mach/irq.h>
 
 #include <mach/hardware.h>
-#include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/mach-types.h>
 
 #include <mach/regs-gpio.h>
 #include <mach/leds-gpio.h>
-#include <asm/plat-s3c/regs-serial.h>
+#include <plat/regs-serial.h>
 #include <mach/fb.h>
-#include <asm/plat-s3c/nand.h>
-#include <asm/plat-s3c24xx/udc.h>
+#include <plat/nand.h>
+#include <plat/udc.h>
 #include <mach/spi.h>
 #include <mach/spi-gpio.h>
+#include <plat/iic.h>
 
-#include <asm/plat-s3c24xx/common-smdk.h>
-#include <asm/plat-s3c24xx/devs.h>
-#include <asm/plat-s3c24xx/cpu.h>
-#include <asm/plat-s3c24xx/pm.h>
+#include <plat/common-smdk.h>
+#include <plat/devs.h>
+#include <plat/cpu.h>
+#include <plat/pm.h>
 
 static struct map_desc qt2410_iodesc[] __initdata = {
 	{ 0xe0000000, __phys_to_pfn(S3C2410_CS3+0x01000000), SZ_1M, MT_DEVICE }
@@ -198,7 +199,7 @@ static struct platform_device qt2410_cs89x0 = {
 /* LED */
 
 static struct s3c24xx_led_platdata qt2410_pdata_led = {
-	.gpio		= S3C2410_GPB0,
+	.gpio		= S3C2410_GPB(0),
 	.flags		= S3C24XX_LEDF_ACTLOW | S3C24XX_LEDF_TRISTATE,
 	.name		= "led",
 	.def_trigger	= "timer",
@@ -218,18 +219,18 @@ static void spi_gpio_cs(struct s3c2410_spigpio_info *spi, int cs)
 {
 	switch (cs) {
 	case BITBANG_CS_ACTIVE:
-		s3c2410_gpio_setpin(S3C2410_GPB5, 0);
+		s3c2410_gpio_setpin(S3C2410_GPB(5), 0);
 		break;
 	case BITBANG_CS_INACTIVE:
-		s3c2410_gpio_setpin(S3C2410_GPB5, 1);
+		s3c2410_gpio_setpin(S3C2410_GPB(5), 1);
 		break;
 	}
 }
 
 static struct s3c2410_spigpio_info spi_gpio_cfg = {
-	.pin_clk	= S3C2410_GPG7,
-	.pin_mosi	= S3C2410_GPG6,
-	.pin_miso	= S3C2410_GPG5,
+	.pin_clk	= S3C2410_GPG(7),
+	.pin_mosi	= S3C2410_GPG(6),
+	.pin_miso	= S3C2410_GPG(5),
 	.chip_select	= &spi_gpio_cs,
 };
 
@@ -248,7 +249,7 @@ static struct platform_device *qt2410_devices[] __initdata = {
 	&s3c_device_usb,
 	&s3c_device_lcd,
 	&s3c_device_wdt,
-	&s3c_device_i2c,
+	&s3c_device_i2c0,
 	&s3c_device_iis,
 	&s3c_device_sdi,
 	&s3c_device_usbgadget,
@@ -346,15 +347,16 @@ static void __init qt2410_machine_init(void)
 	}
 	s3c24xx_fb_set_platdata(&qt2410_fb_info);
 
-	s3c2410_gpio_cfgpin(S3C2410_GPB0, S3C2410_GPIO_OUTPUT);
-	s3c2410_gpio_setpin(S3C2410_GPB0, 1);
+	s3c2410_gpio_cfgpin(S3C2410_GPB(0), S3C2410_GPIO_OUTPUT);
+	s3c2410_gpio_setpin(S3C2410_GPB(0), 1);
 
 	s3c24xx_udc_set_platdata(&qt2410_udc_cfg);
+	s3c_i2c0_set_platdata(NULL);
 
-	s3c2410_gpio_cfgpin(S3C2410_GPB5, S3C2410_GPIO_OUTPUT);
+	s3c2410_gpio_cfgpin(S3C2410_GPB(5), S3C2410_GPIO_OUTPUT);
 
 	platform_add_devices(qt2410_devices, ARRAY_SIZE(qt2410_devices));
-	s3c2410_pm_init();
+	s3c_pm_init();
 }
 
 MACHINE_START(QT2410, "QT2410")

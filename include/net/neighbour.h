@@ -24,6 +24,7 @@
 
 #include <linux/err.h>
 #include <linux/sysctl.h>
+#include <linux/workqueue.h>
 #include <net/rtnetlink.h>
 
 /*
@@ -117,7 +118,7 @@ struct neighbour
 	int			(*output)(struct sk_buff *skb);
 	struct sk_buff_head	arp_queue;
 	struct timer_list	timer;
-	struct neigh_ops	*ops;
+	const struct neigh_ops	*ops;
 	u8			primary_key[0];
 };
 
@@ -167,7 +168,7 @@ struct neigh_table
 	int			gc_thresh2;
 	int			gc_thresh3;
 	unsigned long		last_flush;
-	struct timer_list 	gc_timer;
+	struct delayed_work	gc_work;
 	struct timer_list 	proxy_timer;
 	struct sk_buff_head	proxy_queue;
 	atomic_t		entries;
@@ -178,11 +179,7 @@ struct neigh_table
 	struct neighbour	**hash_buckets;
 	unsigned int		hash_mask;
 	__u32			hash_rnd;
-	unsigned int		hash_chain_gc;
 	struct pneigh_entry	**phash_buckets;
-#ifdef CONFIG_PROC_FS
-	struct proc_dir_entry	*pde;
-#endif
 };
 
 /* flags for neigh_update() */
@@ -223,11 +220,7 @@ extern void			neigh_parms_release(struct neigh_table *tbl, struct neigh_parms *p
 static inline
 struct net			*neigh_parms_net(const struct neigh_parms *parms)
 {
-#ifdef CONFIG_NET_NS
-	return parms->net;
-#else
-	return &init_net;
-#endif
+	return read_pnet(&parms->net);
 }
 
 extern unsigned long		neigh_rand_reach_time(unsigned long base);
@@ -244,11 +237,7 @@ extern int			pneigh_delete(struct neigh_table *tbl, struct net *net, const void 
 static inline
 struct net			*pneigh_net(const struct pneigh_entry *pneigh)
 {
-#ifdef CONFIG_NET_NS
-	return pneigh->net;
-#else
-	return &init_net;
-#endif
+	return read_pnet(&pneigh->net);
 }
 
 extern void neigh_app_ns(struct neighbour *n);

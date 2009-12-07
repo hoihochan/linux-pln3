@@ -88,11 +88,9 @@ static inline int isowbuf_startwrite(struct isowbuf_t *iwb)
 			__func__);
 		return 0;
 	}
-#ifdef CONFIG_GIGASET_DEBUG
 	gig_dbg(DEBUG_ISO,
 		"%s: acquired iso write semaphore, data[write]=%02x, nbits=%d",
 		__func__, iwb->data[iwb->write], iwb->wbits);
-#endif
 	return 1;
 }
 
@@ -173,14 +171,8 @@ int gigaset_isowbuf_getbytes(struct isowbuf_t *iwb, int size)
 		__func__, read, write, limit);
 #ifdef CONFIG_GIGASET_DEBUG
 	if (unlikely(size < 0 || size > BAS_OUTBUFPAD)) {
-		err("invalid size %d", size);
+		pr_err("invalid size %d\n", size);
 		return -EINVAL;
-	}
-	src = iwb->read;
-	if (unlikely(limit > BAS_OUTBUFSIZE + BAS_OUTBUFPAD ||
-		     (read < src && limit >= src))) {
-		err("isoc write buffer frame reservation violated");
-		return -EFAULT;
 	}
 #endif
 
@@ -248,6 +240,10 @@ static inline void dump_bytes(enum debuglevel level, const char *tag,
 	unsigned char c;
 	static char dbgline[3 * 32 + 1];
 	int i = 0;
+
+	if (!(gigaset_debuglevel & level))
+		return;
+
 	while (count-- > 0) {
 		if (i > sizeof(dbgline) - 4) {
 			dbgline[i] = '\0';
@@ -433,7 +429,7 @@ static inline int hdlc_buildframe(struct isowbuf_t *iwb,
 		return -EAGAIN;
 	}
 
-	dump_bytes(DEBUG_STREAM, "snd data", in, count);
+	dump_bytes(DEBUG_STREAM_DUMP, "snd data", in, count);
 
 	/* bitstuff and checksum input data */
 	fcs = PPP_INITFCS;
@@ -452,7 +448,6 @@ static inline int hdlc_buildframe(struct isowbuf_t *iwb,
 	/* put closing flag and repeat byte for flag idle */
 	isowbuf_putflag(iwb);
 	end = isowbuf_donewrite(iwb);
-	dump_bytes(DEBUG_STREAM_DUMP, "isowbuf", iwb->data, end + 1);
 	return end;
 }
 
@@ -486,6 +481,8 @@ static inline int trans_buildframe(struct isowbuf_t *iwb,
 	}
 
 	gig_dbg(DEBUG_STREAM, "put %d bytes", count);
+	dump_bytes(DEBUG_STREAM_DUMP, "snd data", in, count);
+
 	write = iwb->write;
 	do {
 		c = bitrev8(*in++);
@@ -587,7 +584,7 @@ static inline void hdlc_done(struct bc_state *bcs)
 		procskb->tail -= 2;
 		gig_dbg(DEBUG_ISO, "%s: good frame (%d octets)",
 			__func__, procskb->len);
-		dump_bytes(DEBUG_STREAM,
+		dump_bytes(DEBUG_STREAM_DUMP,
 			   "rcv data", procskb->data, procskb->len);
 		bcs->hw.bas->goodbytes += procskb->len;
 		gigaset_rcv_skb(procskb, bcs->cs, bcs);
@@ -882,6 +879,8 @@ static inline void trans_receive(unsigned char *src, unsigned count,
 			dobytes--;
 		}
 		if (dobytes == 0) {
+			dump_bytes(DEBUG_STREAM_DUMP,
+				   "rcv data", skb->data, skb->len);
 			gigaset_rcv_skb(skb, bcs->cs, bcs);
 			bcs->skb = skb = dev_alloc_skb(SBUFSIZE + HW_HDR_LEN);
 			if (!skb) {
@@ -977,16 +976,17 @@ void gigaset_isoc_input(struct inbuf_t *inbuf)
 
 /* == data output ========================================================== */
 
-/* gigaset_send_skb
- * called by common.c to queue an skb for sending
- * and start transmission if necessary
- * parameters:
- *	B Channel control structure
- *	skb
- * return value:
- *	number of bytes accepted for sending
- *	(skb->len if ok, 0 if out of buffer space)
- *	or error code (< 0, eg. -EINVAL)
+/**
+ * gigaset_isoc_send_skb() - queue an skb for sending
+ * @bcs:	B channel descriptor structure.
+ * @skb:	data to send.
+ *
+ * Called by i4l.c to queue an skb for sending, and start transmission if
+ * necessary.
+ *
+ * Return value:
+ *	number of bytes accepted for sending (skb->len) if ok,
+ *	error code < 0 (eg. -ENODEV) on error
  */
 int gigaset_isoc_send_skb(struct bc_state *bcs, struct sk_buff *skb)
 {

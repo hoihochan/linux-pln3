@@ -26,11 +26,11 @@
 #include <asm/irq.h>
 #include <asm/dma.h>
 #include <asm/io.h>
-#include <asm/arch/svinto.h>
+#include <arch/svinto.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/sync_serial.h>
-#include <asm/arch/io_interface_mux.h>
+#include <arch/io_interface_mux.h>
 
 /* The receiver is a bit tricky beacuse of the continuous stream of data.*/
 /*                                                                       */
@@ -244,7 +244,7 @@ static unsigned sync_serial_prescale_shadow;
 
 #define NUMBER_OF_PORTS 2
 
-static struct file_operations sync_serial_fops = {
+static const struct file_operations sync_serial_fops = {
 	.owner   = THIS_MODULE,
 	.write   = sync_serial_write,
 	.read    = sync_serial_read,

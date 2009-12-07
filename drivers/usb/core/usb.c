@@ -34,6 +34,7 @@
 #include <linux/usb.h>
 #include <linux/mutex.h>
 #include <linux/workqueue.h>
+#include <linux/debugfs.h>
 
 #include <asm/io.h>
 #include <linux/scatterlist.h>
@@ -139,8 +140,7 @@ static int __find_interface(struct device *dev, void *data)
 	struct find_interface_arg *arg = data;
 	struct usb_interface *intf;
 
-	/* can't look at usb devices, only interfaces */
-	if (is_usb_device(dev))
+	if (!is_usb_interface(dev))
 		return 0;
 
 	intf = to_usb_interface(dev);
@@ -184,11 +184,16 @@ EXPORT_SYMBOL_GPL(usb_find_interface);
 static void usb_release_dev(struct device *dev)
 {
 	struct usb_device *udev;
+	struct usb_hcd *hcd;
 
 	udev = to_usb_device(dev);
+	hcd = bus_to_hcd(udev->bus);
 
 	usb_destroy_configuration(udev);
-	usb_put_hcd(bus_to_hcd(udev->bus));
+	/* Root hubs aren't real devices, so don't free HCD resources */
+	if (hcd->driver->free_dev && udev->parent)
+		hcd->driver->free_dev(hcd, udev);
+	usb_put_hcd(hcd);
 	kfree(udev->product);
 	kfree(udev->manufacturer);
 	kfree(udev->serial);
@@ -253,7 +258,7 @@ static int usb_dev_prepare(struct device *dev)
 static void usb_dev_complete(struct device *dev)
 {
 	/* Currently used only for rebinding interfaces */
-	usb_resume(dev);	/* Implement eventually? */
+	usb_resume(dev, PMSG_RESUME);	/* Message event is meaningless */
 }
 
 static int usb_dev_suspend(struct device *dev)
@@ -263,7 +268,7 @@ static int usb_dev_suspend(struct device *dev)
 
 static int usb_dev_resume(struct device *dev)
 {
-	return usb_resume(dev);
+	return usb_resume(dev, PMSG_RESUME);
 }
 
 static int usb_dev_freeze(struct device *dev)
@@ -273,7 +278,7 @@ static int usb_dev_freeze(struct device *dev)
 
 static int usb_dev_thaw(struct device *dev)
 {
-	return usb_resume(dev);
+	return usb_resume(dev, PMSG_THAW);
 }
 
 static int usb_dev_poweroff(struct device *dev)
@@ -283,10 +288,10 @@ static int usb_dev_poweroff(struct device *dev)
 
 static int usb_dev_restore(struct device *dev)
 {
-	return usb_resume(dev);
+	return usb_resume(dev, PMSG_RESTORE);
 }
 
-static struct pm_ops usb_device_pm_ops = {
+static struct dev_pm_ops usb_device_pm_ops = {
 	.prepare =	usb_dev_prepare,
 	.complete =	usb_dev_complete,
 	.suspend =	usb_dev_suspend,
@@ -301,14 +306,25 @@ static struct pm_ops usb_device_pm_ops = {
 
 #define ksuspend_usb_init()	0
 #define ksuspend_usb_cleanup()	do {} while (0)
-#define usb_device_pm_ops	(*(struct pm_ops *)0)
+#define usb_device_pm_ops	(*(struct dev_pm_ops *)0)
 
 #endif	/* CONFIG_PM */
+
+
+static char *usb_devnode(struct device *dev, mode_t *mode)
+{
+	struct usb_device *usb_dev;
+
+	usb_dev = to_usb_device(dev);
+	return kasprintf(GFP_KERNEL, "bus/usb/%03d/%03d",
+			 usb_dev->bus->busnum, usb_dev->devnum);
+}
 
 struct device_type usb_device_type = {
 	.name =		"usb_device",
 	.release =	usb_release_dev,
 	.uevent =	usb_dev_uevent,
+	.devnode = 	usb_devnode,
 	.pm =		&usb_device_pm_ops,
 };
 
@@ -348,6 +364,13 @@ struct usb_device *usb_alloc_dev(struct usb_device *parent,
 		kfree(dev);
 		return NULL;
 	}
+	/* Root hubs aren't true devices, so don't allocate HCD resources */
+	if (usb_hcd->driver->alloc_dev && parent &&
+		!usb_hcd->driver->alloc_dev(usb_hcd, dev)) {
+		usb_put_hcd(bus_to_hcd(bus));
+		kfree(dev);
+		return NULL;
+	}
 
 	device_initialize(&dev->dev);
 	dev->dev.bus = &usb_bus_type;
@@ -362,7 +385,7 @@ struct usb_device *usb_alloc_dev(struct usb_device *parent,
 	dev->ep0.desc.bLength = USB_DT_ENDPOINT_SIZE;
 	dev->ep0.desc.bDescriptorType = USB_DT_ENDPOINT;
 	/* ep0 maxpacket comes later, from device descriptor */
-	usb_enable_endpoint(dev, &dev->ep0);
+	usb_enable_endpoint(dev, &dev->ep0, false);
 	dev->can_submit = 1;
 
 	/* Save readable and stable topology id, distinguishing devices
@@ -375,18 +398,29 @@ struct usb_device *usb_alloc_dev(struct usb_device *parent,
 	 */
 	if (unlikely(!parent)) {
 		dev->devpath[0] = '0';
+		dev->route = 0;
 
 		dev->dev.parent = bus->controller;
 		dev_set_name(&dev->dev, "usb%d", bus->busnum);
 		root_hub = 1;
 	} else {
 		/* match any labeling on the hubs; it's one-based */
-		if (parent->devpath[0] == '0')
+		if (parent->devpath[0] == '0') {
 			snprintf(dev->devpath, sizeof dev->devpath,
 				"%d", port1);
-		else
+			/* Root ports are not counted in route string */
+			dev->route = 0;
+		} else {
 			snprintf(dev->devpath, sizeof dev->devpath,
 				"%s.%d", parent->devpath, port1);
+			/* Route string assumes hubs have less than 16 ports */
+			if (port1 < 15)
+				dev->route = parent->route +
+					(port1 << ((parent->level - 1)*4));
+			else
+				dev->route = parent->route +
+					(15 << ((parent->level - 1)*4));
+		}
 
 		dev->dev.parent = &parent->dev;
 		dev_set_name(&dev->dev, "%d-%s", bus->busnum, dev->devpath);
@@ -402,6 +436,7 @@ struct usb_device *usb_alloc_dev(struct usb_device *parent,
 #ifdef	CONFIG_PM
 	mutex_init(&dev->pm_mutex);
 	INIT_DELAYED_WORK(&dev->autosuspend, usb_autosuspend_work);
+	INIT_WORK(&dev->autoresume, usb_autoresume_work);
 	dev->autosuspend_delay = usb_autosuspend_delay * HZ;
 	dev->connect_time = jiffies;
 	dev->active_duration = -jiffies;
@@ -513,10 +548,7 @@ EXPORT_SYMBOL_GPL(usb_put_intf);
  * disconnect; in some drivers (such as usb-storage) the disconnect()
  * or suspend() method will block waiting for a device reset to complete.
  *
- * Returns a negative error code for failure, otherwise 1 or 0 to indicate
- * that the device will or will not have to be unlocked.  (0 can be
- * returned when an interface is given and is BINDING, because in that
- * case the driver already owns the device lock.)
+ * Returns a negative error code for failure, otherwise 0.
  */
 int usb_lock_device_for_reset(struct usb_device *udev,
 			      const struct usb_interface *iface)
@@ -527,16 +559,9 @@ int usb_lock_device_for_reset(struct usb_device *udev,
 		return -ENODEV;
 	if (udev->state == USB_STATE_SUSPENDED)
 		return -EHOSTUNREACH;
-	if (iface) {
-		switch (iface->condition) {
-		case USB_INTERFACE_BINDING:
-			return 0;
-		case USB_INTERFACE_BOUND:
-			break;
-		default:
-			return -EINTR;
-		}
-	}
+	if (iface && (iface->condition == USB_INTERFACE_UNBINDING ||
+			iface->condition == USB_INTERFACE_UNBOUND))
+		return -EINTR;
 
 	while (usb_trylock_device(udev) != 0) {
 
@@ -550,10 +575,11 @@ int usb_lock_device_for_reset(struct usb_device *udev,
 			return -ENODEV;
 		if (udev->state == USB_STATE_SUSPENDED)
 			return -EHOSTUNREACH;
-		if (iface && iface->condition != USB_INTERFACE_BOUND)
+		if (iface && (iface->condition == USB_INTERFACE_UNBINDING ||
+				iface->condition == USB_INTERFACE_UNBOUND))
 			return -EINTR;
 	}
-	return 1;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(usb_lock_device_for_reset);
 
@@ -807,12 +833,12 @@ void usb_buffer_dmasync(struct urb *urb)
 		return;
 
 	if (controller->dma_mask) {
-		dma_sync_single(controller,
+		dma_sync_single_for_cpu(controller,
 			urb->transfer_dma, urb->transfer_buffer_length,
 			usb_pipein(urb->pipe)
 				? DMA_FROM_DEVICE : DMA_TO_DEVICE);
 		if (usb_pipecontrol(urb->pipe))
-			dma_sync_single(controller,
+			dma_sync_single_for_cpu(controller,
 					urb->setup_dma,
 					sizeof(struct usb_ctrlrequest),
 					DMA_TO_DEVICE);
@@ -893,11 +919,11 @@ int usb_buffer_map_sg(const struct usb_device *dev, int is_in,
 			|| !(bus = dev->bus)
 			|| !(controller = bus->controller)
 			|| !controller->dma_mask)
-		return -1;
+		return -EINVAL;
 
 	/* FIXME generic api broken like pci, can't report errors */
 	return dma_map_sg(controller, sg, nents,
-			is_in ? DMA_FROM_DEVICE : DMA_TO_DEVICE);
+			is_in ? DMA_FROM_DEVICE : DMA_TO_DEVICE) ? : -ENOMEM;
 }
 EXPORT_SYMBOL_GPL(usb_buffer_map_sg);
 
@@ -930,8 +956,8 @@ void usb_buffer_dmasync_sg(const struct usb_device *dev, int is_in,
 			|| !controller->dma_mask)
 		return;
 
-	dma_sync_sg(controller, sg, n_hw_ents,
-			is_in ? DMA_FROM_DEVICE : DMA_TO_DEVICE);
+	dma_sync_sg_for_cpu(controller, sg, n_hw_ents,
+			    is_in ? DMA_FROM_DEVICE : DMA_TO_DEVICE);
 }
 EXPORT_SYMBOL_GPL(usb_buffer_dmasync_sg);
 #endif
@@ -962,8 +988,12 @@ void usb_buffer_unmap_sg(const struct usb_device *dev, int is_in,
 }
 EXPORT_SYMBOL_GPL(usb_buffer_unmap_sg);
 
-/* format to disable USB on kernel command line is: nousb */
-__module_param_call("", nousb, param_set_bool, param_get_bool, &nousb, 0444);
+/* To disable USB, kernel command line is 'nousb' not 'usbcore.nousb' */
+#ifdef MODULE
+module_param(nousb, bool, 0444);
+#else
+core_param(nousb, nousb, bool, 0444);
+#endif
 
 /*
  * for external read access to <nousb>
@@ -973,6 +1003,66 @@ int usb_disabled(void)
 	return nousb;
 }
 EXPORT_SYMBOL_GPL(usb_disabled);
+
+/*
+ * Notifications of device and interface registration
+ */
+static int usb_bus_notify(struct notifier_block *nb, unsigned long action,
+		void *data)
+{
+	struct device *dev = data;
+
+	switch (action) {
+	case BUS_NOTIFY_ADD_DEVICE:
+		if (dev->type == &usb_device_type)
+			(void) usb_create_sysfs_dev_files(to_usb_device(dev));
+		else if (dev->type == &usb_if_device_type)
+			(void) usb_create_sysfs_intf_files(
+					to_usb_interface(dev));
+		break;
+
+	case BUS_NOTIFY_DEL_DEVICE:
+		if (dev->type == &usb_device_type)
+			usb_remove_sysfs_dev_files(to_usb_device(dev));
+		else if (dev->type == &usb_if_device_type)
+			usb_remove_sysfs_intf_files(to_usb_interface(dev));
+		break;
+	}
+	return 0;
+}
+
+static struct notifier_block usb_bus_nb = {
+	.notifier_call = usb_bus_notify,
+};
+
+struct dentry *usb_debug_root;
+EXPORT_SYMBOL_GPL(usb_debug_root);
+
+struct dentry *usb_debug_devices;
+
+static int usb_debugfs_init(void)
+{
+	usb_debug_root = debugfs_create_dir("usb", NULL);
+	if (!usb_debug_root)
+		return -ENOENT;
+
+	usb_debug_devices = debugfs_create_file("devices", 0444,
+						usb_debug_root, NULL,
+						&usbfs_devices_fops);
+	if (!usb_debug_devices) {
+		debugfs_remove(usb_debug_root);
+		usb_debug_root = NULL;
+		return -ENOENT;
+	}
+
+	return 0;
+}
+
+static void usb_debugfs_cleanup(void)
+{
+	debugfs_remove(usb_debug_devices);
+	debugfs_remove(usb_debug_root);
+}
 
 /*
  * Init
@@ -985,15 +1075,19 @@ static int __init usb_init(void)
 		return 0;
 	}
 
+	retval = usb_debugfs_init();
+	if (retval)
+		goto out;
+
 	retval = ksuspend_usb_init();
 	if (retval)
 		goto out;
 	retval = bus_register(&usb_bus_type);
 	if (retval)
 		goto bus_register_failed;
-	retval = usb_host_init();
+	retval = bus_register_notifier(&usb_bus_type, &usb_bus_nb);
 	if (retval)
-		goto host_init_failed;
+		goto bus_notifier_failed;
 	retval = usb_major_init();
 	if (retval)
 		goto major_init_failed;
@@ -1023,8 +1117,8 @@ usb_devio_init_failed:
 driver_register_failed:
 	usb_major_cleanup();
 major_init_failed:
-	usb_host_cleanup();
-host_init_failed:
+	bus_unregister_notifier(&usb_bus_type, &usb_bus_nb);
+bus_notifier_failed:
 	bus_unregister(&usb_bus_type);
 bus_register_failed:
 	ksuspend_usb_cleanup();
@@ -1047,9 +1141,10 @@ static void __exit usb_exit(void)
 	usb_deregister(&usbfs_driver);
 	usb_devio_cleanup();
 	usb_hub_cleanup();
-	usb_host_cleanup();
+	bus_unregister_notifier(&usb_bus_type, &usb_bus_nb);
 	bus_unregister(&usb_bus_type);
 	ksuspend_usb_cleanup();
+	usb_debugfs_cleanup();
 }
 
 subsys_initcall(usb_init);

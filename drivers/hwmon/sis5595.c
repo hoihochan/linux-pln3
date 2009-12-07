@@ -62,7 +62,8 @@
 #include <linux/jiffies.h>
 #include <linux/mutex.h>
 #include <linux/sysfs.h>
-#include <asm/io.h>
+#include <linux/acpi.h>
+#include <linux/io.h>
 
 
 /* If force_addr is set to anything different from 0, we forcibly enable
@@ -726,6 +727,10 @@ static int __devinit sis5595_device_add(unsigned short address)
 		.flags	= IORESOURCE_IO,
 	};
 	int err;
+
+	err = acpi_check_resource_conflict(&res);
+	if (err)
+		goto exit;
 
 	pdev = platform_device_alloc("sis5595", address);
 	if (!pdev) {

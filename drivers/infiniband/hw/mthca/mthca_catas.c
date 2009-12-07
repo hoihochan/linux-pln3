@@ -68,11 +68,16 @@ static void catas_reset(struct work_struct *work)
 	spin_unlock_irq(&catas_lock);
 
 	list_for_each_entry_safe(dev, tmpdev, &tlist, catas_err.list) {
+		struct pci_dev *pdev = dev->pdev;
 		ret = __mthca_restart_one(dev->pdev);
+		/* 'dev' now is not valid */
 		if (ret)
-			mthca_err(dev, "Reset failed (%d)\n", ret);
-		else
-			mthca_dbg(dev, "Reset succeeded\n");
+			printk(KERN_ERR "mthca %s: Reset failed (%d)\n",
+			       pci_name(pdev), ret);
+		else {
+			struct mthca_dev *d = pci_get_drvdata(pdev);
+			mthca_dbg(d, "Reset succeeded\n");
+		}
 	}
 
 	mutex_unlock(&mthca_device_mutex);
@@ -88,6 +93,7 @@ static void handle_catas(struct mthca_dev *dev)
 	event.device = &dev->ib_dev;
 	event.event  = IB_EVENT_DEVICE_FATAL;
 	event.element.port_num = 0;
+	dev->active = false;
 
 	ib_dispatch_event(&event);
 
@@ -149,18 +155,10 @@ void mthca_start_catas_poll(struct mthca_dev *dev)
 		((pci_resource_len(dev->pdev, 0) - 1) &
 		 dev->catas_err.addr);
 
-	if (!request_mem_region(addr, dev->catas_err.size * 4,
-				DRV_NAME)) {
-		mthca_warn(dev, "couldn't request catastrophic error region "
-			   "at 0x%lx/0x%x\n", addr, dev->catas_err.size * 4);
-		return;
-	}
-
 	dev->catas_err.map = ioremap(addr, dev->catas_err.size * 4);
 	if (!dev->catas_err.map) {
 		mthca_warn(dev, "couldn't map catastrophic error region "
 			   "at 0x%lx/0x%x\n", addr, dev->catas_err.size * 4);
-		release_mem_region(addr, dev->catas_err.size * 4);
 		return;
 	}
 
@@ -175,13 +173,8 @@ void mthca_stop_catas_poll(struct mthca_dev *dev)
 {
 	del_timer_sync(&dev->catas_err.timer);
 
-	if (dev->catas_err.map) {
+	if (dev->catas_err.map)
 		iounmap(dev->catas_err.map);
-		release_mem_region(pci_resource_start(dev->pdev, 0) +
-				   ((pci_resource_len(dev->pdev, 0) - 1) &
-				    dev->catas_err.addr),
-				   dev->catas_err.size * 4);
-	}
 
 	spin_lock_irq(&catas_lock);
 	list_del(&dev->catas_err.list);

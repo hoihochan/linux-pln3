@@ -19,7 +19,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
- * Alan Cox <alan@redhat.com> - Removed several careless u32/dma_addr_t errors
+ * Alan Cox <alan@lxorguk.ukuu.org.uk> - Removed several careless u32/dma_addr_t errors
  *				that broke 64bit platforms.
  */
 
@@ -37,8 +37,8 @@
 /*
  * Literals
  */
-#define IPR_DRIVER_VERSION "2.4.1"
-#define IPR_DRIVER_DATE "(April 24, 2007)"
+#define IPR_DRIVER_VERSION "2.4.3"
+#define IPR_DRIVER_DATE "(June 10, 2009)"
 
 /*
  * IPR_MAX_CMD_PER_LUN: This defines the maximum number of outstanding
@@ -144,6 +144,7 @@
 #define IPR_IOA_MAX_SECTORS				32767
 #define IPR_VSET_MAX_SECTORS				512
 #define IPR_MAX_CDB_LEN					16
+#define IPR_MAX_HRRQ_RETRIES				3
 
 #define IPR_DEFAULT_BUS_WIDTH				16
 #define IPR_80MBs_SCSI_RATE		((80 * 10) / (IPR_DEFAULT_BUS_WIDTH / 8))
@@ -1025,6 +1026,9 @@ struct ipr_chip_cfg_t {
 struct ipr_chip_t {
 	u16 vendor;
 	u16 device;
+	u16 intr_type;
+#define IPR_USE_LSI			0x00
+#define IPR_USE_MSI			0x01
 	const struct ipr_chip_cfg_t *cfg;
 };
 
@@ -1094,6 +1098,7 @@ struct ipr_ioa_cfg {
 	u8 needs_hard_reset:1;
 	u8 dual_raid:1;
 	u8 needs_warm_reset:1;
+	u8 msi_received:1;
 
 	u8 revid;
 
@@ -1159,6 +1164,7 @@ struct ipr_ioa_cfg {
 
 	unsigned int transop_timeout;
 	const struct ipr_chip_cfg_t *chip_cfg;
+	const struct ipr_chip_t *ipr_chip;
 
 	void __iomem *hdw_dma_regs;	/* iomapped PCI memory space */
 	unsigned long hdw_dma_regs_pci;	/* raw PCI memory space */
@@ -1179,6 +1185,7 @@ struct ipr_ioa_cfg {
 	struct work_struct work_q;
 
 	wait_queue_head_t reset_wait_q;
+	wait_queue_head_t msi_wait_q;
 
 	struct ipr_dump *dump;
 	enum ipr_sdt_state sdt_state;
@@ -1193,7 +1200,7 @@ struct ipr_ioa_cfg {
 
 	struct ata_host ata_host;
 	char ipr_cmd_label[8];
-#define IPR_CMD_LABEL		"ipr_cmnd"
+#define IPR_CMD_LABEL		"ipr_cmd"
 	struct ipr_cmnd *ipr_cmnd_list[IPR_NUM_CMD_BLKS];
 	u32 ipr_cmnd_list_dma[IPR_NUM_CMD_BLKS];
 };
@@ -1272,7 +1279,7 @@ struct ipr_dump_entry_header {
 
 struct ipr_dump_location_entry {
 	struct ipr_dump_entry_header hdr;
-	u8 location[BUS_ID_SIZE];
+	u8 location[20];
 }__attribute__((packed));
 
 struct ipr_dump_trace_entry {

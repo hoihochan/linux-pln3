@@ -17,8 +17,10 @@
 #include <linux/list.h>
 #include <linux/timer.h>
 #include <linux/init.h>
+#include <linux/gpio.h>
 #include <linux/serial_core.h>
 #include <linux/platform_device.h>
+#include <linux/io.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
@@ -27,26 +29,26 @@
 #include <mach/hardware.h>
 #include <asm/hardware/iomd.h>
 #include <asm/setup.h>
-#include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/mach-types.h>
 
 //#include <asm/debug-ll.h>
-#include <asm/plat-s3c/regs-serial.h>
+#include <plat/regs-serial.h>
 #include <mach/regs-gpio.h>
 #include <mach/regs-lcd.h>
 
 #include <mach/idle.h>
-#include <asm/plat-s3c24xx/udc.h>
+#include <plat/udc.h>
+#include <plat/iic.h>
 #include <mach/fb.h>
 
-#include <asm/plat-s3c24xx/s3c2410.h>
-#include <asm/plat-s3c24xx/s3c2412.h>
-#include <asm/plat-s3c24xx/clock.h>
-#include <asm/plat-s3c24xx/devs.h>
-#include <asm/plat-s3c24xx/cpu.h>
+#include <plat/s3c2410.h>
+#include <plat/s3c2412.h>
+#include <plat/clock.h>
+#include <plat/devs.h>
+#include <plat/cpu.h>
 
-#include <asm/plat-s3c24xx/common-smdk.h>
+#include <plat/common-smdk.h>
 
 static struct map_desc smdk2413_iodesc[] __initdata = {
 };
@@ -83,10 +85,10 @@ static void smdk2413_udc_pullup(enum s3c2410_udc_cmd_e cmd)
 	switch (cmd)
 	{
 		case S3C2410_UDC_P_ENABLE :
-			s3c2410_gpio_setpin(S3C2410_GPF2, 1);
+			s3c2410_gpio_setpin(S3C2410_GPF(2), 1);
 			break;
 		case S3C2410_UDC_P_DISABLE :
-			s3c2410_gpio_setpin(S3C2410_GPF2, 0);
+			s3c2410_gpio_setpin(S3C2410_GPF(2), 0);
 			break;
 		case S3C2410_UDC_P_RESET :
 			break;
@@ -105,7 +107,7 @@ static struct platform_device *smdk2413_devices[] __initdata = {
 	&s3c_device_usb,
 	//&s3c_device_lcd,
 	&s3c_device_wdt,
-	&s3c_device_i2c,
+	&s3c_device_i2c0,
 	&s3c_device_iis,
 	&s3c_device_usbgadget,
 };
@@ -133,8 +135,8 @@ static void __init smdk2413_machine_init(void)
 {	/* Turn off suspend on both USB ports, and switch the
 	 * selectable USB port to USB device mode. */
 
-	s3c2410_gpio_setpin(S3C2410_GPF2, 0);
-	s3c2410_gpio_cfgpin(S3C2410_GPF2, S3C2410_GPIO_OUTPUT);
+	s3c2410_gpio_setpin(S3C2410_GPF(2), 0);
+	s3c2410_gpio_cfgpin(S3C2410_GPF(2), S3C2410_GPIO_OUTPUT);
 
 	s3c2410_modify_misccr(S3C2410_MISCCR_USBHOST |
 			      S3C2410_MISCCR_USBSUSPND0 |
@@ -142,6 +144,7 @@ static void __init smdk2413_machine_init(void)
 
 
  	s3c24xx_udc_set_platdata(&smdk2413_udc_cfg);
+	s3c_i2c0_set_platdata(NULL);
 
 	platform_add_devices(smdk2413_devices, ARRAY_SIZE(smdk2413_devices));
 	smdk_machine_init();

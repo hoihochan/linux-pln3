@@ -40,6 +40,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/cpu.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -72,17 +73,11 @@ static unsigned int bsp_phys_id = -1;
 /* Bitmask of physically existing CPUs */
 physid_mask_t phys_cpu_present_map;
 
-/* Bitmask of currently online CPUs */
-cpumask_t cpu_online_map;
-EXPORT_SYMBOL(cpu_online_map);
-
 cpumask_t cpu_bootout_map;
 cpumask_t cpu_bootin_map;
 static cpumask_t cpu_callin_map;
 cpumask_t cpu_callout_map;
 EXPORT_SYMBOL(cpu_callout_map);
-cpumask_t cpu_possible_map = CPU_MASK_ALL;
-EXPORT_SYMBOL(cpu_possible_map);
 
 /* Per CPU bogomips and other parameters */
 struct cpuinfo_m32r cpu_data[NR_CPUS] __cacheline_aligned;
@@ -183,7 +178,7 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 	for (phys_id = 0 ; phys_id < nr_cpu ; phys_id++)
 		physid_set(phys_id, phys_cpu_present_map);
 #ifndef CONFIG_HOTPLUG_CPU
-	cpu_present_map = cpu_possible_map;
+	init_cpu_present(&cpu_possible_map);
 #endif
 
 	show_mp_info(nr_cpu);
@@ -218,7 +213,7 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 		if (!physid_isset(phys_id, phys_cpu_present_map))
 			continue;
 
-		if ((max_cpus >= 0) && (max_cpus <= cpucount + 1))
+		if (max_cpus <= cpucount + 1)
 			continue;
 
 		do_boot_cpu(phys_id);
@@ -498,6 +493,8 @@ static void __init smp_online(void)
 {
 	int cpu_id = smp_processor_id();
 
+	notify_cpu_starting(cpu_id);
+
 	local_irq_enable();
 
 	/* Get our bogomips. */
@@ -595,7 +592,7 @@ int setup_profiling_timer(unsigned int multiplier)
 	 * accounting. At that time they also adjust their APIC timers
 	 * accordingly.
 	 */
-	for (i = 0; i < NR_CPUS; ++i)
+	for_each_possible_cpu(i)
 		per_cpu(prof_multiplier, i) = multiplier;
 
 	return 0;

@@ -35,7 +35,6 @@
 #include <linux/interrupt.h>
 #include <linux/kmod.h>
 #include <linux/delay.h>
-#include <linux/dmi.h>
 #include <linux/workqueue.h>
 #include <linux/nmi.h>
 #include <linux/acpi.h>
@@ -59,6 +58,7 @@ struct acpi_os_dpc {
 	acpi_osd_exec_callback function;
 	void *context;
 	struct work_struct work;
+	int wait;
 };
 
 #ifdef CONFIG_ACPI_CUSTOM_DSDT
@@ -80,6 +80,7 @@ static acpi_osd_handler acpi_irq_handler;
 static void *acpi_irq_context;
 static struct workqueue_struct *kacpid_wq;
 static struct workqueue_struct *kacpi_notify_wq;
+static struct workqueue_struct *kacpi_hotplug_wq;
 
 struct acpi_res_list {
 	resource_size_t start;
@@ -88,6 +89,7 @@ struct acpi_res_list {
 	char name[5];   /* only can have a length of 4 chars, make use of this
 			   one instead of res->name, no need to kalloc then */
 	struct list_head resource_list;
+	int count;
 };
 
 static LIST_HEAD(resource_list_head);
@@ -97,54 +99,44 @@ static DEFINE_SPINLOCK(acpi_res_lock);
 static char osi_additional_string[OSI_STRING_LENGTH_MAX];
 
 /*
- * "Ode to _OSI(Linux)"
+ * The story of _OSI(Linux)
  *
- * osi_linux -- Control response to BIOS _OSI(Linux) query.
+ * From pre-history through Linux-2.6.22,
+ * Linux responded TRUE upon a BIOS OSI(Linux) query.
  *
- * As Linux evolves, the features that it supports change.
- * So an OSI string such as "Linux" is not specific enough
- * to be useful across multiple versions of Linux.  It
- * doesn't identify any particular feature, interface,
- * or even any particular version of Linux...
+ * Unfortunately, reference BIOS writers got wind of this
+ * and put OSI(Linux) in their example code, quickly exposing
+ * this string as ill-conceived and opening the door to
+ * an un-bounded number of BIOS incompatibilities.
  *
- * Unfortunately, Linux-2.6.22 and earlier responded "yes"
- * to a BIOS _OSI(Linux) query.  When
- * a reference mobile BIOS started using it, its use
- * started to spread to many vendor platforms.
- * As it is not supportable, we need to halt that spread.
+ * For example, OSI(Linux) was used on resume to re-POST a
+ * video card on one system, because Linux at that time
+ * could not do a speedy restore in its native driver.
+ * But then upon gaining quick native restore capability,
+ * Linux has no way to tell the BIOS to skip the time-consuming
+ * POST -- putting Linux at a permanent performance disadvantage.
+ * On another system, the BIOS writer used OSI(Linux)
+ * to infer native OS support for IPMI!  On other systems,
+ * OSI(Linux) simply got in the way of Linux claiming to
+ * be compatible with other operating systems, exposing
+ * BIOS issues such as skipped device initialization.
  *
- * Today, most BIOS references to _OSI(Linux) are noise --
- * they have no functional effect and are just dead code
- * carried over from the reference BIOS.
- *
- * The next most common case is that _OSI(Linux) harms Linux,
- * usually by causing the BIOS to follow paths that are
- * not tested during Windows validation.
- *
- * Finally, there is a short list of platforms
- * where OSI(Linux) benefits Linux.
- *
- * In Linux-2.6.23, OSI(Linux) is first disabled by default.
- * DMI is used to disable the dmesg warning about OSI(Linux)
- * on platforms where it is known to have no effect.
- * But a dmesg warning remains for systems where
- * we do not know if OSI(Linux) is good or bad for the system.
- * DMI is also used to enable OSI(Linux) for the machines
- * that are known to need it.
+ * So "Linux" turned out to be a really poor chose of
+ * OSI string, and from Linux-2.6.23 onward we respond FALSE.
  *
  * BIOS writers should NOT query _OSI(Linux) on future systems.
- * It will be ignored by default, and to get Linux to
- * not ignore it will require a kernel source update to
- * add a DMI entry, or a boot-time "acpi_osi=Linux" invocation.
+ * Linux will complain on the console when it sees it, and return FALSE.
+ * To get Linux to return TRUE for your system  will require
+ * a kernel source update to add a DMI entry,
+ * or boot with "acpi_osi=Linux"
  */
-#define OSI_LINUX_ENABLE 0
 
 static struct osi_linux {
 	unsigned int	enable:1;
 	unsigned int	dmi:1;
 	unsigned int	cmdline:1;
 	unsigned int	known:1;
-} osi_linux = { OSI_LINUX_ENABLE, 0, 0, 0};
+} osi_linux = { 0, 0, 0, 0};
 
 static void __init acpi_request_region (struct acpi_generic_address *addr,
 	unsigned int length, char *desc)
@@ -199,12 +191,39 @@ acpi_status __init acpi_os_initialize(void)
 	return AE_OK;
 }
 
+static void bind_to_cpu0(struct work_struct *work)
+{
+	set_cpus_allowed_ptr(current, cpumask_of(0));
+	kfree(work);
+}
+
+static void bind_workqueue(struct workqueue_struct *wq)
+{
+	struct work_struct *work;
+
+	work = kzalloc(sizeof(struct work_struct), GFP_KERNEL);
+	INIT_WORK(work, bind_to_cpu0);
+	queue_work(wq, work);
+}
+
 acpi_status acpi_os_initialize1(void)
 {
+	/*
+	 * On some machines, a software-initiated SMI causes corruption unless
+	 * the SMI runs on CPU 0.  An SMI can be initiated by any AML, but
+	 * typically it's done in GPE-related methods that are run via
+	 * workqueues, so we can avoid the known corruption cases by binding
+	 * the workqueues to CPU 0.
+	 */
 	kacpid_wq = create_singlethread_workqueue("kacpid");
+	bind_workqueue(kacpid_wq);
 	kacpi_notify_wq = create_singlethread_workqueue("kacpi_notify");
+	bind_workqueue(kacpi_notify_wq);
+	kacpi_hotplug_wq = create_singlethread_workqueue("kacpi_hotplug");
+	bind_workqueue(kacpi_hotplug_wq);
 	BUG_ON(!kacpid_wq);
 	BUG_ON(!kacpi_notify_wq);
+	BUG_ON(!kacpi_hotplug_wq);
 	return AE_OK;
 }
 
@@ -217,6 +236,7 @@ acpi_status acpi_os_terminate(void)
 
 	destroy_workqueue(kacpid_wq);
 	destroy_workqueue(kacpi_notify_wq);
+	destroy_workqueue(kacpi_hotplug_wq);
 
 	return AE_OK;
 }
@@ -239,10 +259,10 @@ void acpi_os_vprintf(const char *fmt, va_list args)
 	if (acpi_in_debugger) {
 		kdb_printf("%s", buffer);
 	} else {
-		printk("%s", buffer);
+		printk(KERN_CONT "%s", buffer);
 	}
 #else
-	printk("%s", buffer);
+	printk(KERN_CONT "%s", buffer);
 #endif
 }
 
@@ -283,13 +303,20 @@ acpi_os_map_memory(acpi_physical_address phys, acpi_size size)
 }
 EXPORT_SYMBOL_GPL(acpi_os_map_memory);
 
-void acpi_os_unmap_memory(void __iomem * virt, acpi_size size)
+void __ref acpi_os_unmap_memory(void __iomem *virt, acpi_size size)
 {
-	if (acpi_gbl_permanent_mmap) {
+	if (acpi_gbl_permanent_mmap)
 		iounmap(virt);
-	}
+	else
+		__acpi_unmap_table(virt, size);
 }
 EXPORT_SYMBOL_GPL(acpi_os_unmap_memory);
+
+void __init early_acpi_os_unmap_memory(void __iomem *virt, acpi_size size)
+{
+	if (!acpi_gbl_permanent_mmap)
+		__acpi_unmap_table(virt, size);
+}
 
 #ifdef ACPI_FUTURE_USAGE
 acpi_status
@@ -357,8 +384,10 @@ static irqreturn_t acpi_irq(int irq, void *dev_id)
 	if (handled) {
 		acpi_irq_handled++;
 		return IRQ_HANDLED;
-	} else
+	} else {
+		acpi_irq_not_handled++;
 		return IRQ_NONE;
+	}
 }
 
 acpi_status
@@ -670,15 +699,12 @@ void acpi_os_derive_pci_id(acpi_handle rhandle,	/* upper bound  */
 static void acpi_os_execute_deferred(struct work_struct *work)
 {
 	struct acpi_os_dpc *dpc = container_of(work, struct acpi_os_dpc, work);
-	if (!dpc) {
-		printk(KERN_ERR PREFIX "Invalid (NULL) context\n");
-		return;
-	}
+
+	if (dpc->wait)
+		acpi_os_wait_events_complete(NULL);
 
 	dpc->function(dpc->context);
 	kfree(dpc);
-
-	return;
 }
 
 /*******************************************************************************
@@ -696,18 +722,16 @@ static void acpi_os_execute_deferred(struct work_struct *work)
  *
  ******************************************************************************/
 
-acpi_status acpi_os_execute(acpi_execute_type type,
-			    acpi_osd_exec_callback function, void *context)
+static acpi_status __acpi_os_execute(acpi_execute_type type,
+	acpi_osd_exec_callback function, void *context, int hp)
 {
 	acpi_status status = AE_OK;
 	struct acpi_os_dpc *dpc;
 	struct workqueue_struct *queue;
+	int ret;
 	ACPI_DEBUG_PRINT((ACPI_DB_EXEC,
 			  "Scheduling function [%p(%p)] for deferred execution.\n",
 			  function, context));
-
-	if (!function)
-		return AE_BAD_PARAMETER;
 
 	/*
 	 * Allocate/initialize DPC structure.  Note that this memory will be
@@ -720,23 +744,44 @@ acpi_status acpi_os_execute(acpi_execute_type type,
 
 	dpc = kmalloc(sizeof(struct acpi_os_dpc), GFP_ATOMIC);
 	if (!dpc)
-		return_ACPI_STATUS(AE_NO_MEMORY);
+		return AE_NO_MEMORY;
 
 	dpc->function = function;
 	dpc->context = context;
 
+	/*
+	 * We can't run hotplug code in keventd_wq/kacpid_wq/kacpid_notify_wq
+	 * because the hotplug code may call driver .remove() functions,
+	 * which invoke flush_scheduled_work/acpi_os_wait_events_complete
+	 * to flush these workqueues.
+	 */
+	queue = hp ? kacpi_hotplug_wq :
+		(type == OSL_NOTIFY_HANDLER ? kacpi_notify_wq : kacpid_wq);
+	dpc->wait = hp ? 1 : 0;
 	INIT_WORK(&dpc->work, acpi_os_execute_deferred);
-	queue = (type == OSL_NOTIFY_HANDLER) ? kacpi_notify_wq : kacpid_wq;
-	if (!queue_work(queue, &dpc->work)) {
-		ACPI_DEBUG_PRINT((ACPI_DB_ERROR,
-			  "Call to queue_work() failed.\n"));
+	ret = queue_work(queue, &dpc->work);
+
+	if (!ret) {
+		printk(KERN_ERR PREFIX
+			  "Call to queue_work() failed.\n");
 		status = AE_ERROR;
 		kfree(dpc);
 	}
-	return_ACPI_STATUS(status);
+	return status;
 }
 
+acpi_status acpi_os_execute(acpi_execute_type type,
+			    acpi_osd_exec_callback function, void *context)
+{
+	return __acpi_os_execute(type, function, context, 0);
+}
 EXPORT_SYMBOL(acpi_os_execute);
+
+acpi_status acpi_os_hotplug_execute(acpi_osd_exec_callback function,
+	void *context)
+{
+	return __acpi_os_execute(0, function, context, 1);
+}
 
 void acpi_os_wait_events_complete(void *context)
 {
@@ -1038,9 +1083,9 @@ __setup("acpi_wake_gpes_always_on", acpi_wake_gpes_always_on_setup);
  * in arbitrary AML code and can interfere with legacy drivers.
  * acpi_enforce_resources= can be set to:
  *
- *   - strict           (2)
+ *   - strict (default) (2)
  *     -> further driver trying to access the resources will not load
- *   - lax (default)    (1)
+ *   - lax              (1)
  *     -> further driver trying to access the resources will load, but you
  *     get a system message that something might go wrong...
  *
@@ -1052,7 +1097,7 @@ __setup("acpi_wake_gpes_always_on", acpi_wake_gpes_always_on_setup);
 #define ENFORCE_RESOURCES_LAX    1
 #define ENFORCE_RESOURCES_NO     0
 
-static unsigned int acpi_enforce_resources = ENFORCE_RESOURCES_LAX;
+static unsigned int acpi_enforce_resources = ENFORCE_RESOURCES_STRICT;
 
 static int __init acpi_enforce_resources_setup(char *str)
 {
@@ -1116,7 +1161,13 @@ int acpi_check_resource_conflict(struct resource *res)
 			       res_list_elem->name,
 			       (long long) res_list_elem->start,
 			       (long long) res_list_elem->end);
-			printk(KERN_INFO "ACPI: Device needs an ACPI driver\n");
+			if (acpi_enforce_resources == ENFORCE_RESOURCES_LAX)
+				printk(KERN_NOTICE "ACPI: This conflict may"
+				       " cause random problems and system"
+				       " instability\n");
+			printk(KERN_INFO "ACPI: If an ACPI driver is available"
+			       " for this device, you should use it instead of"
+			       " the native driver\n");
 		}
 		if (acpi_enforce_resources == ENFORCE_RESOURCES_STRICT)
 			return -EBUSY;
@@ -1286,17 +1337,93 @@ acpi_os_validate_interface (char *interface)
 			osi_linux.cmdline ? " via cmdline" :
 			osi_linux.dmi ? " via DMI" : "");
 
-		if (!osi_linux.known && !osi_linux.cmdline) {
-			printk(KERN_NOTICE PREFIX
-				"If \"acpi_osi=%sLinux\" works better, "
-				"please notify linux-acpi@vger.kernel.org\n",
-				osi_linux.enable ? "!" : "");
-		}
-
 		if (osi_linux.enable)
 			return AE_OK;
 	}
 	return AE_SUPPORT;
+}
+
+static inline int acpi_res_list_add(struct acpi_res_list *res)
+{
+	struct acpi_res_list *res_list_elem;
+
+	list_for_each_entry(res_list_elem, &resource_list_head,
+			    resource_list) {
+
+		if (res->resource_type == res_list_elem->resource_type &&
+		    res->start == res_list_elem->start &&
+		    res->end == res_list_elem->end) {
+
+			/*
+			 * The Region(addr,len) already exist in the list,
+			 * just increase the count
+			 */
+
+			res_list_elem->count++;
+			return 0;
+		}
+	}
+
+	res->count = 1;
+	list_add(&res->resource_list, &resource_list_head);
+	return 1;
+}
+
+static inline void acpi_res_list_del(struct acpi_res_list *res)
+{
+	struct acpi_res_list *res_list_elem;
+
+	list_for_each_entry(res_list_elem, &resource_list_head,
+			    resource_list) {
+
+		if (res->resource_type == res_list_elem->resource_type &&
+		    res->start == res_list_elem->start &&
+		    res->end == res_list_elem->end) {
+
+			/*
+			 * If the res count is decreased to 0,
+			 * remove and free it
+			 */
+
+			if (--res_list_elem->count == 0) {
+				list_del(&res_list_elem->resource_list);
+				kfree(res_list_elem);
+			}
+			return;
+		}
+	}
+}
+
+acpi_status
+acpi_os_invalidate_address(
+    u8                   space_id,
+    acpi_physical_address   address,
+    acpi_size               length)
+{
+	struct acpi_res_list res;
+
+	switch (space_id) {
+	case ACPI_ADR_SPACE_SYSTEM_IO:
+	case ACPI_ADR_SPACE_SYSTEM_MEMORY:
+		/* Only interference checks against SystemIO and SytemMemory
+		   are needed */
+		res.start = address;
+		res.end = address + length - 1;
+		res.resource_type = space_id;
+		spin_lock(&acpi_res_lock);
+		acpi_res_list_del(&res);
+		spin_unlock(&acpi_res_lock);
+		break;
+	case ACPI_ADR_SPACE_PCI_CONFIG:
+	case ACPI_ADR_SPACE_EC:
+	case ACPI_ADR_SPACE_SMBUS:
+	case ACPI_ADR_SPACE_CMOS:
+	case ACPI_ADR_SPACE_PCI_BAR_TARGET:
+	case ACPI_ADR_SPACE_DATA_TABLE:
+	case ACPI_ADR_SPACE_FIXED_HARDWARE:
+		break;
+	}
+	return AE_OK;
 }
 
 /******************************************************************************
@@ -1323,6 +1450,7 @@ acpi_os_validate_address (
     char *name)
 {
 	struct acpi_res_list *res;
+	int added;
 	if (acpi_enforce_resources == ENFORCE_RESOURCES_NO)
 		return AE_OK;
 
@@ -1340,14 +1468,17 @@ acpi_os_validate_address (
 		res->end = address + length - 1;
 		res->resource_type = space_id;
 		spin_lock(&acpi_res_lock);
-		list_add(&res->resource_list, &resource_list_head);
+		added = acpi_res_list_add(res);
 		spin_unlock(&acpi_res_lock);
-		pr_debug("Added %s resource: start: 0x%llx, end: 0x%llx, "
-			 "name: %s\n", (space_id == ACPI_ADR_SPACE_SYSTEM_IO)
+		pr_debug("%s %s resource: start: 0x%llx, end: 0x%llx, "
+			 "name: %s\n", added ? "Added" : "Already exist",
+			 (space_id == ACPI_ADR_SPACE_SYSTEM_IO)
 			 ? "SystemIO" : "System Memory",
 			 (unsigned long long)res->start,
 			 (unsigned long long)res->end,
 			 res->name);
+		if (!added)
+			kfree(res);
 		break;
 	case ACPI_ADR_SPACE_PCI_CONFIG:
 	case ACPI_ADR_SPACE_EC:

@@ -64,7 +64,7 @@ static struct x25_asy *x25_asy_alloc(void)
 		if (dev == NULL)
 			break;
 
-		sl = dev->priv;
+		sl = netdev_priv(dev);
 		/* Not in use ? */
 		if (!test_and_set_bit(SLF_INUSE, &sl->flags))
 			return sl;
@@ -86,7 +86,7 @@ static struct x25_asy *x25_asy_alloc(void)
 			return NULL;
 
 		/* Initialize channel control data */
-		sl = dev->priv;
+		sl = netdev_priv(dev);
 		dev->base_addr    = i;
 
 		/* register device so that it can be ifconfig'ed       */
@@ -120,7 +120,7 @@ static void x25_asy_free(struct x25_asy *sl)
 
 static int x25_asy_change_mtu(struct net_device *dev, int newmtu)
 {
-	struct x25_asy *sl = dev->priv;
+	struct x25_asy *sl = netdev_priv(dev);
 	unsigned char *xbuff, *rbuff;
 	int len = 2 * newmtu;
 
@@ -142,7 +142,7 @@ static int x25_asy_change_mtu(struct net_device *dev, int newmtu)
 			memcpy(sl->xbuff, sl->xhead, sl->xleft);
 		} else  {
 			sl->xleft = 0;
-			sl->stats.tx_dropped++;
+			dev->stats.tx_dropped++;
 		}
 	}
 	sl->xhead = sl->xbuff;
@@ -153,7 +153,7 @@ static int x25_asy_change_mtu(struct net_device *dev, int newmtu)
 			memcpy(sl->rbuff, rbuff, sl->rcount);
 		} else  {
 			sl->rcount = 0;
-			sl->stats.rx_over_errors++;
+			dev->stats.rx_over_errors++;
 			set_bit(SLF_ERROR, &sl->flags);
 		}
 	}
@@ -188,18 +188,19 @@ static inline void x25_asy_unlock(struct x25_asy *sl)
 
 static void x25_asy_bump(struct x25_asy *sl)
 {
+	struct net_device *dev = sl->dev;
 	struct sk_buff *skb;
 	int count;
 	int err;
 
 	count = sl->rcount;
-	sl->stats.rx_bytes += count;
+	dev->stats.rx_bytes += count;
 
 	skb = dev_alloc_skb(count+1);
 	if (skb == NULL) {
 		printk(KERN_WARNING "%s: memory squeeze, dropping packet.\n",
 			sl->dev->name);
-		sl->stats.rx_dropped++;
+		dev->stats.rx_dropped++;
 		return;
 	}
 	skb_push(skb, 1);	/* LAPB internal control */
@@ -211,8 +212,7 @@ static void x25_asy_bump(struct x25_asy *sl)
 		printk(KERN_DEBUG "x25_asy: data received err - %d\n", err);
 	} else {
 		netif_rx(skb);
-		sl->dev->last_rx = jiffies;
-		sl->stats.rx_packets++;
+		dev->stats.rx_packets++;
 	}
 }
 
@@ -227,7 +227,7 @@ static void x25_asy_encaps(struct x25_asy *sl, unsigned char *icp, int len)
 		len = mtu;
 		printk(KERN_DEBUG "%s: truncating oversized transmit packet!\n",
 					sl->dev->name);
-		sl->stats.tx_dropped++;
+		sl->dev->stats.tx_dropped++;
 		x25_asy_unlock(sl);
 		return;
 	}
@@ -243,7 +243,7 @@ static void x25_asy_encaps(struct x25_asy *sl, unsigned char *icp, int len)
 	 * if we did not request it before write operation.
 	 *       14 Oct 1994  Dmitry Gorodchanin.
 	 */
-	sl->tty->flags |= (1 << TTY_DO_WRITE_WAKEUP);
+	set_bit(TTY_DO_WRITE_WAKEUP, &sl->tty->flags);
 	actual = sl->tty->ops->write(sl->tty, sl->xbuff, count);
 	sl->xleft = count - actual;
 	sl->xhead = sl->xbuff + actual;
@@ -258,7 +258,7 @@ static void x25_asy_encaps(struct x25_asy *sl, unsigned char *icp, int len)
 static void x25_asy_write_wakeup(struct tty_struct *tty)
 {
 	int actual;
-	struct x25_asy *sl = (struct x25_asy *) tty->disc_data;
+	struct x25_asy *sl = tty->disc_data;
 
 	/* First make sure we're connected. */
 	if (!sl || sl->magic != X25_ASY_MAGIC || !netif_running(sl->dev))
@@ -267,8 +267,8 @@ static void x25_asy_write_wakeup(struct tty_struct *tty)
 	if (sl->xleft <= 0) {
 		/* Now serial buffer is almost free & we can start
 		 * transmission of another packet */
-		sl->stats.tx_packets++;
-		tty->flags &= ~(1 << TTY_DO_WRITE_WAKEUP);
+		sl->dev->stats.tx_packets++;
+		clear_bit(TTY_DO_WRITE_WAKEUP, &tty->flags);
 		x25_asy_unlock(sl);
 		return;
 	}
@@ -280,7 +280,7 @@ static void x25_asy_write_wakeup(struct tty_struct *tty)
 
 static void x25_asy_timeout(struct net_device *dev)
 {
-	struct x25_asy *sl = dev->priv;
+	struct x25_asy *sl = netdev_priv(dev);
 
 	spin_lock(&sl->lock);
 	if (netif_queue_stopped(dev)) {
@@ -291,7 +291,7 @@ static void x25_asy_timeout(struct net_device *dev)
 		       (tty_chars_in_buffer(sl->tty) || sl->xleft) ?
 		       "bad line quality" : "driver error");
 		sl->xleft = 0;
-		sl->tty->flags &= ~(1 << TTY_DO_WRITE_WAKEUP);
+		clear_bit(TTY_DO_WRITE_WAKEUP, &sl->tty->flags);
 		x25_asy_unlock(sl);
 	}
 	spin_unlock(&sl->lock);
@@ -299,16 +299,17 @@ static void x25_asy_timeout(struct net_device *dev)
 
 /* Encapsulate an IP datagram and kick it into a TTY queue. */
 
-static int x25_asy_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t x25_asy_xmit(struct sk_buff *skb,
+				      struct net_device *dev)
 {
-	struct x25_asy *sl = dev->priv;
+	struct x25_asy *sl = netdev_priv(dev);
 	int err;
 
 	if (!netif_running(sl->dev)) {
 		printk(KERN_ERR "%s: xmit call when iface is down\n",
 			dev->name);
 		kfree_skb(skb);
-		return 0;
+		return NETDEV_TX_OK;
 	}
 
 	switch (skb->data[0]) {
@@ -319,14 +320,14 @@ static int x25_asy_xmit(struct sk_buff *skb, struct net_device *dev)
 		if (err != LAPB_OK)
 			printk(KERN_ERR "x25_asy: lapb_connect_request error - %d\n", err);
 		kfree_skb(skb);
-		return 0;
+		return NETDEV_TX_OK;
 	case 0x02: /* Disconnect request .. do nothing - hang up ?? */
 		err = lapb_disconnect_request(dev);
 		if (err != LAPB_OK)
 			printk(KERN_ERR "x25_asy: lapb_disconnect_request error - %d\n", err);
 	default:
 		kfree_skb(skb);
-		return  0;
+		return NETDEV_TX_OK;
 	}
 	skb_pull(skb, 1);	/* Remove control byte */
 	/*
@@ -344,9 +345,9 @@ static int x25_asy_xmit(struct sk_buff *skb, struct net_device *dev)
 	if (err != LAPB_OK) {
 		printk(KERN_ERR "x25_asy: lapb_data_request error - %d\n", err);
 		kfree_skb(skb);
-		return 0;
+		return NETDEV_TX_OK;
 	}
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 
@@ -361,7 +362,6 @@ static int x25_asy_xmit(struct sk_buff *skb, struct net_device *dev)
 
 static int x25_asy_data_indication(struct net_device *dev, struct sk_buff *skb)
 {
-	skb->dev->last_rx = jiffies;
 	return netif_rx(skb);
 }
 
@@ -373,7 +373,7 @@ static int x25_asy_data_indication(struct net_device *dev, struct sk_buff *skb)
 
 static void x25_asy_data_transmit(struct net_device *dev, struct sk_buff *skb)
 {
-	struct x25_asy *sl = dev->priv;
+	struct x25_asy *sl = netdev_priv(dev);
 
 	spin_lock(&sl->lock);
 	if (netif_queue_stopped(sl->dev) || sl->tty == NULL) {
@@ -385,7 +385,7 @@ static void x25_asy_data_transmit(struct net_device *dev, struct sk_buff *skb)
 	/* We were not busy, so we are now... :-) */
 	if (skb != NULL) {
 		x25_asy_lock(sl);
-		sl->stats.tx_bytes += skb->len;
+		dev->stats.tx_bytes += skb->len;
 		x25_asy_encaps(sl, skb->data, skb->len);
 		dev_kfree_skb(skb);
 	}
@@ -398,7 +398,7 @@ static void x25_asy_data_transmit(struct net_device *dev, struct sk_buff *skb)
 
 static void x25_asy_connected(struct net_device *dev, int reason)
 {
-	struct x25_asy *sl = dev->priv;
+	struct x25_asy *sl = netdev_priv(dev);
 	struct sk_buff *skb;
 	unsigned char *ptr;
 
@@ -413,12 +413,11 @@ static void x25_asy_connected(struct net_device *dev, int reason)
 
 	skb->protocol = x25_type_trans(skb, sl->dev);
 	netif_rx(skb);
-	sl->dev->last_rx = jiffies;
 }
 
 static void x25_asy_disconnected(struct net_device *dev, int reason)
 {
-	struct x25_asy *sl = dev->priv;
+	struct x25_asy *sl = netdev_priv(dev);
 	struct sk_buff *skb;
 	unsigned char *ptr;
 
@@ -433,7 +432,6 @@ static void x25_asy_disconnected(struct net_device *dev, int reason)
 
 	skb->protocol = x25_type_trans(skb, sl->dev);
 	netif_rx(skb);
-	sl->dev->last_rx = jiffies;
 }
 
 static struct lapb_register_struct x25_asy_callbacks = {
@@ -450,7 +448,7 @@ static struct lapb_register_struct x25_asy_callbacks = {
 /* Open the low-level part of the X.25 channel. Easy! */
 static int x25_asy_open(struct net_device *dev)
 {
-	struct x25_asy *sl = dev->priv;
+	struct x25_asy *sl = netdev_priv(dev);
 	unsigned long len;
 	int err;
 
@@ -499,12 +497,12 @@ norbuff:
 /* Close the low-level part of the X.25 channel. Easy! */
 static int x25_asy_close(struct net_device *dev)
 {
-	struct x25_asy *sl = dev->priv;
+	struct x25_asy *sl = netdev_priv(dev);
 	int err;
 
 	spin_lock(&sl->lock);
 	if (sl->tty)
-		sl->tty->flags &= ~(1 << TTY_DO_WRITE_WAKEUP);
+		clear_bit(TTY_DO_WRITE_WAKEUP, &sl->tty->flags);
 
 	netif_stop_queue(dev);
 	sl->rcount = 0;
@@ -527,7 +525,7 @@ static int x25_asy_close(struct net_device *dev)
 static void x25_asy_receive_buf(struct tty_struct *tty,
 				const unsigned char *cp, char *fp, int count)
 {
-	struct x25_asy *sl = (struct x25_asy *) tty->disc_data;
+	struct x25_asy *sl = tty->disc_data;
 
 	if (!sl || sl->magic != X25_ASY_MAGIC || !netif_running(sl->dev))
 		return;
@@ -537,7 +535,7 @@ static void x25_asy_receive_buf(struct tty_struct *tty,
 	while (count--) {
 		if (fp && *fp++) {
 			if (!test_and_set_bit(SLF_ERROR, &sl->flags))
-				sl->stats.rx_errors++;
+				sl->dev->stats.rx_errors++;
 			cp++;
 			continue;
 		}
@@ -555,7 +553,7 @@ static void x25_asy_receive_buf(struct tty_struct *tty,
 
 static int x25_asy_open_tty(struct tty_struct *tty)
 {
-	struct x25_asy *sl = (struct x25_asy *) tty->disc_data;
+	struct x25_asy *sl = tty->disc_data;
 	int err;
 
 	if (tty->ops->write == NULL)
@@ -596,7 +594,7 @@ static int x25_asy_open_tty(struct tty_struct *tty)
  */
 static void x25_asy_close_tty(struct tty_struct *tty)
 {
-	struct x25_asy *sl = (struct x25_asy *) tty->disc_data;
+	struct x25_asy *sl = tty->disc_data;
 
 	/* First make sure we're connected. */
 	if (!sl || sl->magic != X25_ASY_MAGIC)
@@ -612,19 +610,11 @@ static void x25_asy_close_tty(struct tty_struct *tty)
 	x25_asy_free(sl);
 }
 
-
-static struct net_device_stats *x25_asy_get_stats(struct net_device *dev)
-{
-	struct x25_asy *sl = dev->priv;
-	return &sl->stats;
-}
-
-
  /************************************************************************
   *			STANDARD X.25 ENCAPSULATION		  	 *
   ************************************************************************/
 
-int x25_asy_esc(unsigned char *s, unsigned char *d, int len)
+static int x25_asy_esc(unsigned char *s, unsigned char *d, int len)
 {
 	unsigned char *ptr = d;
 	unsigned char c;
@@ -686,7 +676,7 @@ static void x25_asy_unesc(struct x25_asy *sl, unsigned char s)
 			sl->rbuff[sl->rcount++] = s;
 			return;
 		}
-		sl->stats.rx_over_errors++;
+		sl->dev->stats.rx_over_errors++;
 		set_bit(SLF_ERROR, &sl->flags);
 	}
 }
@@ -696,7 +686,7 @@ static void x25_asy_unesc(struct x25_asy *sl, unsigned char s)
 static int x25_asy_ioctl(struct tty_struct *tty, struct file *file,
 			 unsigned int cmd,  unsigned long arg)
 {
-	struct x25_asy *sl = (struct x25_asy *) tty->disc_data;
+	struct x25_asy *sl = tty->disc_data;
 
 	/* First make sure we're connected. */
 	if (!sl || sl->magic != X25_ASY_MAGIC)
@@ -717,16 +707,24 @@ static int x25_asy_ioctl(struct tty_struct *tty, struct file *file,
 
 static int x25_asy_open_dev(struct net_device *dev)
 {
-	struct x25_asy *sl = dev->priv;
+	struct x25_asy *sl = netdev_priv(dev);
 	if (sl->tty == NULL)
 		return -ENODEV;
 	return 0;
 }
 
+static const struct net_device_ops x25_asy_netdev_ops = {
+	.ndo_open	= x25_asy_open_dev,
+	.ndo_stop	= x25_asy_close,
+	.ndo_start_xmit	= x25_asy_xmit,
+	.ndo_tx_timeout	= x25_asy_timeout,
+	.ndo_change_mtu	= x25_asy_change_mtu,
+};
+
 /* Initialise the X.25 driver.  Called by the device init code */
 static void x25_asy_setup(struct net_device *dev)
 {
-	struct x25_asy *sl = dev->priv;
+	struct x25_asy *sl = netdev_priv(dev);
 
 	sl->magic  = X25_ASY_MAGIC;
 	sl->dev	   = dev;
@@ -738,13 +736,8 @@ static void x25_asy_setup(struct net_device *dev)
 	 */
 
 	dev->mtu		= SL_MTU;
-	dev->hard_start_xmit	= x25_asy_xmit;
-	dev->tx_timeout		= x25_asy_timeout;
+	dev->netdev_ops		= &x25_asy_netdev_ops;
 	dev->watchdog_timeo	= HZ*20;
-	dev->open		= x25_asy_open_dev;
-	dev->stop		= x25_asy_close;
-	dev->get_stats	        = x25_asy_get_stats;
-	dev->change_mtu		= x25_asy_change_mtu;
 	dev->hard_header_len	= 0;
 	dev->addr_len		= 0;
 	dev->type		= ARPHRD_X25;
@@ -793,7 +786,7 @@ static void __exit exit_x25_asy(void)
 	for (i = 0; i < x25_asy_maxdev; i++) {
 		dev = x25_asy_devs[i];
 		if (dev) {
-			struct x25_asy *sl = dev->priv;
+			struct x25_asy *sl = netdev_priv(dev);
 
 			spin_lock_bh(&sl->lock);
 			if (sl->tty)

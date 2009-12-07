@@ -18,7 +18,7 @@
 cpumask_t mt_fpu_cpumask;
 
 static int fpaff_threshold = -1;
-unsigned long mt_fpemul_threshold = 0;
+unsigned long mt_fpemul_threshold;
 
 /*
  * Replacement functions for the sys_sched_setaffinity() and
@@ -51,6 +51,7 @@ asmlinkage long mipsmt_sys_sched_setaffinity(pid_t pid, unsigned int len,
 	int retval;
 	struct task_struct *p;
 	struct thread_info *ti;
+	uid_t euid;
 
 	if (len < sizeof(new_mask))
 		return -EINVAL;
@@ -76,9 +77,10 @@ asmlinkage long mipsmt_sys_sched_setaffinity(pid_t pid, unsigned int len,
 	 */
 	get_task_struct(p);
 
+	euid = current_euid();
 	retval = -EPERM;
-	if ((current->euid != p->euid) && (current->euid != p->uid) &&
-			!capable(CAP_SYS_NICE)) {
+	if (euid != p->cred->euid && euid != p->cred->uid &&
+	    !capable(CAP_SYS_NICE)) {
 		read_unlock(&tasklist_lock);
 		goto out_unlock;
 	}

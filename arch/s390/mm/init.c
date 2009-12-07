@@ -40,7 +40,9 @@
 DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
 
 pgd_t swapper_pg_dir[PTRS_PER_PGD] __attribute__((__aligned__(PAGE_SIZE)));
+
 char  empty_zero_page[PAGE_SIZE] __attribute__((__aligned__(PAGE_SIZE)));
+EXPORT_SYMBOL(empty_zero_page);
 
 /*
  * paging_init() sets up the page tables
@@ -103,7 +105,7 @@ void __init mem_init(void)
 	datasize =  (unsigned long) &_edata - (unsigned long) &_etext;
 	initsize =  (unsigned long) &__init_end - (unsigned long) &__init_begin;
         printk("Memory: %luk/%luk available (%ldk kernel code, %ldk reserved, %ldk data, %ldk init)\n",
-                (unsigned long) nr_free_pages() << (PAGE_SHIFT-10),
+		nr_free_pages() << (PAGE_SHIFT-10),
                 max_mapnr << (PAGE_SHIFT-10),
                 codesize >> 10,
                 reservedpages << (PAGE_SHIFT-10),
@@ -183,20 +185,9 @@ int arch_add_memory(int nid, u64 start, u64 size)
 	rc = vmem_add_mapping(start, size);
 	if (rc)
 		return rc;
-	rc = __add_pages(zone, PFN_DOWN(start), PFN_DOWN(size));
+	rc = __add_pages(nid, zone, PFN_DOWN(start), PFN_DOWN(size));
 	if (rc)
 		vmem_remove_mapping(start, size);
 	return rc;
 }
 #endif /* CONFIG_MEMORY_HOTPLUG */
-
-#ifdef CONFIG_MEMORY_HOTREMOVE
-int remove_memory(u64 start, u64 size)
-{
-	unsigned long start_pfn, end_pfn;
-
-	start_pfn = PFN_DOWN(start);
-	end_pfn = start_pfn + PFN_DOWN(size);
-	return offline_pages(start_pfn, end_pfn, 120 * HZ);
-}
-#endif /* CONFIG_MEMORY_HOTREMOVE */

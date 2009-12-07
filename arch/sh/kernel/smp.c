@@ -3,7 +3,7 @@
  *
  * SMP support for the SuperH processors.
  *
- * Copyright (C) 2002 - 2007 Paul Mundt
+ * Copyright (C) 2002 - 2008 Paul Mundt
  * Copyright (C) 2006 - 2007 Akio Idehara
  *
  * This file is subject to the terms and conditions of the GNU General Public
@@ -18,6 +18,7 @@
 #include <linux/spinlock.h>
 #include <linux/mm.h>
 #include <linux/module.h>
+#include <linux/cpu.h>
 #include <linux/interrupt.h>
 #include <asm/atomic.h>
 #include <asm/processor.h>
@@ -30,15 +31,11 @@
 int __cpu_number_map[NR_CPUS];		/* Map physical to logical */
 int __cpu_logical_map[NR_CPUS];		/* Map logical to physical */
 
-cpumask_t cpu_possible_map;
-EXPORT_SYMBOL(cpu_possible_map);
-
-cpumask_t cpu_online_map;
-EXPORT_SYMBOL(cpu_online_map);
-
 static inline void __init smp_store_cpu_info(unsigned int cpu)
 {
 	struct sh_cpuinfo *c = cpu_data + cpu;
+
+	memcpy(c, &boot_cpu_data, sizeof(struct sh_cpuinfo));
 
 	c->loops_per_jiffy = loops_per_jiffy;
 }
@@ -52,7 +49,7 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 	plat_prepare_cpus(max_cpus);
 
 #ifndef CONFIG_HOTPLUG_CPU
-	cpu_present_map = cpu_possible_map;
+	init_cpu_present(&cpu_possible_map);
 #endif
 }
 
@@ -63,8 +60,8 @@ void __devinit smp_prepare_boot_cpu(void)
 	__cpu_number_map[0] = cpu;
 	__cpu_logical_map[0] = cpu;
 
-	cpu_set(cpu, cpu_online_map);
-	cpu_set(cpu, cpu_possible_map);
+	set_cpu_online(cpu, true);
+	set_cpu_possible(cpu, true);
 }
 
 asmlinkage void __cpuinit start_secondary(void)
@@ -82,11 +79,16 @@ asmlinkage void __cpuinit start_secondary(void)
 
 	preempt_disable();
 
+	notify_cpu_starting(smp_processor_id());
+
 	local_irq_enable();
 
+	cpu = smp_processor_id();
+
+	/* Enable local timers */
+	local_timer_setup(cpu);
 	calibrate_delay();
 
-	cpu = smp_processor_id();
 	smp_store_cpu_info(cpu);
 
 	cpu_set(cpu, cpu_online_map);
@@ -171,17 +173,53 @@ void smp_send_stop(void)
 	smp_call_function(stop_this_cpu, 0, 0);
 }
 
-void arch_send_call_function_ipi(cpumask_t mask)
+void arch_send_call_function_ipi_mask(const struct cpumask *mask)
 {
 	int cpu;
 
-	for_each_cpu_mask(cpu, mask)
+	for_each_cpu(cpu, mask)
 		plat_send_ipi(cpu, SMP_MSG_FUNCTION);
 }
 
 void arch_send_call_function_single_ipi(int cpu)
 {
 	plat_send_ipi(cpu, SMP_MSG_FUNCTION_SINGLE);
+}
+
+void smp_timer_broadcast(const struct cpumask *mask)
+{
+	int cpu;
+
+	for_each_cpu(cpu, mask)
+		plat_send_ipi(cpu, SMP_MSG_TIMER);
+}
+
+static void ipi_timer(void)
+{
+	irq_enter();
+	local_timer_interrupt();
+	irq_exit();
+}
+
+void smp_message_recv(unsigned int msg)
+{
+	switch (msg) {
+	case SMP_MSG_FUNCTION:
+		generic_smp_call_function_interrupt();
+		break;
+	case SMP_MSG_RESCHEDULE:
+		break;
+	case SMP_MSG_FUNCTION_SINGLE:
+		generic_smp_call_function_single_interrupt();
+		break;
+	case SMP_MSG_TIMER:
+		ipi_timer();
+		break;
+	default:
+		printk(KERN_WARNING "SMP %d: %s(): unknown IPI %d\n",
+		       smp_processor_id(), __func__, msg);
+		break;
+	}
 }
 
 /* Not really SMP stuff ... */

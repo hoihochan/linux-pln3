@@ -15,6 +15,7 @@
 #include <linux/wait.h>
 
 #include "internal.h"
+#include "nfs4_fs.h"
 
 struct nfs_unlinkdata {
 	struct hlist_node list;
@@ -82,7 +83,7 @@ static void nfs_async_unlink_done(struct rpc_task *task, void *calldata)
 	struct inode *dir = data->dir;
 
 	if (!NFS_PROTO(dir)->unlink_done(task, dir))
-		rpc_restart_call(task);
+		nfs4_restart_rpc(task, NFS_SERVER(dir)->nfs_client);
 }
 
 /**
@@ -99,12 +100,28 @@ static void nfs_async_unlink_release(void *calldata)
 
 	nfs_dec_sillycount(data->dir);
 	nfs_free_unlinkdata(data);
-	nfs_sb_deactive(NFS_SB(sb));
+	nfs_sb_deactive(sb);
 }
+
+#if defined(CONFIG_NFS_V4_1)
+void nfs_unlink_prepare(struct rpc_task *task, void *calldata)
+{
+	struct nfs_unlinkdata *data = calldata;
+	struct nfs_server *server = NFS_SERVER(data->dir);
+
+	if (nfs4_setup_sequence(server->nfs_client, &data->args.seq_args,
+				&data->res.seq_res, 1, task))
+		return;
+	rpc_call_start(task);
+}
+#endif /* CONFIG_NFS_V4_1 */
 
 static const struct rpc_call_ops nfs_unlink_ops = {
 	.rpc_call_done = nfs_async_unlink_done,
 	.rpc_release = nfs_async_unlink_release,
+#if defined(CONFIG_NFS_V4_1)
+	.rpc_call_prepare = nfs_unlink_prepare,
+#endif /* CONFIG_NFS_V4_1 */
 };
 
 static int nfs_do_call_unlink(struct dentry *parent, struct inode *dir, struct nfs_unlinkdata *data)
@@ -118,6 +135,7 @@ static int nfs_do_call_unlink(struct dentry *parent, struct inode *dir, struct n
 		.rpc_message = &msg,
 		.callback_ops = &nfs_unlink_ops,
 		.callback_data = data,
+		.workqueue = nfsiod_workqueue,
 		.flags = RPC_TASK_ASYNC,
 	};
 	struct rpc_task *task;
@@ -149,7 +167,7 @@ static int nfs_do_call_unlink(struct dentry *parent, struct inode *dir, struct n
 		nfs_dec_sillycount(dir);
 		return 0;
 	}
-	nfs_sb_active(NFS_SERVER(dir));
+	nfs_sb_active(dir->i_sb);
 	data->args.fh = NFS_FH(dir);
 	nfs_fattr_init(&data->res.dir_attr);
 
@@ -240,6 +258,7 @@ nfs_async_unlink(struct inode *dir, struct dentry *dentry)
 		status = PTR_ERR(data->cred);
 		goto out_free;
 	}
+	data->res.seq_res.sr_slotid = NFS4_MAX_SLOT_TABLE;
 
 	status = -EBUSY;
 	spin_lock(&dentry->d_lock);

@@ -22,7 +22,7 @@
 #include "br_private.h"
 
 #define to_dev(obj)	container_of(obj, struct device, kobj)
-#define to_bridge(cd)	((struct net_bridge *)(to_net_dev(cd)->priv))
+#define to_bridge(cd)	((struct net_bridge *)netdev_priv(to_net_dev(cd)))
 
 /*
  * Common code for storing bridge parameters.
@@ -172,7 +172,8 @@ static ssize_t store_stp_state(struct device *d,
 	if (endp == buf)
 		return -EINVAL;
 
-	rtnl_lock();
+	if (!rtnl_trylock())
+		return restart_syscall();
 	br_stp_set_enabled(br, val);
 	rtnl_unlock();
 

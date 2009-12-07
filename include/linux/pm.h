@@ -22,6 +22,10 @@
 #define _LINUX_PM_H
 
 #include <linux/list.h>
+#include <linux/workqueue.h>
+#include <linux/spinlock.h>
+#include <linux/wait.h>
+#include <linux/timer.h>
 
 /*
  * Callbacks for platform drivers to implement.
@@ -41,7 +45,7 @@ typedef struct pm_message {
 } pm_message_t;
 
 /**
- * struct pm_ops - device PM callbacks
+ * struct dev_pm_ops - device PM callbacks
  *
  * Several driver power state transitions are externally visible, affecting
  * the state of pending I/O queues and (for drivers that touch hardware)
@@ -126,46 +130,6 @@ typedef struct pm_message {
  *	On most platforms, there are no restrictions on availability of
  *	resources like clocks during @restore().
  *
- * All of the above callbacks, except for @complete(), return error codes.
- * However, the error codes returned by the resume operations, @resume(),
- * @thaw(), and @restore(), do not cause the PM core to abort the resume
- * transition during which they are returned.  The error codes returned in
- * that cases are only printed by the PM core to the system logs for debugging
- * purposes.  Still, it is recommended that drivers only return error codes
- * from their resume methods in case of an unrecoverable failure (i.e. when the
- * device being handled refuses to resume and becomes unusable) to allow us to
- * modify the PM core in the future, so that it can avoid attempting to handle
- * devices that failed to resume and their children.
- *
- * It is allowed to unregister devices while the above callbacks are being
- * executed.  However, it is not allowed to unregister a device from within any
- * of its own callbacks.
- */
-
-struct pm_ops {
-	int (*prepare)(struct device *dev);
-	void (*complete)(struct device *dev);
-	int (*suspend)(struct device *dev);
-	int (*resume)(struct device *dev);
-	int (*freeze)(struct device *dev);
-	int (*thaw)(struct device *dev);
-	int (*poweroff)(struct device *dev);
-	int (*restore)(struct device *dev);
-};
-
-/**
- * struct pm_ext_ops - extended device PM callbacks
- *
- * Some devices require certain operations related to suspend and hibernation
- * to be carried out with interrupts disabled.  Thus, 'struct pm_ext_ops' below
- * is defined, adding callbacks to be executed with interrupts disabled to
- * 'struct pm_ops'.
- *
- * The following callbacks included in 'struct pm_ext_ops' are executed with
- * the nonboot CPUs switched off and with interrupts disabled on the only
- * functional CPU.  They also are executed with the PM core list of devices
- * locked, so they must NOT unregister any devices.
- *
  * @suspend_noirq: Complete the operations of ->suspend() by carrying out any
  *	actions required for suspending the device that need interrupts to be
  *	disabled
@@ -190,25 +154,78 @@ struct pm_ops {
  *	actions required for restoring the operations of the device that need
  *	interrupts to be disabled
  *
- * All of the above callbacks return error codes, but the error codes returned
- * by the resume operations, @resume_noirq(), @thaw_noirq(), and
- * @restore_noirq(), do not cause the PM core to abort the resume transition
- * during which they are returned.  The error codes returned in that cases are
- * only printed by the PM core to the system logs for debugging purposes.
- * Still, as stated above, it is recommended that drivers only return error
- * codes from their resume methods if the device being handled fails to resume
- * and is not usable any more.
+ * All of the above callbacks, except for @complete(), return error codes.
+ * However, the error codes returned by the resume operations, @resume(),
+ * @thaw(), @restore(), @resume_noirq(), @thaw_noirq(), and @restore_noirq() do
+ * not cause the PM core to abort the resume transition during which they are
+ * returned.  The error codes returned in that cases are only printed by the PM
+ * core to the system logs for debugging purposes.  Still, it is recommended
+ * that drivers only return error codes from their resume methods in case of an
+ * unrecoverable failure (i.e. when the device being handled refuses to resume
+ * and becomes unusable) to allow us to modify the PM core in the future, so
+ * that it can avoid attempting to handle devices that failed to resume and
+ * their children.
+ *
+ * It is allowed to unregister devices while the above callbacks are being
+ * executed.  However, it is not allowed to unregister a device from within any
+ * of its own callbacks.
+ *
+ * There also are the following callbacks related to run-time power management
+ * of devices:
+ *
+ * @runtime_suspend: Prepare the device for a condition in which it won't be
+ *	able to communicate with the CPU(s) and RAM due to power management.
+ *	This need not mean that the device should be put into a low power state.
+ *	For example, if the device is behind a link which is about to be turned
+ *	off, the device may remain at full power.  If the device does go to low
+ *	power and if device_may_wakeup(dev) is true, remote wake-up (i.e., a
+ *	hardware mechanism allowing the device to request a change of its power
+ *	state, such as PCI PME) should be enabled for it.
+ *
+ * @runtime_resume: Put the device into the fully active state in response to a
+ *	wake-up event generated by hardware or at the request of software.  If
+ *	necessary, put the device into the full power state and restore its
+ *	registers, so that it is fully operational.
+ *
+ * @runtime_idle: Device appears to be inactive and it might be put into a low
+ *	power state if all of the necessary conditions are satisfied.  Check
+ *	these conditions and handle the device as appropriate, possibly queueing
+ *	a suspend request for it.  The return value is ignored by the PM core.
  */
 
-struct pm_ext_ops {
-	struct pm_ops base;
+struct dev_pm_ops {
+	int (*prepare)(struct device *dev);
+	void (*complete)(struct device *dev);
+	int (*suspend)(struct device *dev);
+	int (*resume)(struct device *dev);
+	int (*freeze)(struct device *dev);
+	int (*thaw)(struct device *dev);
+	int (*poweroff)(struct device *dev);
+	int (*restore)(struct device *dev);
 	int (*suspend_noirq)(struct device *dev);
 	int (*resume_noirq)(struct device *dev);
 	int (*freeze_noirq)(struct device *dev);
 	int (*thaw_noirq)(struct device *dev);
 	int (*poweroff_noirq)(struct device *dev);
 	int (*restore_noirq)(struct device *dev);
+	int (*runtime_suspend)(struct device *dev);
+	int (*runtime_resume)(struct device *dev);
+	int (*runtime_idle)(struct device *dev);
 };
+
+/*
+ * Use this if you want to use the same suspend and resume callbacks for suspend
+ * to RAM and hibernation.
+ */
+#define SIMPLE_DEV_PM_OPS(name, suspend_fn, resume_fn) \
+struct dev_pm_ops name = { \
+	.suspend = suspend_fn, \
+	.resume = resume_fn, \
+	.freeze = suspend_fn, \
+	.thaw = resume_fn, \
+	.poweroff = suspend_fn, \
+	.restore = resume_fn, \
+}
 
 /**
  * PM_EVENT_ messages
@@ -278,7 +295,7 @@ struct pm_ext_ops {
 #define PM_EVENT_SLEEP		(PM_EVENT_SUSPEND | PM_EVENT_HIBERNATE)
 #define PM_EVENT_USER_SUSPEND	(PM_EVENT_USER | PM_EVENT_SUSPEND)
 #define PM_EVENT_USER_RESUME	(PM_EVENT_USER | PM_EVENT_RESUME)
-#define PM_EVENT_REMOTE_WAKEUP	(PM_EVENT_REMOTE | PM_EVENT_RESUME)
+#define PM_EVENT_REMOTE_RESUME	(PM_EVENT_REMOTE | PM_EVENT_RESUME)
 #define PM_EVENT_AUTO_SUSPEND	(PM_EVENT_AUTO | PM_EVENT_SUSPEND)
 #define PM_EVENT_AUTO_RESUME	(PM_EVENT_AUTO | PM_EVENT_RESUME)
 
@@ -291,15 +308,15 @@ struct pm_ext_ops {
 #define PMSG_THAW	((struct pm_message){ .event = PM_EVENT_THAW, })
 #define PMSG_RESTORE	((struct pm_message){ .event = PM_EVENT_RESTORE, })
 #define PMSG_RECOVER	((struct pm_message){ .event = PM_EVENT_RECOVER, })
-#define PMSG_USER_SUSPEND	((struct pm_messge) \
+#define PMSG_USER_SUSPEND	((struct pm_message) \
 					{ .event = PM_EVENT_USER_SUSPEND, })
-#define PMSG_USER_RESUME	((struct pm_messge) \
+#define PMSG_USER_RESUME	((struct pm_message) \
 					{ .event = PM_EVENT_USER_RESUME, })
-#define PMSG_REMOTE_RESUME	((struct pm_messge) \
+#define PMSG_REMOTE_RESUME	((struct pm_message) \
 					{ .event = PM_EVENT_REMOTE_RESUME, })
-#define PMSG_AUTO_SUSPEND	((struct pm_messge) \
+#define PMSG_AUTO_SUSPEND	((struct pm_message) \
 					{ .event = PM_EVENT_AUTO_SUSPEND, })
-#define PMSG_AUTO_RESUME		((struct pm_messge) \
+#define PMSG_AUTO_RESUME	((struct pm_message) \
 					{ .event = PM_EVENT_AUTO_RESUME, })
 
 /**
@@ -341,13 +358,79 @@ enum dpm_state {
 	DPM_OFF_IRQ,
 };
 
+/**
+ * Device run-time power management status.
+ *
+ * These status labels are used internally by the PM core to indicate the
+ * current status of a device with respect to the PM core operations.  They do
+ * not reflect the actual power state of the device or its status as seen by the
+ * driver.
+ *
+ * RPM_ACTIVE		Device is fully operational.  Indicates that the device
+ *			bus type's ->runtime_resume() callback has completed
+ *			successfully.
+ *
+ * RPM_SUSPENDED	Device bus type's ->runtime_suspend() callback has
+ *			completed successfully.  The device is regarded as
+ *			suspended.
+ *
+ * RPM_RESUMING		Device bus type's ->runtime_resume() callback is being
+ *			executed.
+ *
+ * RPM_SUSPENDING	Device bus type's ->runtime_suspend() callback is being
+ *			executed.
+ */
+
+enum rpm_status {
+	RPM_ACTIVE = 0,
+	RPM_RESUMING,
+	RPM_SUSPENDED,
+	RPM_SUSPENDING,
+};
+
+/**
+ * Device run-time power management request types.
+ *
+ * RPM_REQ_NONE		Do nothing.
+ *
+ * RPM_REQ_IDLE		Run the device bus type's ->runtime_idle() callback
+ *
+ * RPM_REQ_SUSPEND	Run the device bus type's ->runtime_suspend() callback
+ *
+ * RPM_REQ_RESUME	Run the device bus type's ->runtime_resume() callback
+ */
+
+enum rpm_request {
+	RPM_REQ_NONE = 0,
+	RPM_REQ_IDLE,
+	RPM_REQ_SUSPEND,
+	RPM_REQ_RESUME,
+};
+
 struct dev_pm_info {
 	pm_message_t		power_state;
-	unsigned		can_wakeup:1;
-	unsigned		should_wakeup:1;
+	unsigned int		can_wakeup:1;
+	unsigned int		should_wakeup:1;
 	enum dpm_state		status;		/* Owned by the PM core */
-#ifdef	CONFIG_PM_SLEEP
+#ifdef CONFIG_PM_SLEEP
 	struct list_head	entry;
+#endif
+#ifdef CONFIG_PM_RUNTIME
+	struct timer_list	suspend_timer;
+	unsigned long		timer_expires;
+	struct work_struct	work;
+	wait_queue_head_t	wait_queue;
+	spinlock_t		lock;
+	atomic_t		usage_count;
+	atomic_t		child_count;
+	unsigned int		disable_depth:3;
+	unsigned int		ignore_children:1;
+	unsigned int		idle_notification:1;
+	unsigned int		request_pending:1;
+	unsigned int		deferred_resume:1;
+	enum rpm_request	request;
+	enum rpm_status		runtime_status;
+	int			runtime_error;
 #endif
 };
 
@@ -407,24 +490,28 @@ struct dev_pm_info {
 
 #ifdef CONFIG_PM_SLEEP
 extern void device_pm_lock(void);
-extern void device_power_up(pm_message_t state);
-extern void device_resume(pm_message_t state);
+extern int sysdev_resume(void);
+extern void dpm_resume_noirq(pm_message_t state);
+extern void dpm_resume_end(pm_message_t state);
 
 extern void device_pm_unlock(void);
-extern int device_power_down(pm_message_t state);
-extern int device_suspend(pm_message_t state);
-extern int device_prepare_suspend(pm_message_t state);
+extern int sysdev_suspend(pm_message_t state);
+extern int dpm_suspend_noirq(pm_message_t state);
+extern int dpm_suspend_start(pm_message_t state);
 
 extern void __suspend_report_result(const char *function, void *fn, int ret);
 
 #define suspend_report_result(fn, ret)					\
 	do {								\
-		__suspend_report_result(__FUNCTION__, fn, ret);		\
+		__suspend_report_result(__func__, fn, ret);		\
 	} while (0)
 
 #else /* !CONFIG_PM_SLEEP */
 
-static inline int device_suspend(pm_message_t state)
+#define device_pm_lock() do {} while (0)
+#define device_pm_unlock() do {} while (0)
+
+static inline int dpm_suspend_start(pm_message_t state)
 {
 	return 0;
 }
@@ -432,6 +519,14 @@ static inline int device_suspend(pm_message_t state)
 #define suspend_report_result(fn, ret)		do {} while (0)
 
 #endif /* !CONFIG_PM_SLEEP */
+
+/* How to reorder dpm_list after device_move() */
+enum dpm_order {
+	DPM_ORDER_NONE,
+	DPM_ORDER_DEV_AFTER_PARENT,
+	DPM_ORDER_PARENT_BEFORE_DEV,
+	DPM_ORDER_DEV_LAST,
+};
 
 /*
  * Global Power Management flags

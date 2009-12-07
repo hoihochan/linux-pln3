@@ -13,49 +13,132 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/init.h>
 #include <linux/platform_device.h>
 #include <linux/delay.h>
-#include <linux/major.h>
-#include <linux/fs.h>
-#include <linux/interrupt.h>
-#include <linux/mmc/host.h>
-#include <linux/pm.h>
-#include <linux/backlight.h>
+#include <linux/gpio_keys.h>
+#include <linux/gpio.h>
+#include <linux/leds.h>
+#include <linux/mtd/physmap.h>
+#include <linux/i2c.h>
+#include <linux/i2c/pca953x.h>
+#include <linux/spi/spi.h>
+#include <linux/spi/ads7846.h>
+#include <linux/spi/corgi_lcd.h>
+#include <linux/mtd/sharpsl.h>
+#include <linux/input/matrix_keypad.h>
 
 #include <asm/setup.h>
-#include <asm/memory.h>
 #include <asm/mach-types.h>
-#include <mach/hardware.h>
-#include <asm/irq.h>
-#include <asm/io.h>
-#include <asm/system.h>
-
 #include <asm/mach/arch.h>
-#include <asm/mach/map.h>
-#include <asm/mach/irq.h>
+#include <asm/mach/sharpsl_param.h>
+#include <asm/hardware/scoop.h>
 
-#include <mach/pxa-regs.h>
-#include <mach/pxa2xx-regs.h>
-#include <mach/pxa2xx-gpio.h>
+
+#include <mach/pxa27x.h>
 #include <mach/pxa27x-udc.h>
 #include <mach/reset.h>
-#include <mach/i2c.h>
+#include <plat/i2c.h>
 #include <mach/irda.h>
 #include <mach/mmc.h>
 #include <mach/ohci.h>
-#include <mach/udc.h>
 #include <mach/pxafb.h>
-#include <mach/akita.h>
+#include <mach/pxa2xx_spi.h>
 #include <mach/spitz.h>
-#include <mach/sharpsl.h>
-
-#include <asm/mach/sharpsl_param.h>
-#include <asm/hardware/scoop.h>
 
 #include "generic.h"
 #include "devices.h"
 #include "sharpsl.h"
+
+static unsigned long spitz_pin_config[] __initdata = {
+	/* Chip Selects */
+	GPIO78_nCS_2,	/* SCOOP #2 */
+	GPIO79_nCS_3,	/* NAND */
+	GPIO80_nCS_4,	/* SCOOP #1 */
+
+	/* LCD - 16bpp Active TFT */
+	GPIO58_LCD_LDD_0,
+	GPIO59_LCD_LDD_1,
+	GPIO60_LCD_LDD_2,
+	GPIO61_LCD_LDD_3,
+	GPIO62_LCD_LDD_4,
+	GPIO63_LCD_LDD_5,
+	GPIO64_LCD_LDD_6,
+	GPIO65_LCD_LDD_7,
+	GPIO66_LCD_LDD_8,
+	GPIO67_LCD_LDD_9,
+	GPIO68_LCD_LDD_10,
+	GPIO69_LCD_LDD_11,
+	GPIO70_LCD_LDD_12,
+	GPIO71_LCD_LDD_13,
+	GPIO72_LCD_LDD_14,
+	GPIO73_LCD_LDD_15,
+	GPIO74_LCD_FCLK,
+	GPIO75_LCD_LCLK,
+	GPIO76_LCD_PCLK,
+
+	/* PC Card */
+	GPIO48_nPOE,
+	GPIO49_nPWE,
+	GPIO50_nPIOR,
+	GPIO51_nPIOW,
+	GPIO85_nPCE_1,
+	GPIO54_nPCE_2,
+	GPIO55_nPREG,
+	GPIO56_nPWAIT,
+	GPIO57_nIOIS16,
+	GPIO104_PSKTSEL,
+
+	/* I2S */
+	GPIO28_I2S_BITCLK_OUT,
+	GPIO29_I2S_SDATA_IN,
+	GPIO30_I2S_SDATA_OUT,
+	GPIO31_I2S_SYNC,
+
+	/* MMC */
+	GPIO32_MMC_CLK,
+	GPIO112_MMC_CMD,
+	GPIO92_MMC_DAT_0,
+	GPIO109_MMC_DAT_1,
+	GPIO110_MMC_DAT_2,
+	GPIO111_MMC_DAT_3,
+
+	/* GPIOs */
+	GPIO9_GPIO,	/* SPITZ_GPIO_nSD_DETECT */
+	GPIO81_GPIO,	/* SPITZ_GPIO_nSD_WP */
+	GPIO41_GPIO,	/* SPITZ_GPIO_USB_CONNECT */
+	GPIO37_GPIO,	/* SPITZ_GPIO_USB_HOST */
+	GPIO35_GPIO,	/* SPITZ_GPIO_USB_DEVICE */
+	GPIO22_GPIO,	/* SPITZ_GPIO_HSYNC */
+	GPIO94_GPIO,	/* SPITZ_GPIO_CF_CD */
+	GPIO105_GPIO,	/* SPITZ_GPIO_CF_IRQ */
+	GPIO106_GPIO,	/* SPITZ_GPIO_CF2_IRQ */
+
+	/* GPIO matrix keypad */
+	GPIO88_GPIO,	/* column 0 */
+	GPIO23_GPIO,	/* column 1 */
+	GPIO24_GPIO,	/* column 2 */
+	GPIO25_GPIO,	/* column 3 */
+	GPIO26_GPIO,	/* column 4 */
+	GPIO27_GPIO,	/* column 5 */
+	GPIO52_GPIO,	/* column 6 */
+	GPIO103_GPIO,	/* column 7 */
+	GPIO107_GPIO,	/* column 8 */
+	GPIO108_GPIO,	/* column 9 */
+	GPIO114_GPIO,	/* column 10 */
+	GPIO12_GPIO,	/* row 0 */
+	GPIO17_GPIO,	/* row 1 */
+	GPIO91_GPIO,	/* row 2 */
+	GPIO34_GPIO,	/* row 3 */
+	GPIO36_GPIO,	/* row 4 */
+	GPIO38_GPIO,	/* row 5 */
+	GPIO39_GPIO,	/* row 6 */
+
+	/* I2C */
+	GPIO117_I2C_SCL,
+	GPIO118_I2C_SDA,
+
+	GPIO1_GPIO | WAKEUP_ON_EDGE_RISE,
+};
 
 /*
  * Spitz SCOOP Device #1
@@ -69,10 +152,11 @@ static struct resource spitz_scoop_resources[] = {
 };
 
 static struct scoop_config spitz_scoop_setup = {
-	.io_dir 	= SPITZ_SCP_IO_DIR,
+	.io_dir		= SPITZ_SCP_IO_DIR,
 	.io_out		= SPITZ_SCP_IO_OUT,
-	.suspend_clr = SPITZ_SCP_SUS_CLR,
-	.suspend_set = SPITZ_SCP_SUS_SET,
+	.suspend_clr	= SPITZ_SCP_SUS_CLR,
+	.suspend_set	= SPITZ_SCP_SUS_SET,
+	.gpio_base	= SPITZ_SCP_GPIO_BASE,
 };
 
 struct platform_device spitzscoop_device = {
@@ -97,10 +181,11 @@ static struct resource spitz_scoop2_resources[] = {
 };
 
 static struct scoop_config spitz_scoop2_setup = {
-	.io_dir 	= SPITZ_SCP2_IO_DIR,
+	.io_dir		= SPITZ_SCP2_IO_DIR,
 	.io_out		= SPITZ_SCP2_IO_OUT,
-	.suspend_clr = SPITZ_SCP2_SUS_CLR,
-	.suspend_set = SPITZ_SCP2_SUS_SET,
+	.suspend_clr	= SPITZ_SCP2_SUS_CLR,
+	.suspend_set	= SPITZ_SCP2_SUS_SET,
+	.gpio_base	= SPITZ_SCP2_GPIO_BASE,
 };
 
 struct platform_device spitzscoop2_device = {
@@ -122,7 +207,7 @@ static void spitz_card_pwr_ctrl(int device, unsigned short new_cpr)
 	unsigned short cpr = read_scoop_reg(&spitzscoop_device.dev, SCOOP_CPR);
 
 	if (new_cpr & 0x0007) {
-	        set_scoop_gpio(&spitzscoop_device.dev, SPITZ_SCP_CF_POWER);
+		gpio_set_value(SPITZ_GPIO_CF_POWER, 1);
 		if (!(cpr & 0x0002) && !(cpr & 0x0004))
 		        mdelay(5);
 		if (device == SPITZ_PWR_CF)
@@ -138,32 +223,11 @@ static void spitz_card_pwr_ctrl(int device, unsigned short new_cpr)
 		if (!(cpr & 0x0002) && !(cpr & 0x0004)) {
 			write_scoop_reg(&spitzscoop_device.dev, SCOOP_CPR, 0x0000);
 		        mdelay(1);
-		        reset_scoop_gpio(&spitzscoop_device.dev, SPITZ_SCP_CF_POWER);
+			gpio_set_value(SPITZ_GPIO_CF_POWER, 0);
 		} else {
 		        write_scoop_reg(&spitzscoop_device.dev, SCOOP_CPR, cpr | new_cpr);
 		}
 	}
-}
-
-static void spitz_pcmcia_init(void)
-{
-	/* Setup default state of GPIO outputs
-	   before we enable them as outputs. */
-	GPSR(GPIO48_nPOE) = GPIO_bit(GPIO48_nPOE) |
-		GPIO_bit(GPIO49_nPWE) |	GPIO_bit(GPIO50_nPIOR) |
-		GPIO_bit(GPIO51_nPIOW) | GPIO_bit(GPIO54_nPCE_2);
-	GPSR(GPIO85_nPCE_1) = GPIO_bit(GPIO85_nPCE_1);
-
-	pxa_gpio_mode(GPIO48_nPOE_MD);
-	pxa_gpio_mode(GPIO49_nPWE_MD);
-	pxa_gpio_mode(GPIO50_nPIOR_MD);
-	pxa_gpio_mode(GPIO51_nPIOW_MD);
-	pxa_gpio_mode(GPIO55_nPREG_MD);
-	pxa_gpio_mode(GPIO56_nPWAIT_MD);
-	pxa_gpio_mode(GPIO57_nIOIS16_MD);
-	pxa_gpio_mode(GPIO85_nPCE_1_MD);
-	pxa_gpio_mode(GPIO54_nPCE_2_MD);
-	pxa_gpio_mode(GPIO104_pSKTSEL_MD);
 }
 
 static void spitz_pcmcia_pwr(struct device *scoop, unsigned short cpr, int nr)
@@ -191,43 +255,221 @@ static struct scoop_pcmcia_dev spitz_pcmcia_scoop[] = {
 static struct scoop_pcmcia_config spitz_pcmcia_config = {
 	.devs         = &spitz_pcmcia_scoop[0],
 	.num_devs     = 2,
-	.pcmcia_init  = spitz_pcmcia_init,
 	.power_ctrl   = spitz_pcmcia_pwr,
 };
 
 EXPORT_SYMBOL(spitzscoop_device);
 EXPORT_SYMBOL(spitzscoop2_device);
 
-
 /*
- * Spitz SSP Device
- *
- * Set the parent as the scoop device because a lot of SSP devices
- * also use scoop functions and this makes the power up/down order
- * work correctly.
+ * Spitz Keyboard Device
  */
-struct platform_device spitzssp_device = {
-	.name		= "corgi-ssp",
-	.dev		= {
- 		.parent = &spitzscoop_device.dev,
-	},
+#define SPITZ_KEY_CALENDAR	KEY_F1
+#define SPITZ_KEY_ADDRESS	KEY_F2
+#define SPITZ_KEY_FN		KEY_F3
+#define SPITZ_KEY_CANCEL	KEY_F4
+#define SPITZ_KEY_EXOK		KEY_F5
+#define SPITZ_KEY_EXCANCEL	KEY_F6
+#define SPITZ_KEY_EXJOGDOWN	KEY_F7
+#define SPITZ_KEY_EXJOGUP	KEY_F8
+#define SPITZ_KEY_JAP1		KEY_LEFTALT
+#define SPITZ_KEY_JAP2		KEY_RIGHTCTRL
+#define SPITZ_KEY_SYNC		KEY_F9
+#define SPITZ_KEY_MAIL		KEY_F10
+#define SPITZ_KEY_OK		KEY_F11
+#define SPITZ_KEY_MENU		KEY_F12
+
+static const uint32_t spitzkbd_keymap[] = {
+	KEY(0, 0, KEY_LEFTCTRL),
+	KEY(0, 1, KEY_1),
+	KEY(0, 2, KEY_3),
+	KEY(0, 3, KEY_5),
+	KEY(0, 4, KEY_6),
+	KEY(0, 5, KEY_7),
+	KEY(0, 6, KEY_9),
+	KEY(0, 7, KEY_0),
+	KEY(0, 8, KEY_BACKSPACE),
+	KEY(0, 9, SPITZ_KEY_EXOK),	/* EXOK */
+	KEY(0, 10, SPITZ_KEY_EXCANCEL),	/* EXCANCEL */
+	KEY(1, 1, KEY_2),
+	KEY(1, 2, KEY_4),
+	KEY(1, 3, KEY_R),
+	KEY(1, 4, KEY_Y),
+	KEY(1, 5, KEY_8),
+	KEY(1, 6, KEY_I),
+	KEY(1, 7, KEY_O),
+	KEY(1, 8, KEY_P),
+	KEY(1, 9, SPITZ_KEY_EXJOGDOWN),	/* EXJOGDOWN */
+	KEY(1, 10, SPITZ_KEY_EXJOGUP),	/* EXJOGUP */
+	KEY(2, 0, KEY_TAB),
+	KEY(2, 1, KEY_Q),
+	KEY(2, 2, KEY_E),
+	KEY(2, 3, KEY_T),
+	KEY(2, 4, KEY_G),
+	KEY(2, 5, KEY_U),
+	KEY(2, 6, KEY_J),
+	KEY(2, 7, KEY_K),
+	KEY(3, 0, SPITZ_KEY_ADDRESS),	/* ADDRESS */
+	KEY(3, 1, KEY_W),
+	KEY(3, 2, KEY_S),
+	KEY(3, 3, KEY_F),
+	KEY(3, 4, KEY_V),
+	KEY(3, 5, KEY_H),
+	KEY(3, 6, KEY_M),
+	KEY(3, 7, KEY_L),
+	KEY(3, 9, KEY_RIGHTSHIFT),
+	KEY(4, 0, SPITZ_KEY_CALENDAR),	/* CALENDAR */
+	KEY(4, 1, KEY_A),
+	KEY(4, 2, KEY_D),
+	KEY(4, 3, KEY_C),
+	KEY(4, 4, KEY_B),
+	KEY(4, 5, KEY_N),
+	KEY(4, 6, KEY_DOT),
+	KEY(4, 8, KEY_ENTER),
+	KEY(4, 9, KEY_LEFTSHIFT),
+	KEY(5, 0, SPITZ_KEY_MAIL),	/* MAIL */
+	KEY(5, 1, KEY_Z),
+	KEY(5, 2, KEY_X),
+	KEY(5, 3, KEY_MINUS),
+	KEY(5, 4, KEY_SPACE),
+	KEY(5, 5, KEY_COMMA),
+	KEY(5, 7, KEY_UP),
+	KEY(5, 10, SPITZ_KEY_FN),	/* FN */
+	KEY(6, 0, KEY_SYSRQ),
+	KEY(6, 1, SPITZ_KEY_JAP1),	/* JAP1 */
+	KEY(6, 2, SPITZ_KEY_JAP2),	/* JAP2 */
+	KEY(6, 3, SPITZ_KEY_CANCEL),	/* CANCEL */
+	KEY(6, 4, SPITZ_KEY_OK),	/* OK */
+	KEY(6, 5, SPITZ_KEY_MENU),	/* MENU */
+	KEY(6, 6, KEY_LEFT),
+	KEY(6, 7, KEY_DOWN),
+	KEY(6, 8, KEY_RIGHT),
+};
+
+static const struct matrix_keymap_data spitzkbd_keymap_data = {
+	.keymap		= spitzkbd_keymap,
+	.keymap_size	= ARRAY_SIZE(spitzkbd_keymap),
+};
+
+static const uint32_t spitzkbd_row_gpios[] =
+		{ 12, 17, 91, 34, 36, 38, 39 };
+static const uint32_t spitzkbd_col_gpios[] =
+		{ 88, 23, 24, 25, 26, 27, 52, 103, 107, 108, 114 };
+
+static struct matrix_keypad_platform_data spitzkbd_pdata = {
+	.keymap_data		= &spitzkbd_keymap_data,
+	.row_gpios		= spitzkbd_row_gpios,
+	.col_gpios		= spitzkbd_col_gpios,
+	.num_row_gpios		= ARRAY_SIZE(spitzkbd_row_gpios),
+	.num_col_gpios		= ARRAY_SIZE(spitzkbd_col_gpios),
+	.col_scan_delay_us	= 10,
+	.debounce_ms		= 10,
+	.wakeup			= 1,
+};
+
+static struct platform_device spitzkbd_device = {
+	.name		= "matrix-keypad",
 	.id		= -1,
+	.dev		= {
+		.platform_data = &spitzkbd_pdata,
+	},
 };
 
-struct corgissp_machinfo spitz_ssp_machinfo = {
-	.port		= 2,
-	.cs_lcdcon	= SPITZ_GPIO_LCDCON_CS,
-	.cs_ads7846	= SPITZ_GPIO_ADS7846_CS,
-	.cs_max1111	= SPITZ_GPIO_MAX1111_CS,
-	.clk_lcdcon	= 520,
-	.clk_ads7846	= 14,
-	.clk_max1111	= 56,
+
+static struct gpio_keys_button spitz_gpio_keys[] = {
+	{
+		.type	= EV_PWR,
+		.code	= KEY_SUSPEND,
+		.gpio	= SPITZ_GPIO_ON_KEY,
+		.desc	= "On/Off",
+		.wakeup	= 1,
+	},
+	/* Two buttons detecting the lid state */
+	{
+		.type	= EV_SW,
+		.code	= 0,
+		.gpio	= SPITZ_GPIO_SWA,
+		.desc	= "﻿Display Down",
+	},
+	{
+		.type	= EV_SW,
+		.code	= 1,
+		.gpio	= SPITZ_GPIO_SWB,
+		.desc	= "﻿Lid Closed",
+	},
+};
+
+static struct gpio_keys_platform_data spitz_gpio_keys_platform_data = {
+	.buttons	= spitz_gpio_keys,
+	.nbuttons	= ARRAY_SIZE(spitz_gpio_keys),
+};
+
+static struct platform_device spitz_gpio_keys_device = {
+	.name	= "gpio-keys",
+	.id	= -1,
+	.dev	= {
+		.platform_data	= &spitz_gpio_keys_platform_data,
+	},
 };
 
 
 /*
- * Spitz Backlight Device
+ * Spitz LEDs
  */
+static struct gpio_led spitz_gpio_leds[] = {
+	{
+		.name			= "spitz:amber:charge",
+		.default_trigger	= "sharpsl-charge",
+		.gpio			= SPITZ_GPIO_LED_ORANGE,
+	},
+	{
+		.name			= "spitz:green:hddactivity",
+		.default_trigger	= "ide-disk",
+		.gpio			= SPITZ_GPIO_LED_GREEN,
+	},
+};
+
+static struct gpio_led_platform_data spitz_gpio_leds_info = {
+	.leds		= spitz_gpio_leds,
+	.num_leds	= ARRAY_SIZE(spitz_gpio_leds),
+};
+
+static struct platform_device spitzled_device = {
+	.name		= "leds-gpio",
+	.id		= -1,
+	.dev		= {
+		.platform_data = &spitz_gpio_leds_info,
+	},
+};
+
+#if defined(CONFIG_SPI_PXA2XX) || defined(CONFIG_SPI_PXA2XX_MODULE)
+static struct pxa2xx_spi_master spitz_spi_info = {
+	.num_chipselect	= 3,
+};
+
+static void spitz_wait_for_hsync(void)
+{
+	while (gpio_get_value(SPITZ_GPIO_HSYNC))
+		cpu_relax();
+
+	while (!gpio_get_value(SPITZ_GPIO_HSYNC))
+		cpu_relax();
+}
+
+static struct ads7846_platform_data spitz_ads7846_info = {
+	.model			= 7846,
+	.vref_delay_usecs	= 100,
+	.x_plate_ohms		= 419,
+	.y_plate_ohms		= 486,
+	.pressure_max		= 1024,
+	.gpio_pendown		= SPITZ_GPIO_TP_INT,
+	.wait_for_sync		= spitz_wait_for_hsync,
+};
+
+static struct pxa2xx_spi_chip spitz_ads7846_chip = {
+	.gpio_cs		= SPITZ_GPIO_ADS7846_CS,
+};
+
 static void spitz_bl_kick_battery(void)
 {
 	void (*kick_batt)(void);
@@ -239,117 +481,62 @@ static void spitz_bl_kick_battery(void)
 	}
 }
 
-static struct generic_bl_info spitz_bl_machinfo = {
-	.name = "corgi-bl",
-	.default_intensity = 0x1f,
-	.limit_mask = 0x0b,
-	.max_intensity = 0x2f,
-	.kick_battery = spitz_bl_kick_battery,
+static struct corgi_lcd_platform_data spitz_lcdcon_info = {
+	.init_mode		= CORGI_LCD_MODE_VGA,
+	.max_intensity		= 0x2f,
+	.default_intensity	= 0x1f,
+	.limit_mask		= 0x0b,
+	.gpio_backlight_cont	= SPITZ_GPIO_BACKLIGHT_CONT,
+	.gpio_backlight_on	= SPITZ_GPIO_BACKLIGHT_ON,
+	.kick_battery		= spitz_bl_kick_battery,
 };
 
-static struct platform_device spitzbl_device = {
-	.name		= "generic-bl",
-	.dev		= {
- 		.platform_data	= &spitz_bl_machinfo,
+static struct pxa2xx_spi_chip spitz_lcdcon_chip = {
+	.gpio_cs	= SPITZ_GPIO_LCDCON_CS,
+};
+
+static struct pxa2xx_spi_chip spitz_max1111_chip = {
+	.gpio_cs	= SPITZ_GPIO_MAX1111_CS,
+};
+
+static struct spi_board_info spitz_spi_devices[] = {
+	{
+		.modalias	= "ads7846",
+		.max_speed_hz	= 1200000,
+		.bus_num	= 2,
+		.chip_select	= 0,
+		.platform_data	= &spitz_ads7846_info,
+		.controller_data= &spitz_ads7846_chip,
+		.irq		= gpio_to_irq(SPITZ_GPIO_TP_INT),
+	}, {
+		.modalias	= "corgi-lcd",
+		.max_speed_hz	= 50000,
+		.bus_num	= 2,
+		.chip_select	= 1,
+		.platform_data	= &spitz_lcdcon_info,
+		.controller_data= &spitz_lcdcon_chip,
+	}, {
+		.modalias	= "max1111",
+		.max_speed_hz	= 450000,
+		.bus_num	= 2,
+		.chip_select	= 2,
+		.controller_data= &spitz_max1111_chip,
 	},
-	.id		= -1,
 };
 
-
-/*
- * Spitz Keyboard Device
- */
-static struct platform_device spitzkbd_device = {
-	.name		= "spitz-keyboard",
-	.id		= -1,
-};
-
-
-/*
- * Spitz LEDs
- */
-static struct platform_device spitzled_device = {
-	.name		= "spitz-led",
-	.id		= -1,
-};
-
-/*
- * Spitz Touch Screen Device
- */
-
-static unsigned long (*get_hsync_invperiod)(struct device *dev);
-
-static void inline sharpsl_wait_sync(int gpio)
+static void __init spitz_init_spi(void)
 {
-	while((GPLR(gpio) & GPIO_bit(gpio)) == 0);
-	while((GPLR(gpio) & GPIO_bit(gpio)) != 0);
-}
-
-static struct device *spitz_pxafb_dev;
-
-static int is_pxafb_device(struct device * dev, void * data)
-{
-	struct platform_device *pdev = container_of(dev, struct platform_device, dev);
-
-	return (strncmp(pdev->name, "pxa2xx-fb", 9) == 0);
-}
-
-static unsigned long spitz_get_hsync_invperiod(void)
-{
-#ifdef CONFIG_FB_PXA
-	if (!spitz_pxafb_dev) {
-		spitz_pxafb_dev = bus_find_device(&platform_bus_type, NULL, NULL, is_pxafb_device);
-		if (!spitz_pxafb_dev)
-			return 0;
+	if (machine_is_akita()) {
+		spitz_lcdcon_info.gpio_backlight_cont = AKITA_GPIO_BACKLIGHT_CONT;
+		spitz_lcdcon_info.gpio_backlight_on = AKITA_GPIO_BACKLIGHT_ON;
 	}
-	if (!get_hsync_invperiod)
-		get_hsync_invperiod = symbol_get(pxafb_get_hsync_time);
-	if (!get_hsync_invperiod)
+
+	pxa2xx_set_spi_info(2, &spitz_spi_info);
+	spi_register_board_info(ARRAY_AND_SIZE(spitz_spi_devices));
+}
+#else
+static inline void spitz_init_spi(void) {}
 #endif
-		return 0;
-
-	return get_hsync_invperiod(spitz_pxafb_dev);
-}
-
-static void spitz_put_hsync(void)
-{
-	put_device(spitz_pxafb_dev);
-	if (get_hsync_invperiod)
-		symbol_put(pxafb_get_hsync_time);
-	spitz_pxafb_dev = NULL;
-	get_hsync_invperiod = NULL;
-}
-
-static void spitz_wait_hsync(void)
-{
-	sharpsl_wait_sync(SPITZ_GPIO_HSYNC);
-}
-
-static struct resource spitzts_resources[] = {
-	[0] = {
-		.start		= SPITZ_IRQ_GPIO_TP_INT,
-		.end		= SPITZ_IRQ_GPIO_TP_INT,
-		.flags		= IORESOURCE_IRQ,
-	},
-};
-
-static struct corgits_machinfo  spitz_ts_machinfo = {
-	.get_hsync_invperiod = spitz_get_hsync_invperiod,
-	.put_hsync           = spitz_put_hsync,
-	.wait_hsync          = spitz_wait_hsync,
-};
-
-static struct platform_device spitzts_device = {
-	.name		= "corgi-ts",
-	.dev		= {
- 		.parent = &spitzssp_device.dev,
-		.platform_data	= &spitz_ts_machinfo,
-	},
-	.id		= -1,
-	.num_resources	= ARRAY_SIZE(spitzts_resources),
-	.resource	= spitzts_resources,
-};
-
 
 /*
  * MMC/SD Device
@@ -357,34 +544,6 @@ static struct platform_device spitzts_device = {
  * The card detect interrupt isn't debounced so we delay it by 250ms
  * to give the card a chance to fully insert/eject.
  */
-
-static struct pxamci_platform_data spitz_mci_platform_data;
-
-static int spitz_mci_init(struct device *dev, irq_handler_t spitz_detect_int, void *data)
-{
-	int err;
-
-	/* setup GPIO for PXA27x MMC controller	*/
-	pxa_gpio_mode(GPIO32_MMCCLK_MD);
-	pxa_gpio_mode(GPIO112_MMCCMD_MD);
-	pxa_gpio_mode(GPIO92_MMCDAT0_MD);
-	pxa_gpio_mode(GPIO109_MMCDAT1_MD);
-	pxa_gpio_mode(GPIO110_MMCDAT2_MD);
-	pxa_gpio_mode(GPIO111_MMCDAT3_MD);
-	pxa_gpio_mode(SPITZ_GPIO_nSD_DETECT | GPIO_IN);
-	pxa_gpio_mode(SPITZ_GPIO_nSD_WP | GPIO_IN);
-
-	spitz_mci_platform_data.detect_delay = msecs_to_jiffies(250);
-
-	err = request_irq(SPITZ_IRQ_GPIO_nSD_DETECT, spitz_detect_int,
-			  IRQF_DISABLED | IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING,
-			  "MMC card detect", data);
-	if (err)
-		printk(KERN_ERR "spitz_mci_init: MMC/SD: can't request MMC card detect IRQ\n");
-
-	return err;
-}
-
 static void spitz_mci_setpower(struct device *dev, unsigned int vdd)
 {
 	struct pxamci_platform_data* p_d = dev->platform_data;
@@ -395,22 +554,12 @@ static void spitz_mci_setpower(struct device *dev, unsigned int vdd)
 		spitz_card_pwr_ctrl(SPITZ_PWR_SD, 0x0000);
 }
 
-static int spitz_mci_get_ro(struct device *dev)
-{
-	return GPLR(SPITZ_GPIO_nSD_WP) & GPIO_bit(SPITZ_GPIO_nSD_WP);
-}
-
-static void spitz_mci_exit(struct device *dev, void *data)
-{
-	free_irq(SPITZ_IRQ_GPIO_nSD_DETECT, data);
-}
-
 static struct pxamci_platform_data spitz_mci_platform_data = {
-	.ocr_mask	= MMC_VDD_32_33|MMC_VDD_33_34,
-	.init 		= spitz_mci_init,
-	.get_ro		= spitz_mci_get_ro,
-	.setpower 	= spitz_mci_setpower,
-	.exit		= spitz_mci_exit,
+	.ocr_mask		= MMC_VDD_32_33|MMC_VDD_33_34,
+	.setpower 		= spitz_mci_setpower,
+	.gpio_card_detect	= SPITZ_GPIO_nSD_DETECT,
+	.gpio_card_ro		= SPITZ_GPIO_nSD_WP,
+	.gpio_power		= -1,
 };
 
 
@@ -419,27 +568,30 @@ static struct pxamci_platform_data spitz_mci_platform_data = {
  */
 static int spitz_ohci_init(struct device *dev)
 {
-	/* Only Port 2 is connected */
-	pxa_gpio_mode(SPITZ_GPIO_USB_CONNECT | GPIO_IN);
-	pxa_gpio_mode(SPITZ_GPIO_USB_HOST | GPIO_OUT);
-	pxa_gpio_mode(SPITZ_GPIO_USB_DEVICE | GPIO_IN);
+	int err;
 
-	/* Setup USB Port 2 Output Control Register */
+	err = gpio_request(SPITZ_GPIO_USB_HOST, "USB_HOST");
+	if (err)
+		return err;
+
+	/* Only Port 2 is connected
+	 * Setup USB Port 2 Output Control Register
+	 */
 	UP2OCR = UP2OCR_HXS | UP2OCR_HXOE | UP2OCR_DPPDE | UP2OCR_DMPDE;
 
-	GPSR(SPITZ_GPIO_USB_HOST) = GPIO_bit(SPITZ_GPIO_USB_HOST);
+	return gpio_direction_output(SPITZ_GPIO_USB_HOST, 1);
+}
 
-	UHCHR = (UHCHR) &
-		~(UHCHR_SSEP1 | UHCHR_SSEP2 | UHCHR_SSEP3 | UHCHR_SSE);
-
-	UHCRHDA |= UHCRHDA_NOCP;
-
-	return 0;
+static void spitz_ohci_exit(struct device *dev)
+{
+	gpio_free(SPITZ_GPIO_USB_HOST);
 }
 
 static struct pxaohci_platform_data spitz_ohci_platform_data = {
 	.port_mode	= PMM_NPS_MODE,
 	.init		= spitz_ohci_init,
+	.exit		= spitz_ohci_exit,
+	.flags		= ENABLE_PORT_ALL | NO_OC_PROTECTION,
 	.power_budget	= 150,
 };
 
@@ -447,43 +599,16 @@ static struct pxaohci_platform_data spitz_ohci_platform_data = {
 /*
  * Irda
  */
-static void spitz_irda_transceiver_mode(struct device *dev, int mode)
-{
-	if (mode & IR_OFF)
-		set_scoop_gpio(&spitzscoop2_device.dev, SPITZ_SCP2_IR_ON);
-	else
-		reset_scoop_gpio(&spitzscoop2_device.dev, SPITZ_SCP2_IR_ON);
-	pxa2xx_transceiver_mode(dev, mode);
-}
-
-#ifdef CONFIG_MACH_AKITA
-static void akita_irda_transceiver_mode(struct device *dev, int mode)
-{
-	if (mode & IR_OFF)
-		akita_set_ioexp(&akitaioexp_device.dev, AKITA_IOEXP_IR_ON);
-	else
-		akita_reset_ioexp(&akitaioexp_device.dev, AKITA_IOEXP_IR_ON);
-	pxa2xx_transceiver_mode(dev, mode);
-}
-#endif
 
 static struct pxaficp_platform_data spitz_ficp_platform_data = {
-	.transceiver_cap  = IR_SIRMODE | IR_OFF,
-	.transceiver_mode = spitz_irda_transceiver_mode,
+/* .gpio_pwdown is set in spitz_init() and akita_init() accordingly */
+	.transceiver_cap	= IR_SIRMODE | IR_OFF,
 };
 
 
 /*
  * Spitz PXA Framebuffer
  */
-
-static void spitz_lcd_power(int on, struct fb_var_screeninfo *var)
-{
-	if (on)
-		corgi_lcdtg_hw_init(var->xres);
-	else
-		corgi_lcdtg_suspend();
-}
 
 static struct pxafb_mode_info spitz_pxafb_modes[] = {
 {
@@ -517,27 +642,103 @@ static struct pxafb_mach_info spitz_pxafb_info = {
 	.modes          = &spitz_pxafb_modes[0],
 	.num_modes      = 2,
 	.fixed_modes    = 1,
-	.lccr0          = LCCR0_Color | LCCR0_Sngl | LCCR0_Act | LCCR0_LDDALT | LCCR0_OUC | LCCR0_CMDIM | LCCR0_RDSTM,
-	.lccr3          = LCCR3_PixRsEdg | LCCR3_OutEnH,
-	.pxafb_lcd_power = spitz_lcd_power,
+	.lcd_conn	= LCD_COLOR_TFT_16BPP | LCD_ALTERNATE_MAPPING,
+};
+
+static struct mtd_partition sharpsl_nand_partitions[] = {
+	{
+		.name = "System Area",
+		.offset = 0,
+		.size = 7 * 1024 * 1024,
+	},
+	{
+		.name = "Root Filesystem",
+		.offset = 7 * 1024 * 1024,
+	},
+	{
+		.name = "Home Filesystem",
+		.offset = MTDPART_OFS_APPEND,
+		.size = MTDPART_SIZ_FULL,
+	},
+};
+
+static uint8_t scan_ff_pattern[] = { 0xff, 0xff };
+
+static struct nand_bbt_descr sharpsl_bbt = {
+	.options = 0,
+	.offs = 4,
+	.len = 2,
+	.pattern = scan_ff_pattern
+};
+
+static struct sharpsl_nand_platform_data sharpsl_nand_platform_data = {
+	.badblock_pattern	= &sharpsl_bbt,
+	.partitions		= sharpsl_nand_partitions,
+	.nr_partitions		= ARRAY_SIZE(sharpsl_nand_partitions),
+};
+
+static struct resource sharpsl_nand_resources[] = {
+	{
+		.start	= 0x0C000000,
+		.end	= 0x0C000FFF,
+		.flags	= IORESOURCE_MEM,
+	},
+};
+
+static struct platform_device sharpsl_nand_device = {
+	.name		= "sharpsl-nand",
+	.id		= -1,
+	.resource	= sharpsl_nand_resources,
+	.num_resources	= ARRAY_SIZE(sharpsl_nand_resources),
+	.dev.platform_data	= &sharpsl_nand_platform_data,
 };
 
 
+static struct mtd_partition sharpsl_rom_parts[] = {
+	{
+		.name	="Boot PROM Filesystem",
+		.offset	= 0x00140000,
+		.size	= MTDPART_SIZ_FULL,
+	},
+};
+
+static struct physmap_flash_data sharpsl_rom_data = {
+	.width		= 2,
+	.nr_parts	= ARRAY_SIZE(sharpsl_rom_parts),
+	.parts		= sharpsl_rom_parts,
+};
+
+static struct resource sharpsl_rom_resources[] = {
+	{
+		.start	= 0x00000000,
+		.end	= 0x007fffff,
+		.flags	= IORESOURCE_MEM,
+	},
+};
+
+static struct platform_device sharpsl_rom_device = {
+	.name	= "physmap-flash",
+	.id	= -1,
+	.resource = sharpsl_rom_resources,
+	.num_resources = ARRAY_SIZE(sharpsl_rom_resources),
+	.dev.platform_data = &sharpsl_rom_data,
+};
+
 static struct platform_device *devices[] __initdata = {
 	&spitzscoop_device,
-	&spitzssp_device,
 	&spitzkbd_device,
-	&spitzts_device,
-	&spitzbl_device,
+	&spitz_gpio_keys_device,
 	&spitzled_device,
+	&sharpsl_nand_device,
+	&sharpsl_rom_device,
 };
 
 static void spitz_poweroff(void)
 {
-	arm_machine_restart('g');
+	arm_machine_restart('g', NULL);
 }
 
-static void spitz_restart(char mode)
+static void spitz_restart(char mode, const char *cmd)
 {
 	/* Bootloader magic for a reboot */
 	if((MSC0 & 0xffff0000) == 0x7ff00000)
@@ -548,62 +749,67 @@ static void spitz_restart(char mode)
 
 static void __init common_init(void)
 {
-	init_gpio_reset(SPITZ_GPIO_ON_RESET, 1);
+	init_gpio_reset(SPITZ_GPIO_ON_RESET, 1, 0);
 	pm_power_off = spitz_poweroff;
 	arm_pm_restart = spitz_restart;
 
-	PMCR = 0x00;
+	if (machine_is_spitz()) {
+		sharpsl_nand_partitions[1].size = 5 * 1024 * 1024;
+	} else if (machine_is_akita()) {
+		sharpsl_nand_partitions[1].size = 58 * 1024 * 1024;
+	} else if (machine_is_borzoi()) {
+		sharpsl_nand_partitions[1].size = 32 * 1024 * 1024;
+	}
 
-	/* setup sleep mode values */
-	PWER  = 0x00000002;
-	PFER  = 0x00000000;
-	PRER  = 0x00000002;
-	PGSR0 = 0x0158C000;
-	PGSR1 = 0x00FF0080;
-	PGSR2 = 0x0001C004;
+	PMCR = 0x00;
 
 	/* Stop 3.6MHz and drive HIGH to PCMCIA and CS */
 	PCFR |= PCFR_OPDE;
 
-	corgi_ssp_set_machinfo(&spitz_ssp_machinfo);
+	pxa2xx_mfp_config(ARRAY_AND_SIZE(spitz_pin_config));
 
-	pxa_gpio_mode(SPITZ_GPIO_HSYNC | GPIO_IN);
+	spitz_init_spi();
 
 	platform_add_devices(devices, ARRAY_SIZE(devices));
+	spitz_mci_platform_data.detect_delay = msecs_to_jiffies(250);
 	pxa_set_mci_info(&spitz_mci_platform_data);
 	pxa_set_ohci_info(&spitz_ohci_platform_data);
 	pxa_set_ficp_info(&spitz_ficp_platform_data);
-	set_pxa_fb_parent(&spitzssp_device.dev);
 	set_pxa_fb_info(&spitz_pxafb_info);
 	pxa_set_i2c_info(NULL);
 }
 
+#if defined(CONFIG_MACH_AKITA) || defined(CONFIG_MACH_BORZOI)
+static struct nand_bbt_descr sharpsl_akita_bbt = {
+	.options = 0,
+	.offs = 4,
+	.len = 1,
+	.pattern = scan_ff_pattern
+};
+
+static struct nand_ecclayout akita_oobinfo = {
+	.eccbytes = 24,
+	.eccpos = {
+		   0x5, 0x1, 0x2, 0x3, 0x6, 0x7, 0x15, 0x11,
+		   0x12, 0x13, 0x16, 0x17, 0x25, 0x21, 0x22, 0x23,
+		   0x26, 0x27, 0x35, 0x31, 0x32, 0x33, 0x36, 0x37},
+	.oobfree = {{0x08, 0x09}}
+};
+#endif
+
 #if defined(CONFIG_MACH_SPITZ) || defined(CONFIG_MACH_BORZOI)
-static void spitz_bl_set_intensity(int intensity)
-{
-	if (intensity > 0x10)
-		intensity += 0x10;
-
-	/* Bits 0-4 are accessed via the SSP interface */
-	corgi_ssp_blduty_set(intensity & 0x1f);
-
-	/* Bit 5 is via SCOOP */
-	if (intensity & 0x0020)
-		reset_scoop_gpio(&spitzscoop2_device.dev, SPITZ_SCP2_BACKLIGHT_CONT);
-	else
-		set_scoop_gpio(&spitzscoop2_device.dev, SPITZ_SCP2_BACKLIGHT_CONT);
-
-	if (intensity)
-		set_scoop_gpio(&spitzscoop2_device.dev, SPITZ_SCP2_BACKLIGHT_ON);
-	else
-		reset_scoop_gpio(&spitzscoop2_device.dev, SPITZ_SCP2_BACKLIGHT_ON);
-}
-
 static void __init spitz_init(void)
 {
-	platform_scoop_config = &spitz_pcmcia_config;
+	spitz_ficp_platform_data.gpio_pwdown = SPITZ_GPIO_IR_ON;
 
-	spitz_bl_machinfo.set_bl_intensity = spitz_bl_set_intensity;
+#ifdef CONFIG_MACH_BORZOI
+	if (machine_is_borzoi()) {
+		sharpsl_nand_platform_data.badblock_pattern = &sharpsl_akita_bbt;
+		sharpsl_nand_platform_data.ecc_layout = &akita_oobinfo;
+	}
+#endif
+
+	platform_scoop_config = &spitz_pcmcia_config;
 
 	common_init();
 
@@ -615,45 +821,31 @@ static void __init spitz_init(void)
 /*
  * Akita IO Expander
  */
-struct platform_device akitaioexp_device = {
-	.name		= "akita-ioexp",
-	.id		= -1,
+static struct pca953x_platform_data akita_ioexp = {
+	.gpio_base		= AKITA_IOEXP_GPIO_BASE,
 };
 
-EXPORT_SYMBOL_GPL(akitaioexp_device);
-
-static void akita_bl_set_intensity(int intensity)
-{
-	if (intensity > 0x10)
-		intensity += 0x10;
-
-	/* Bits 0-4 are accessed via the SSP interface */
-	corgi_ssp_blduty_set(intensity & 0x1f);
-
-	/* Bit 5 is via IO-Expander */
-	if (intensity & 0x0020)
-		akita_reset_ioexp(&akitaioexp_device.dev, AKITA_IOEXP_BACKLIGHT_CONT);
-	else
-		akita_set_ioexp(&akitaioexp_device.dev, AKITA_IOEXP_BACKLIGHT_CONT);
-
-	if (intensity)
-		akita_set_ioexp(&akitaioexp_device.dev, AKITA_IOEXP_BACKLIGHT_ON);
-	else
-		akita_reset_ioexp(&akitaioexp_device.dev, AKITA_IOEXP_BACKLIGHT_ON);
-}
+static struct i2c_board_info akita_i2c_board_info[] = {
+	{
+		.type		= "max7310",
+		.addr		= 0x18,
+		.platform_data	= &akita_ioexp,
+	},
+};
 
 static void __init akita_init(void)
 {
-	spitz_ficp_platform_data.transceiver_mode = akita_irda_transceiver_mode;
+	spitz_ficp_platform_data.gpio_pwdown = AKITA_GPIO_IR_ON;
+
+	sharpsl_nand_platform_data.badblock_pattern = &sharpsl_akita_bbt;
+	sharpsl_nand_platform_data.ecc_layout = &akita_oobinfo;
 
 	/* We just pretend the second element of the array doesn't exist */
 	spitz_pcmcia_config.num_devs = 1;
 	platform_scoop_config = &spitz_pcmcia_config;
-	spitz_bl_machinfo.set_bl_intensity = akita_bl_set_intensity;
 
-	platform_device_register(&akitaioexp_device);
+	i2c_register_board_info(0, ARRAY_AND_SIZE(akita_i2c_board_info));
 
-	spitzscoop_device.dev.parent = &akitaioexp_device.dev;
 	common_init();
 }
 #endif

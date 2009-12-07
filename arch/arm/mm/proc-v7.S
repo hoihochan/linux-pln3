@@ -9,25 +9,44 @@
  *
  *  This is the "shell" of the ARMv7 processor support.
  */
+#include <linux/init.h>
 #include <linux/linkage.h>
 #include <asm/assembler.h>
 #include <asm/asm-offsets.h>
-#include <asm/elf.h>
+#include <asm/hwcap.h>
 #include <asm/pgtable-hwdef.h>
 #include <asm/pgtable.h>
 
 #include "proc-macros.S"
 
-#define TTB_C		(1 << 0)
 #define TTB_S		(1 << 1)
+#define TTB_RGN_NC	(0 << 3)
+#define TTB_RGN_OC_WBWA	(1 << 3)
 #define TTB_RGN_OC_WT	(2 << 3)
 #define TTB_RGN_OC_WB	(3 << 3)
+#define TTB_NOS		(1 << 5)
+#define TTB_IRGN_NC	((0 << 0) | (0 << 6))
+#define TTB_IRGN_WBWA	((0 << 0) | (1 << 6))
+#define TTB_IRGN_WT	((1 << 0) | (0 << 6))
+#define TTB_IRGN_WB	((1 << 0) | (1 << 6))
+
+#ifndef CONFIG_SMP
+/* PTWs cacheable, inner WB not shareable, outer WB not shareable */
+#define TTB_FLAGS	TTB_IRGN_WB|TTB_RGN_OC_WB
+#define PMD_FLAGS	PMD_SECT_WB
+#else
+/* PTWs cacheable, inner WBWA shareable, outer WBWA not shareable */
+#define TTB_FLAGS	TTB_IRGN_WBWA|TTB_S|TTB_NOS|TTB_RGN_OC_WBWA
+#define PMD_FLAGS	PMD_SECT_WBWA|PMD_SECT_S
+#endif
 
 ENTRY(cpu_v7_proc_init)
 	mov	pc, lr
+ENDPROC(cpu_v7_proc_init)
 
 ENTRY(cpu_v7_proc_fin)
 	mov	pc, lr
+ENDPROC(cpu_v7_proc_fin)
 
 /*
  *	cpu_v7_reset(loc)
@@ -43,6 +62,7 @@ ENTRY(cpu_v7_proc_fin)
 	.align	5
 ENTRY(cpu_v7_reset)
 	mov	pc, r0
+ENDPROC(cpu_v7_reset)
 
 /*
  *	cpu_v7_do_idle()
@@ -52,8 +72,10 @@ ENTRY(cpu_v7_reset)
  *	IRQs are already disabled.
  */
 ENTRY(cpu_v7_do_idle)
-	.long	0xe320f003			@ ARM V7 WFI instruction
+	dsb					@ WFI may enter a low-power mode
+	wfi
 	mov	pc, lr
+ENDPROC(cpu_v7_do_idle)
 
 ENTRY(cpu_v7_dcache_clean_area)
 #ifndef TLB_CAN_READ_FROM_L1_CACHE
@@ -65,6 +87,7 @@ ENTRY(cpu_v7_dcache_clean_area)
 	dsb
 #endif
 	mov	pc, lr
+ENDPROC(cpu_v7_dcache_clean_area)
 
 /*
  *	cpu_v7_switch_mm(pgd_phys, tsk)
@@ -80,7 +103,10 @@ ENTRY(cpu_v7_switch_mm)
 #ifdef CONFIG_MMU
 	mov	r2, #0
 	ldr	r1, [r1, #MM_CONTEXT_ID]	@ get mm->context.id
-	orr	r0, r0, #TTB_RGN_OC_WB		@ mark PTWs outer cacheable, WB
+	orr	r0, r0, #TTB_FLAGS
+#ifdef CONFIG_ARM_ERRATA_430973
+	mcr	p15, 0, r2, c7, c5, 6		@ flush BTAC/BTB
+#endif
 	mcr	p15, 0, r2, c13, c0, 1		@ set reserved context ID
 	isb
 1:	mcr	p15, 0, r0, c2, c0, 0		@ set TTB 0
@@ -89,6 +115,7 @@ ENTRY(cpu_v7_switch_mm)
 	isb
 #endif
 	mov	pc, lr
+ENDPROC(cpu_v7_switch_mm)
 
 /*
  *	cpu_v7_set_pte_ext(ptep, pte)
@@ -99,25 +126,20 @@ ENTRY(cpu_v7_switch_mm)
  *		  (hardware version is stored at -1024 bytes)
  *	- pte   - PTE value to store
  *	- ext	- value for extended PTE bits
- *
- *	Permissions:
- *	  YUWD  APX AP1 AP0	SVC	User
- *	  0xxx   0   0   0	no acc	no acc
- *	  100x   1   0   1	r/o	no acc
- *	  10x0   1   0   1	r/o	no acc
- *	  1011   0   0   1	r/w	no acc
- *	  110x   0   1   0	r/w	r/o
- *	  11x0   0   1   0	r/w	r/o
- *	  1111   0   1   1	r/w	r/w
  */
 ENTRY(cpu_v7_set_pte_ext)
 #ifdef CONFIG_MMU
-	str	r1, [r0], #-2048		@ linux version
+ ARM(	str	r1, [r0], #-2048	)	@ linux version
+ THUMB(	str	r1, [r0]		)	@ linux version
+ THUMB(	sub	r0, r0, #2048		)
 
 	bic	r3, r1, #0x000003f0
-	bic	r3, r3, #0x00000003
+	bic	r3, r3, #PTE_TYPE_MASK
 	orr	r3, r3, r2
 	orr	r3, r3, #PTE_EXT_AP0 | 2
+
+	tst	r1, #1 << 4
+	orrne	r3, r3, #PTE_EXT_TEX(1)
 
 	tst	r1, #L_PTE_WRITE
 	tstne	r1, #L_PTE_DIRTY
@@ -128,25 +150,24 @@ ENTRY(cpu_v7_set_pte_ext)
 	tstne	r3, #PTE_EXT_APX
 	bicne	r3, r3, #PTE_EXT_APX | PTE_EXT_AP0
 
-	tst	r1, #L_PTE_YOUNG
-	biceq	r3, r3, #PTE_EXT_APX | PTE_EXT_AP_MASK
-
 	tst	r1, #L_PTE_EXEC
 	orreq	r3, r3, #PTE_EXT_XN
 
-	tst	r1, #L_PTE_PRESENT
+	tst	r1, #L_PTE_YOUNG
+	tstne	r1, #L_PTE_PRESENT
 	moveq	r3, #0
 
 	str	r3, [r0]
 	mcr	p15, 0, r0, c7, c10, 1		@ flush_pte
 #endif
 	mov	pc, lr
+ENDPROC(cpu_v7_set_pte_ext)
 
 cpu_v7_name:
 	.ascii	"ARMv7 Processor"
 	.align
 
-	.section ".text.init", #alloc, #execinstr
+	__INIT
 
 /*
  *	__v7_setup
@@ -164,11 +185,47 @@ cpu_v7_name:
  *	- cache type register is implemented
  */
 __v7_setup:
+#ifdef CONFIG_SMP
+	mrc	p15, 0, r0, c1, c0, 1
+	tst	r0, #(1 << 6)			@ SMP/nAMP mode enabled?
+	orreq	r0, r0, #(1 << 6) | (1 << 0)	@ Enable SMP/nAMP mode and
+	mcreq	p15, 0, r0, c1, c0, 1		@ TLB ops broadcasting
+#endif
 	adr	r12, __v7_setup_stack		@ the local stack
 	stmia	r12, {r0-r5, r7, r9, r11, lr}
 	bl	v7_flush_dcache_all
 	ldmia	r12, {r0-r5, r7, r9, r11, lr}
-	mov	r10, #0
+
+	mrc	p15, 0, r0, c0, c0, 0		@ read main ID register
+	and	r10, r0, #0xff000000		@ ARM?
+	teq	r10, #0x41000000
+	bne	2f
+	and	r5, r0, #0x00f00000		@ variant
+	and	r6, r0, #0x0000000f		@ revision
+	orr	r0, r6, r5, lsr #20-4		@ combine variant and revision
+
+#ifdef CONFIG_ARM_ERRATA_430973
+	teq	r5, #0x00100000			@ only present in r1p*
+	mrceq	p15, 0, r10, c1, c0, 1		@ read aux control register
+	orreq	r10, r10, #(1 << 6)		@ set IBE to 1
+	mcreq	p15, 0, r10, c1, c0, 1		@ write aux control register
+#endif
+#ifdef CONFIG_ARM_ERRATA_458693
+	teq	r0, #0x20			@ only present in r2p0
+	mrceq	p15, 0, r10, c1, c0, 1		@ read aux control register
+	orreq	r10, r10, #(1 << 5)		@ set L1NEON to 1
+	orreq	r10, r10, #(1 << 9)		@ set PLDNOP to 1
+	mcreq	p15, 0, r10, c1, c0, 1		@ write aux control register
+#endif
+#ifdef CONFIG_ARM_ERRATA_460075
+	teq	r0, #0x20			@ only present in r2p0
+	mrceq	p15, 1, r10, c9, c0, 2		@ read L2 cache aux ctrl register
+	tsteq	r10, #1 << 22
+	orreq	r10, r10, #(1 << 22)		@ set the Write Allocate disable bit
+	mcreq	p15, 1, r10, c9, c0, 2		@ write the L2 cache aux ctrl register
+#endif
+
+2:	mov	r10, #0
 #ifdef HARVARD_CACHE
 	mcr	p15, 0, r10, c7, c5, 0		@ I+BTB cache invalidate
 #endif
@@ -176,28 +233,64 @@ __v7_setup:
 #ifdef CONFIG_MMU
 	mcr	p15, 0, r10, c8, c7, 0		@ invalidate I + D TLBs
 	mcr	p15, 0, r10, c2, c0, 2		@ TTB control register
-	orr	r4, r4, #TTB_RGN_OC_WB		@ mark PTWs outer cacheable, WB
-	mcr	p15, 0, r4, c2, c0, 0		@ load TTB0
+	orr	r4, r4, #TTB_FLAGS
 	mcr	p15, 0, r4, c2, c0, 1		@ load TTB1
 	mov	r10, #0x1f			@ domains 0, 1 = manager
 	mcr	p15, 0, r10, c3, c0, 0		@ load domain access register
+	/*
+	 * Memory region attributes with SCTLR.TRE=1
+	 *
+	 *   n = TEX[0],C,B
+	 *   TR = PRRR[2n+1:2n]		- memory type
+	 *   IR = NMRR[2n+1:2n]		- inner cacheable property
+	 *   OR = NMRR[2n+17:2n+16]	- outer cacheable property
+	 *
+	 *			n	TR	IR	OR
+	 *   UNCACHED		000	00
+	 *   BUFFERABLE		001	10	00	00
+	 *   WRITETHROUGH	010	10	10	10
+	 *   WRITEBACK		011	10	11	11
+	 *   reserved		110
+	 *   WRITEALLOC		111	10	01	01
+	 *   DEV_SHARED		100	01
+	 *   DEV_NONSHARED	100	01
+	 *   DEV_WC		001	10
+	 *   DEV_CACHED		011	10
+	 *
+	 * Other attributes:
+	 *
+	 *   DS0 = PRRR[16] = 0		- device shareable property
+	 *   DS1 = PRRR[17] = 1		- device shareable property
+	 *   NS0 = PRRR[18] = 0		- normal shareable property
+	 *   NS1 = PRRR[19] = 1		- normal shareable property
+	 *   NOS = PRRR[24+n] = 1	- not outer shareable
+	 */
+	ldr	r5, =0xff0a81a8			@ PRRR
+	ldr	r6, =0x40e040e0			@ NMRR
+	mcr	p15, 0, r5, c10, c2, 0		@ write PRRR
+	mcr	p15, 0, r6, c10, c2, 1		@ write NMRR
 #endif
 	adr	r5, v7_crval
 	ldmia	r5, {r5, r6}
+#ifdef CONFIG_CPU_ENDIAN_BE8
+	orr	r6, r6, #1 << 25		@ big-endian page tables
+#endif
    	mrc	p15, 0, r0, c1, c0, 0		@ read control register
 	bic	r0, r0, r5			@ clear bits them
 	orr	r0, r0, r6			@ set them
+ THUMB(	orr	r0, r0, #1 << 30	)	@ Thumb exceptions
 	mov	pc, lr				@ return to head.S:__ret
+ENDPROC(__v7_setup)
 
-	/*
-	 *         V X F   I D LR
-	 * .... ...E PUI. .T.T 4RVI ZFRS BLDP WCAM
-	 * rrrr rrrx xxx0 0101 xxxx xxxx x111 xxxx < forced
-	 *         0 110       0011 1.00 .111 1101 < we want
+	/*   AT
+	 *  TFR   EV X F   I D LR    S
+	 * .EEE ..EE PUI. .T.T 4RVI ZWRS BLDP WCAM
+	 * rxxx rrxx xxx0 0101 xxxx xxxx x111 xxxx < forced
+	 *    1    0 110       0011 1100 .111 1101 < we want
 	 */
 	.type	v7_crval, #object
 v7_crval:
-	crval	clear=0x0120c302, mmuset=0x00c0387d, ucset=0x00c0187c
+	crval	clear=0x0120c302, mmuset=0x10c03c7d, ucset=0x00c01c7c
 
 __v7_setup_stack:
 	.space	4 * 11				@ 11 registers
@@ -205,7 +298,7 @@ __v7_setup_stack:
 	.type	v7_processor_functions, #object
 ENTRY(v7_processor_functions)
 	.word	v7_early_abort
-	.word	pabort_ifar
+	.word	v7_pabort
 	.word	cpu_v7_proc_init
 	.word	cpu_v7_proc_fin
 	.word	cpu_v7_reset
@@ -236,10 +329,9 @@ __v7_proc_info:
 	.long	0x000f0000		@ Required ID value
 	.long	0x000f0000		@ Mask for ID
 	.long   PMD_TYPE_SECT | \
-		PMD_SECT_BUFFERABLE | \
-		PMD_SECT_CACHEABLE | \
 		PMD_SECT_AP_WRITE | \
-		PMD_SECT_AP_READ
+		PMD_SECT_AP_READ | \
+		PMD_FLAGS
 	.long   PMD_TYPE_SECT | \
 		PMD_SECT_XN | \
 		PMD_SECT_AP_WRITE | \

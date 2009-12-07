@@ -33,20 +33,12 @@ struct thread_info {
 #define PREEMPT_ACTIVE		0x10000000
 
 #if defined(CONFIG_4KSTACKS)
-#define THREAD_SIZE_ORDER	(0)
-#elif defined(CONFIG_PAGE_SIZE_4KB)
-#define THREAD_SIZE_ORDER	(1)
-#elif defined(CONFIG_PAGE_SIZE_8KB)
-#define THREAD_SIZE_ORDER	(1)
-#elif defined(CONFIG_PAGE_SIZE_16KB)
-#define THREAD_SIZE_ORDER	(0)
-#elif defined(CONFIG_PAGE_SIZE_64KB)
-#define THREAD_SIZE_ORDER	(0)
+#define THREAD_SHIFT	12
 #else
-#error "Unknown thread size"
+#define THREAD_SHIFT	13
 #endif
 
-#define THREAD_SIZE	(PAGE_SIZE << THREAD_SIZE_ORDER)
+#define THREAD_SIZE	(1 << THREAD_SHIFT)
 #define STACK_WARN	(THREAD_SIZE >> 3)
 
 /*
@@ -59,7 +51,7 @@ struct thread_info {
 	.exec_domain	= &default_exec_domain,	\
 	.flags		= 0,			\
 	.cpu		= 0,			\
-	.preempt_count	= 1,			\
+	.preempt_count	= INIT_PREEMPT_COUNT,	\
 	.addr_limit	= KERNEL_DS,		\
 	.restart_block	= {			\
 		.fn = do_no_restart_syscall,	\
@@ -94,15 +86,19 @@ static inline struct thread_info *current_thread_info(void)
 	return ti;
 }
 
+/* thread information allocation */
+#if THREAD_SHIFT >= PAGE_SHIFT
+
+#define THREAD_SIZE_ORDER	(THREAD_SHIFT - PAGE_SHIFT)
+
+#else /* THREAD_SHIFT < PAGE_SHIFT */
+
 #define __HAVE_ARCH_THREAD_INFO_ALLOCATOR
 
-/* thread information allocation */
-#ifdef CONFIG_DEBUG_STACK_USAGE
-#define alloc_thread_info(ti)	kzalloc(THREAD_SIZE, GFP_KERNEL)
-#else
-#define alloc_thread_info(ti)	kmalloc(THREAD_SIZE, GFP_KERNEL)
-#endif
-#define free_thread_info(ti)	kfree(ti)
+extern struct thread_info *alloc_thread_info(struct task_struct *tsk);
+extern void free_thread_info(struct thread_info *ti);
+
+#endif /* THREAD_SHIFT < PAGE_SHIFT */
 
 #endif /* __ASSEMBLY__ */
 
@@ -120,6 +116,7 @@ static inline struct thread_info *current_thread_info(void)
 #define TIF_SYSCALL_AUDIT	5	/* syscall auditing active */
 #define TIF_SECCOMP		6	/* secure computing */
 #define TIF_NOTIFY_RESUME	7	/* callback before returning to user */
+#define TIF_SYSCALL_TRACEPOINT	8	/* for ftrace syscall instrumentation */
 #define TIF_USEDFPU		16	/* FPU was used by this task this quantum (SMP) */
 #define TIF_POLLING_NRFLAG	17	/* true if poll_idle() is polling TIF_NEED_RESCHED */
 #define TIF_MEMDIE		18
@@ -133,25 +130,27 @@ static inline struct thread_info *current_thread_info(void)
 #define _TIF_SYSCALL_AUDIT	(1 << TIF_SYSCALL_AUDIT)
 #define _TIF_SECCOMP		(1 << TIF_SECCOMP)
 #define _TIF_NOTIFY_RESUME	(1 << TIF_NOTIFY_RESUME)
+#define _TIF_SYSCALL_TRACEPOINT	(1 << TIF_SYSCALL_TRACEPOINT)
 #define _TIF_USEDFPU		(1 << TIF_USEDFPU)
 #define _TIF_POLLING_NRFLAG	(1 << TIF_POLLING_NRFLAG)
 #define _TIF_FREEZE		(1 << TIF_FREEZE)
 
 /*
- * _TIF_ALLWORK_MASK and _TIF_WORK_MASK need to fit within a byte, or we
+ * _TIF_ALLWORK_MASK and _TIF_WORK_MASK need to fit within 2 bytes, or we
  * blow the tst immediate size constraints and need to fix up
  * arch/sh/kernel/entry-common.S.
  */
 
 /* work to do in syscall trace */
 #define _TIF_WORK_SYSCALL_MASK	(_TIF_SYSCALL_TRACE | _TIF_SINGLESTEP | \
-				 _TIF_SYSCALL_AUDIT | _TIF_SECCOMP)
+				 _TIF_SYSCALL_AUDIT | _TIF_SECCOMP    | \
+				 _TIF_SYSCALL_TRACEPOINT)
 
 /* work to do on any return to u-space */
 #define _TIF_ALLWORK_MASK	(_TIF_SYSCALL_TRACE | _TIF_SIGPENDING      | \
 				 _TIF_NEED_RESCHED  | _TIF_SYSCALL_AUDIT   | \
 				 _TIF_SINGLESTEP    | _TIF_RESTORE_SIGMASK | \
-				 _TIF_NOTIFY_RESUME)
+				 _TIF_NOTIFY_RESUME | _TIF_SYSCALL_TRACEPOINT)
 
 /* work to do on interrupt/exception return */
 #define _TIF_WORK_MASK		(_TIF_ALLWORK_MASK & ~(_TIF_SYSCALL_TRACE | \

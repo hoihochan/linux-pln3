@@ -132,7 +132,7 @@ static int sis96x_transaction(int size)
 	} while (!(temp & 0x0e) && (timeout++ < MAX_TIMEOUT));
 
 	/* If the SMBus is still busy, we give up */
-	if (timeout >= MAX_TIMEOUT) {
+	if (timeout > MAX_TIMEOUT) {
 		dev_dbg(&sis96x_adapter.dev, "SMBus Timeout! (0x%02x)\n", temp);
 		result = -ETIMEDOUT;
 	}
@@ -241,7 +241,6 @@ static const struct i2c_algorithm smbus_algorithm = {
 
 static struct i2c_adapter sis96x_adapter = {
 	.owner		= THIS_MODULE,
-	.id		= I2C_HW_SMBUS_SIS96X,
 	.class		= I2C_CLASS_HWMON | I2C_CLASS_SPD,
 	.algo		= &smbus_algorithm,
 };
@@ -281,7 +280,7 @@ static int __devinit sis96x_probe(struct pci_dev *dev,
 
 	retval = acpi_check_resource_conflict(&dev->resource[SIS96x_BAR]);
 	if (retval)
-		return retval;
+		return -ENODEV;
 
 	/* Everything is happy, let's grab the memory and set things up. */
 	if (!request_region(sis96x_smbus_base, SMB_IOSIZE,

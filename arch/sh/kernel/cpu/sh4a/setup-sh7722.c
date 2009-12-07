@@ -1,7 +1,7 @@
 /*
  * SH7722 Setup
  *
- *  Copyright (C) 2006 - 2007  Paul Mundt
+ *  Copyright (C) 2006 - 2008  Paul Mundt
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -13,12 +13,53 @@
 #include <linux/serial_sci.h>
 #include <linux/mm.h>
 #include <linux/uio_driver.h>
+#include <linux/usb/m66592.h>
+#include <linux/sh_timer.h>
 #include <asm/clock.h>
 #include <asm/mmzone.h>
+#include <asm/dma-sh.h>
+#include <cpu/sh7722.h>
+
+static struct resource rtc_resources[] = {
+	[0] = {
+		.start	= 0xa465fec0,
+		.end	= 0xa465fec0 + 0x58 - 1,
+		.flags	= IORESOURCE_IO,
+	},
+	[1] = {
+		/* Period IRQ */
+		.start	= 45,
+		.flags	= IORESOURCE_IRQ,
+	},
+	[2] = {
+		/* Carry IRQ */
+		.start	= 46,
+		.flags	= IORESOURCE_IRQ,
+	},
+	[3] = {
+		/* Alarm IRQ */
+		.start	= 44,
+		.flags	= IORESOURCE_IRQ,
+	},
+};
+
+static struct platform_device rtc_device = {
+	.name		= "sh-rtc",
+	.id		= -1,
+	.num_resources	= ARRAY_SIZE(rtc_resources),
+	.resource	= rtc_resources,
+	.archdata = {
+		.hwblk_id = HWBLK_RTC,
+	},
+};
+
+static struct m66592_platdata usbf_platdata = {
+	.on_chip = 1,
+};
 
 static struct resource usbf_resources[] = {
 	[0] = {
-		.name	= "m66592_udc",
+		.name	= "USBF",
 		.start	= 0x04480000,
 		.end	= 0x044800FF,
 		.flags	= IORESOURCE_MEM,
@@ -32,13 +73,17 @@ static struct resource usbf_resources[] = {
 
 static struct platform_device usbf_device = {
 	.name		= "m66592_udc",
-	.id		= -1,
+	.id             = 0, /* "usbf0" clock */
 	.dev = {
 		.dma_mask		= NULL,
 		.coherent_dma_mask	= 0xffffffff,
+		.platform_data		= &usbf_platdata,
 	},
 	.num_resources	= ARRAY_SIZE(usbf_resources),
 	.resource	= usbf_resources,
+	.archdata = {
+		.hwblk_id = HWBLK_USBF,
+	},
 };
 
 static struct resource iic_resources[] = {
@@ -57,8 +102,12 @@ static struct resource iic_resources[] = {
 
 static struct platform_device iic_device = {
 	.name           = "i2c-sh_mobile",
+	.id             = 0, /* "i2c0" clock */
 	.num_resources  = ARRAY_SIZE(iic_resources),
 	.resource       = iic_resources,
+	.archdata = {
+		.hwblk_id = HWBLK_IIC,
+	},
 };
 
 static struct uio_info vpu_platform_data = {
@@ -87,6 +136,9 @@ static struct platform_device vpu_device = {
 	},
 	.resource	= vpu_resources,
 	.num_resources	= ARRAY_SIZE(vpu_resources),
+	.archdata = {
+		.hwblk_id = HWBLK_VPU,
+	},
 };
 
 static struct uio_info veu_platform_data = {
@@ -115,6 +167,176 @@ static struct platform_device veu_device = {
 	},
 	.resource	= veu_resources,
 	.num_resources	= ARRAY_SIZE(veu_resources),
+	.archdata = {
+		.hwblk_id = HWBLK_VEU,
+	},
+};
+
+static struct uio_info jpu_platform_data = {
+	.name = "JPU",
+	.version = "0",
+	.irq = 27,
+};
+
+static struct resource jpu_resources[] = {
+	[0] = {
+		.name	= "JPU",
+		.start	= 0xfea00000,
+		.end	= 0xfea102d3,
+		.flags	= IORESOURCE_MEM,
+	},
+	[1] = {
+		/* place holder for contiguous memory */
+	},
+};
+
+static struct platform_device jpu_device = {
+	.name		= "uio_pdrv_genirq",
+	.id		= 2,
+	.dev = {
+		.platform_data	= &jpu_platform_data,
+	},
+	.resource	= jpu_resources,
+	.num_resources	= ARRAY_SIZE(jpu_resources),
+	.archdata = {
+		.hwblk_id = HWBLK_JPU,
+	},
+};
+
+static struct sh_timer_config cmt_platform_data = {
+	.name = "CMT",
+	.channel_offset = 0x60,
+	.timer_bit = 5,
+	.clk = "cmt0",
+	.clockevent_rating = 125,
+	.clocksource_rating = 125,
+};
+
+static struct resource cmt_resources[] = {
+	[0] = {
+		.name	= "CMT",
+		.start	= 0x044a0060,
+		.end	= 0x044a006b,
+		.flags	= IORESOURCE_MEM,
+	},
+	[1] = {
+		.start	= 104,
+		.flags	= IORESOURCE_IRQ,
+	},
+};
+
+static struct platform_device cmt_device = {
+	.name		= "sh_cmt",
+	.id		= 0,
+	.dev = {
+		.platform_data	= &cmt_platform_data,
+	},
+	.resource	= cmt_resources,
+	.num_resources	= ARRAY_SIZE(cmt_resources),
+	.archdata = {
+		.hwblk_id = HWBLK_CMT,
+	},
+};
+
+static struct sh_timer_config tmu0_platform_data = {
+	.name = "TMU0",
+	.channel_offset = 0x04,
+	.timer_bit = 0,
+	.clk = "tmu0",
+	.clockevent_rating = 200,
+};
+
+static struct resource tmu0_resources[] = {
+	[0] = {
+		.name	= "TMU0",
+		.start	= 0xffd80008,
+		.end	= 0xffd80013,
+		.flags	= IORESOURCE_MEM,
+	},
+	[1] = {
+		.start	= 16,
+		.flags	= IORESOURCE_IRQ,
+	},
+};
+
+static struct platform_device tmu0_device = {
+	.name		= "sh_tmu",
+	.id		= 0,
+	.dev = {
+		.platform_data	= &tmu0_platform_data,
+	},
+	.resource	= tmu0_resources,
+	.num_resources	= ARRAY_SIZE(tmu0_resources),
+	.archdata = {
+		.hwblk_id = HWBLK_TMU,
+	},
+};
+
+static struct sh_timer_config tmu1_platform_data = {
+	.name = "TMU1",
+	.channel_offset = 0x10,
+	.timer_bit = 1,
+	.clk = "tmu0",
+	.clocksource_rating = 200,
+};
+
+static struct resource tmu1_resources[] = {
+	[0] = {
+		.name	= "TMU1",
+		.start	= 0xffd80014,
+		.end	= 0xffd8001f,
+		.flags	= IORESOURCE_MEM,
+	},
+	[1] = {
+		.start	= 17,
+		.flags	= IORESOURCE_IRQ,
+	},
+};
+
+static struct platform_device tmu1_device = {
+	.name		= "sh_tmu",
+	.id		= 1,
+	.dev = {
+		.platform_data	= &tmu1_platform_data,
+	},
+	.resource	= tmu1_resources,
+	.num_resources	= ARRAY_SIZE(tmu1_resources),
+	.archdata = {
+		.hwblk_id = HWBLK_TMU,
+	},
+};
+
+static struct sh_timer_config tmu2_platform_data = {
+	.name = "TMU2",
+	.channel_offset = 0x1c,
+	.timer_bit = 2,
+	.clk = "tmu0",
+};
+
+static struct resource tmu2_resources[] = {
+	[0] = {
+		.name	= "TMU2",
+		.start	= 0xffd80020,
+		.end	= 0xffd8002b,
+		.flags	= IORESOURCE_MEM,
+	},
+	[1] = {
+		.start	= 18,
+		.flags	= IORESOURCE_IRQ,
+	},
+};
+
+static struct platform_device tmu2_device = {
+	.name		= "sh_tmu",
+	.id		= 2,
+	.dev = {
+		.platform_data	= &tmu2_platform_data,
+	},
+	.resource	= tmu2_resources,
+	.num_resources	= ARRAY_SIZE(tmu2_resources),
+	.archdata = {
+		.hwblk_id = HWBLK_TMU,
+	},
 };
 
 static struct plat_sci_port sci_platform_data[] = {
@@ -123,18 +345,21 @@ static struct plat_sci_port sci_platform_data[] = {
 		.flags		= UPF_BOOT_AUTOCONF,
 		.type		= PORT_SCIF,
 		.irqs		= { 80, 80, 80, 80 },
+		.clk		= "scif0",
 	},
 	{
 		.mapbase	= 0xffe10000,
 		.flags		= UPF_BOOT_AUTOCONF,
 		.type		= PORT_SCIF,
 		.irqs		= { 81, 81, 81, 81 },
+		.clk		= "scif1",
 	},
 	{
 		.mapbase	= 0xffe20000,
 		.flags		= UPF_BOOT_AUTOCONF,
 		.type		= PORT_SCIF,
 		.irqs		= { 82, 82, 82, 82 },
+		.clk		= "scif2",
 	},
 	{
 		.flags = 0,
@@ -149,35 +374,56 @@ static struct platform_device sci_device = {
 	},
 };
 
+static struct sh_dmae_pdata dma_platform_data = {
+	.mode = 0,
+};
+
+static struct platform_device dma_device = {
+	.name		= "sh-dma-engine",
+	.id		= -1,
+	.dev		= {
+		.platform_data	= &dma_platform_data,
+	},
+};
+
 static struct platform_device *sh7722_devices[] __initdata = {
+	&cmt_device,
+	&tmu0_device,
+	&tmu1_device,
+	&tmu2_device,
+	&rtc_device,
 	&usbf_device,
 	&iic_device,
 	&sci_device,
 	&vpu_device,
 	&veu_device,
+	&jpu_device,
+	&dma_device,
 };
 
 static int __init sh7722_devices_setup(void)
 {
-	clk_always_enable("mstp031"); /* TLB */
-	clk_always_enable("mstp030"); /* IC */
-	clk_always_enable("mstp029"); /* OC */
-	clk_always_enable("mstp028"); /* URAM */
-	clk_always_enable("mstp026"); /* XYMEM */
-	clk_always_enable("mstp022"); /* INTC */
-	clk_always_enable("mstp020"); /* SuperHyway */
-	clk_always_enable("mstp109"); /* I2C */
-	clk_always_enable("mstp211"); /* USB */
-	clk_always_enable("mstp202"); /* VEU */
-	clk_always_enable("mstp201"); /* VPU */
-
 	platform_resource_setup_memory(&vpu_device, "vpu", 1 << 20);
 	platform_resource_setup_memory(&veu_device, "veu", 2 << 20);
+	platform_resource_setup_memory(&jpu_device, "jpu", 2 << 20);
 
 	return platform_add_devices(sh7722_devices,
 				    ARRAY_SIZE(sh7722_devices));
 }
-__initcall(sh7722_devices_setup);
+arch_initcall(sh7722_devices_setup);
+
+static struct platform_device *sh7722_early_devices[] __initdata = {
+	&cmt_device,
+	&tmu0_device,
+	&tmu1_device,
+	&tmu2_device,
+};
+
+void __init plat_early_device_setup(void)
+{
+	early_platform_add_devices(sh7722_early_devices,
+				   ARRAY_SIZE(sh7722_early_devices));
+}
 
 enum {
 	UNUSED=0,
@@ -202,7 +448,6 @@ enum {
 	IRDA, JPU, LCDC,
 
 	/* interrupt groups */
-
 	SIM, RTC, DMAC0123, VIOVOU, USB, DMAC45, FLCTL, I2C, SDHI,
 };
 

@@ -27,8 +27,7 @@
 
 static void llc_ui_format_mac(struct seq_file *seq, u8 *addr)
 {
-	DECLARE_MAC_BUF(mac);
-	seq_printf(seq, "%s", print_mac(mac, addr));
+	seq_printf(seq, "%pM", addr);
 }
 
 static struct sock *llc_get_sk_idx(loff_t pos)
@@ -135,8 +134,8 @@ static int llc_seq_socket_show(struct seq_file *seq, void *v)
 	seq_printf(seq, "@%02X ", llc->sap->laddr.lsap);
 	llc_ui_format_mac(seq, llc->daddr.mac);
 	seq_printf(seq, "@%02X %8d %8d %2d %3d %4d\n", llc->daddr.lsap,
-		   atomic_read(&sk->sk_wmem_alloc),
-		   atomic_read(&sk->sk_rmem_alloc) - llc->copied_seq,
+		   sk_wmem_alloc_get(sk),
+		   sk_rmem_alloc_get(sk) - llc->copied_seq,
 		   sk->sk_state,
 		   sk->sk_socket ? SOCK_INODE(sk->sk_socket)->i_uid : -1,
 		   llc->link);
@@ -144,7 +143,7 @@ out:
 	return 0;
 }
 
-static char *llc_conn_state_names[] = {
+static const char *const llc_conn_state_names[] = {
 	[LLC_CONN_STATE_ADM] =        "adm",
 	[LLC_CONN_STATE_SETUP] =      "setup",
 	[LLC_CONN_STATE_NORMAL] =     "normal",
@@ -237,7 +236,6 @@ int __init llc_proc_init(void)
 	llc_proc_dir = proc_mkdir("llc", init_net.proc_net);
 	if (!llc_proc_dir)
 		goto out;
-	llc_proc_dir->owner = THIS_MODULE;
 
 	p = proc_create("socket", S_IRUGO, llc_proc_dir, &llc_seq_socket_fops);
 	if (!p)

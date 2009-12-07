@@ -75,7 +75,6 @@ struct scsi_cmnd {
 
 	int retries;
 	int allowed;
-	int timeout_per_command;
 
 	unsigned char prot_op;
 	unsigned char prot_type;
@@ -86,7 +85,6 @@ struct scsi_cmnd {
 	/* These elements define the operation we are about to perform */
 	unsigned char *cmnd;
 
-	struct timer_list eh_timeout;	/* Used to time out the command. */
 
 	/* These elements define the operation we ultimately want to perform */
 	struct scsi_data_buffer sdb;
@@ -139,7 +137,6 @@ extern void scsi_put_command(struct scsi_cmnd *);
 extern void __scsi_put_command(struct Scsi_Host *, struct scsi_cmnd *,
 			       struct device *);
 extern void scsi_finish_command(struct scsi_cmnd *cmd);
-extern void scsi_req_abort_cmd(struct scsi_cmnd *cmd);
 
 extern void *scsi_kmap_atomic_sg(struct scatterlist *sg, int sg_count,
 				 size_t *offset, size_t *len);
@@ -232,10 +229,6 @@ enum scsi_prot_operations {
 	/* OS-HBA: Protected, HBA-Target: Protected */
 	SCSI_PROT_READ_PASS,
 	SCSI_PROT_WRITE_PASS,
-
-	/* OS-HBA: Protected, HBA-Target: Protected, checksum conversion */
-	SCSI_PROT_READ_CONVERT,
-	SCSI_PROT_WRITE_CONVERT,
 };
 
 static inline void scsi_set_prot_op(struct scsi_cmnd *scmd, unsigned char op)
@@ -273,7 +266,7 @@ static inline unsigned char scsi_get_prot_type(struct scsi_cmnd *scmd)
 
 static inline sector_t scsi_get_lba(struct scsi_cmnd *scmd)
 {
-	return scmd->request->sector;
+	return blk_rq_pos(scmd->request);
 }
 
 static inline unsigned scsi_prot_sg_count(struct scsi_cmnd *cmd)
@@ -293,5 +286,20 @@ static inline struct scsi_data_buffer *scsi_prot(struct scsi_cmnd *cmd)
 
 #define scsi_for_each_prot_sg(cmd, sg, nseg, __i)		\
 	for_each_sg(scsi_prot_sglist(cmd), sg, nseg, __i)
+
+static inline void set_msg_byte(struct scsi_cmnd *cmd, char status)
+{
+	cmd->result |= status << 8;
+}
+
+static inline void set_host_byte(struct scsi_cmnd *cmd, char status)
+{
+	cmd->result |= status << 16;
+}
+
+static inline void set_driver_byte(struct scsi_cmnd *cmd, char status)
+{
+	cmd->result |= status << 24;
+}
 
 #endif /* _SCSI_SCSI_CMND_H */

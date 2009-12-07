@@ -20,17 +20,12 @@
 #include <asm/prom.h>
 #include <asm/sections.h>
 #include <asm/pci-bridge.h>
+#include <asm/ppc-pci.h>
 #include <asm/byteorder.h>
 #include <asm/uaccess.h>
 #include <asm/machdep.h>
 
 #undef DEBUG
-
-#ifdef DEBUG
-#define DBG(x...) printk(x)
-#else
-#define DBG(x...)
-#endif
 
 unsigned long isa_io_base     = 0;
 unsigned long pci_dram_offset = 0;
@@ -38,27 +33,29 @@ int pcibios_assign_bus_offset = 1;
 
 void pcibios_make_OF_bus_map(void);
 
-static void fixup_broken_pcnet32(struct pci_dev* dev);
 static void fixup_cpc710_pci64(struct pci_dev* dev);
-#ifdef CONFIG_PPC_OF
 static u8* pci_to_OF_bus_map;
-#endif
 
 /* By default, we don't re-assign bus numbers. We do this only on
  * some pmacs
  */
 static int pci_assign_all_buses;
 
-LIST_HEAD(hose_list);
-
 static int pci_bus_count;
 
+/* This will remain NULL for now, until isa-bridge.c is made common
+ * to both 32-bit and 64-bit.
+ */
+struct pci_dev *isa_bridge_pcidev;
+EXPORT_SYMBOL_GPL(isa_bridge_pcidev);
+
 static void
-fixup_hide_host_resource_fsl(struct pci_dev* dev)
+fixup_hide_host_resource_fsl(struct pci_dev *dev)
 {
 	int i, class = dev->class >> 8;
 
-	if ((class == PCI_CLASS_PROCESSOR_POWERPC) &&
+	if ((class == PCI_CLASS_PROCESSOR_POWERPC ||
+	     class == PCI_CLASS_BRIDGE_OTHER) &&
 		(dev->hdr_type == PCI_HEADER_TYPE_NORMAL) &&
 		(dev->bus->parent == NULL)) {
 		for (i = 0; i < DEVICE_COUNT_RESOURCE; i++) {
@@ -70,16 +67,6 @@ fixup_hide_host_resource_fsl(struct pci_dev* dev)
 }
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MOTOROLA, PCI_ANY_ID, fixup_hide_host_resource_fsl); 
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_FREESCALE, PCI_ANY_ID, fixup_hide_host_resource_fsl); 
-
-static void
-fixup_broken_pcnet32(struct pci_dev* dev)
-{
-	if ((dev->class>>8 == PCI_CLASS_NETWORK_ETHERNET)) {
-		dev->vendor = PCI_VENDOR_ID_AMD;
-		pci_write_config_word(dev, PCI_VENDOR_ID, PCI_VENDOR_ID_AMD);
-	}
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_TRIDENT,	PCI_ANY_ID,			fixup_broken_pcnet32);
 
 static void
 fixup_cpc710_pci64(struct pci_dev* dev)
@@ -94,7 +81,6 @@ fixup_cpc710_pci64(struct pci_dev* dev)
 }
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_IBM,	PCI_DEVICE_ID_IBM_CPC710_PCI64,	fixup_cpc710_pci64);
 
-#ifdef CONFIG_PPC_OF
 /*
  * Functions below are used on OpenFirmware machines.
  */
@@ -218,16 +204,23 @@ scan_OF_pci_childs(struct device_node *parent, pci_OF_scan_iterator filter, void
 static struct device_node *scan_OF_for_pci_dev(struct device_node *parent,
 					       unsigned int devfn)
 {
-	struct device_node *np;
+	struct device_node *np, *cnp;
 	const u32 *reg;
 	unsigned int psize;
 
 	for_each_child_of_node(parent, np) {
 		reg = of_get_property(np, "reg", &psize);
-		if (reg == NULL || psize < 4)
-			continue;
-		if (((reg[0] >> 8) & 0xff) == devfn)
+                if (reg && psize >= 4 && ((reg[0] >> 8) & 0xff) == devfn)
 			return np;
+
+		/* Note: some OFs create a parent node "multifunc-device" as
+		 * a fake root for all functions of a multi-function device,
+		 * we go down them as well. */
+                if (!strcmp(np->name, "multifunc-device")) {
+                        cnp = scan_OF_for_pci_dev(np, devfn);
+                        if (cnp)
+                                return cnp;
+                }
 	}
 	return NULL;
 }
@@ -265,17 +258,14 @@ pci_busdev_to_OF_node(struct pci_bus *bus, int devfn)
 {
 	struct device_node *parent, *np;
 
-	if (!have_of)
-		return NULL;
-
-	DBG("pci_busdev_to_OF_node(%d,0x%x)\n", bus->number, devfn);
+	pr_debug("pci_busdev_to_OF_node(%d,0x%x)\n", bus->number, devfn);
 	parent = scan_OF_for_pci_bus(bus);
 	if (parent == NULL)
 		return NULL;
-	DBG(" parent is %s\n", parent ? parent->full_name : "<NULL>");
+	pr_debug(" parent is %s\n", parent ? parent->full_name : "<NULL>");
 	np = scan_OF_for_pci_dev(parent, devfn);
 	of_node_put(parent);
-	DBG(" result is %s\n", np ? np->full_name : "<NULL>");
+	pr_debug(" result is %s\n", np ? np->full_name : "<NULL>");
 
 	/* XXX most callers don't release the returned node
 	 * mostly because ppc64 doesn't increase the refcount,
@@ -308,8 +298,6 @@ pci_device_from_OF_node(struct device_node* node, u8* bus, u8* devfn)
 	struct pci_controller* hose;
 	struct pci_dev* dev = NULL;
 	
-	if (!have_of)
-		return -ENODEV;
 	/* Make sure it's really a PCI device */
 	hose = pci_find_hose_for_OF_device(node);
 	if (!hose || !hose->dn)
@@ -366,16 +354,20 @@ pci_create_OF_bus_map(void)
 	}
 }
 
-#else /* CONFIG_PPC_OF */
-void pcibios_make_OF_bus_map(void)
+void __devinit pcibios_setup_phb_io_space(struct pci_controller *hose)
 {
+	unsigned long io_offset;
+	struct resource *res = &hose->io_resource;
+
+	/* Fixup IO space offset */
+	io_offset = (unsigned long)hose->io_base_virt - isa_io_base;
+	res->start = (res->start + io_offset) & 0xffffffffu;
+	res->end = (res->end + io_offset) & 0xffffffffu;
 }
-#endif /* CONFIG_PPC_OF */
 
 static int __init pcibios_init(void)
 {
 	struct pci_controller *hose, *tmp;
-	struct pci_bus *bus;
 	int next_busno = 0;
 
 	printk(KERN_INFO "PCI: Probing PCI hardware\n");
@@ -388,12 +380,8 @@ static int __init pcibios_init(void)
 		if (pci_assign_all_buses)
 			hose->first_busno = next_busno;
 		hose->last_busno = 0xff;
-		bus = pci_scan_bus_parented(hose->parent, hose->first_busno,
-					    hose->ops, hose);
-		if (bus) {
-			pci_bus_add_devices(bus);
-			hose->last_busno = bus->subordinate;
-		}
+		pcibios_scan_phb(hose, hose);
+		pci_bus_add_devices(hose->bus);
 		if (pci_assign_all_buses || next_busno <= hose->last_busno)
 			next_busno = hose->last_busno + pcibios_assign_bus_offset;
 	}
@@ -403,7 +391,7 @@ static int __init pcibios_init(void)
 	 * numbers vs. kernel bus numbers since we may have to
 	 * remap them.
 	 */
-	if (pci_assign_all_buses && have_of)
+	if (pci_assign_all_buses)
 		pcibios_make_OF_bus_map();
 
 	/* Call common code to handle resource allocation */
@@ -417,55 +405,6 @@ static int __init pcibios_init(void)
 }
 
 subsys_initcall(pcibios_init);
-
-void __devinit pcibios_do_bus_setup(struct pci_bus *bus)
-{
-	struct pci_controller *hose = (struct pci_controller *) bus->sysdata;
-	unsigned long io_offset;
-	struct resource *res;
-	int i;
-
-	/* Hookup PHB resources */
-	io_offset = (unsigned long)hose->io_base_virt - isa_io_base;
-	if (bus->parent == NULL) {
-		/* This is a host bridge - fill in its resources */
-		hose->bus = bus;
-
-		bus->resource[0] = res = &hose->io_resource;
-		if (!res->flags) {
-			if (io_offset)
-				printk(KERN_ERR "I/O resource not set for host"
-				       " bridge %d\n", hose->global_number);
-			res->start = 0;
-			res->end = IO_SPACE_LIMIT;
-			res->flags = IORESOURCE_IO;
-		}
-		res->start = (res->start + io_offset) & 0xffffffffu;
-		res->end = (res->end + io_offset) & 0xffffffffu;
-
-		for (i = 0; i < 3; ++i) {
-			res = &hose->mem_resources[i];
-			if (!res->flags) {
-				if (i > 0)
-					continue;
-				printk(KERN_ERR "Memory resource not set for "
-				       "host bridge %d\n", hose->global_number);
-				res->start = hose->pci_mem_offset;
-				res->end = ~0U;
-				res->flags = IORESOURCE_MEM;
-			}
-			bus->resource[i+1] = res;
-		}
-	}
-}
-
-/* the next one is stolen from the alpha port... */
-void __init
-pcibios_update_irq(struct pci_dev *dev, int irq)
-{
-	pci_write_config_byte(dev, PCI_INTERRUPT_LINE, irq);
-	/* XXX FIXME - update OF device tree node interrupt property */
-}
 
 static struct pci_controller*
 pci_bus_to_hose(int bus)
@@ -509,93 +448,4 @@ long sys_pciconfig_iobase(long which, unsigned long bus, unsigned long devfn)
 	return result;
 }
 
-unsigned long pci_address_to_pio(phys_addr_t address)
-{
-	struct pci_controller *hose, *tmp;
 
-	list_for_each_entry_safe(hose, tmp, &hose_list, list_node) {
-		unsigned int size = hose->io_resource.end -
-			hose->io_resource.start + 1;
-		if (address >= hose->io_base_phys &&
-		    address < (hose->io_base_phys + size)) {
-			unsigned long base =
-				(unsigned long)hose->io_base_virt - _IO_BASE;
-			return base + (address - hose->io_base_phys);
-		}
-	}
-	return (unsigned int)-1;
-}
-EXPORT_SYMBOL(pci_address_to_pio);
-
-/*
- * Null PCI config access functions, for the case when we can't
- * find a hose.
- */
-#define NULL_PCI_OP(rw, size, type)					\
-static int								\
-null_##rw##_config_##size(struct pci_dev *dev, int offset, type val)	\
-{									\
-	return PCIBIOS_DEVICE_NOT_FOUND;    				\
-}
-
-static int
-null_read_config(struct pci_bus *bus, unsigned int devfn, int offset,
-		 int len, u32 *val)
-{
-	return PCIBIOS_DEVICE_NOT_FOUND;
-}
-
-static int
-null_write_config(struct pci_bus *bus, unsigned int devfn, int offset,
-		  int len, u32 val)
-{
-	return PCIBIOS_DEVICE_NOT_FOUND;
-}
-
-static struct pci_ops null_pci_ops =
-{
-	.read = null_read_config,
-	.write = null_write_config,
-};
-
-/*
- * These functions are used early on before PCI scanning is done
- * and all of the pci_dev and pci_bus structures have been created.
- */
-static struct pci_bus *
-fake_pci_bus(struct pci_controller *hose, int busnr)
-{
-	static struct pci_bus bus;
-
-	if (hose == 0) {
-		hose = pci_bus_to_hose(busnr);
-		if (hose == 0)
-			printk(KERN_ERR "Can't find hose for PCI bus %d!\n", busnr);
-	}
-	bus.number = busnr;
-	bus.sysdata = hose;
-	bus.ops = hose? hose->ops: &null_pci_ops;
-	return &bus;
-}
-
-#define EARLY_PCI_OP(rw, size, type)					\
-int early_##rw##_config_##size(struct pci_controller *hose, int bus,	\
-			       int devfn, int offset, type value)	\
-{									\
-	return pci_bus_##rw##_config_##size(fake_pci_bus(hose, bus),	\
-					    devfn, offset, value);	\
-}
-
-EARLY_PCI_OP(read, byte, u8 *)
-EARLY_PCI_OP(read, word, u16 *)
-EARLY_PCI_OP(read, dword, u32 *)
-EARLY_PCI_OP(write, byte, u8)
-EARLY_PCI_OP(write, word, u16)
-EARLY_PCI_OP(write, dword, u32)
-
-extern int pci_bus_find_capability (struct pci_bus *bus, unsigned int devfn, int cap);
-int early_find_capability(struct pci_controller *hose, int bus, int devfn,
-			  int cap)
-{
-	return pci_bus_find_capability(fake_pci_bus(hose, bus), devfn, cap);
-}

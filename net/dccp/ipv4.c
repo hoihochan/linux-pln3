@@ -452,7 +452,7 @@ static struct dst_entry* dccp_v4_route_skb(struct net *net, struct sock *sk,
 					   struct sk_buff *skb)
 {
 	struct rtable *rt;
-	struct flowi fl = { .oif = skb->rtable->rt_iif,
+	struct flowi fl = { .oif = skb_rtable(skb)->rt_iif,
 			    .nl_u = { .ip4_u =
 				      { .daddr = ip_hdr(skb)->saddr,
 					.saddr = ip_hdr(skb)->daddr,
@@ -507,14 +507,14 @@ static void dccp_v4_ctl_send_reset(struct sock *sk, struct sk_buff *rxskb)
 	const struct iphdr *rxiph;
 	struct sk_buff *skb;
 	struct dst_entry *dst;
-	struct net *net = dev_net(rxskb->dst->dev);
+	struct net *net = dev_net(skb_dst(rxskb)->dev);
 	struct sock *ctl_sk = net->dccp.v4_ctl_sk;
 
 	/* Never send a reset in response to a reset. */
 	if (dccp_hdr(rxskb)->dccph_type == DCCP_PKT_RESET)
 		return;
 
-	if (rxskb->rtable->rt_type != RTN_LOCAL)
+	if (skb_rtable(rxskb)->rt_type != RTN_LOCAL)
 		return;
 
 	dst = dccp_v4_route_skb(net, ctl_sk, rxskb);
@@ -528,7 +528,7 @@ static void dccp_v4_ctl_send_reset(struct sock *sk, struct sk_buff *rxskb)
 	rxiph = ip_hdr(rxskb);
 	dccp_hdr(skb)->dccph_checksum = dccp_v4_csum_finish(skb, rxiph->saddr,
 								 rxiph->daddr);
-	skb->dst = dst_clone(dst);
+	skb_dst_set(skb, dst_clone(dst));
 
 	bh_lock_sock(ctl_sk);
 	err = ip_build_and_send_pkt(skb, ctl_sk,
@@ -545,6 +545,7 @@ out:
 
 static void dccp_v4_reqsk_destructor(struct request_sock *req)
 {
+	dccp_feat_list_purge(&dccp_rsk(req)->dreq_featneg);
 	kfree(inet_rsk(req)->opt);
 }
 
@@ -566,7 +567,7 @@ int dccp_v4_conn_request(struct sock *sk, struct sk_buff *skb)
 	struct dccp_skb_cb *dcb = DCCP_SKB_CB(skb);
 
 	/* Never answer to DCCP_PKT_REQUESTs send to broadcast or multicast */
-	if (skb->rtable->rt_flags & (RTCF_BROADCAST | RTCF_MULTICAST))
+	if (skb_rtable(skb)->rt_flags & (RTCF_BROADCAST | RTCF_MULTICAST))
 		return 0;	/* discard, don't send a reset here */
 
 	if (dccp_bad_service_code(sk, service)) {
@@ -595,7 +596,8 @@ int dccp_v4_conn_request(struct sock *sk, struct sk_buff *skb)
 	if (req == NULL)
 		goto drop;
 
-	dccp_reqsk_init(req, skb);
+	if (dccp_reqsk_init(req, dccp_sk(sk), skb))
+		goto drop_and_free;
 
 	dreq = dccp_rsk(req);
 	if (dccp_parse_options(sk, dreq, skb))
@@ -792,12 +794,10 @@ static int dccp_v4_rcv(struct sk_buff *skb)
 	DCCP_SKB_CB(skb)->dccpd_seq  = dccp_hdr_seq(dh);
 	DCCP_SKB_CB(skb)->dccpd_type = dh->dccph_type;
 
-	dccp_pr_debug("%8.8s "
-		      "src=%u.%u.%u.%u@%-5d "
-		      "dst=%u.%u.%u.%u@%-5d seq=%llu",
+	dccp_pr_debug("%8.8s src=%pI4@%-5d dst=%pI4@%-5d seq=%llu",
 		      dccp_packet_name(dh->dccph_type),
-		      NIPQUAD(iph->saddr), ntohs(dh->dccph_sport),
-		      NIPQUAD(iph->daddr), ntohs(dh->dccph_dport),
+		      &iph->saddr, ntohs(dh->dccph_sport),
+		      &iph->daddr, ntohs(dh->dccph_dport),
 		      (unsigned long long) DCCP_SKB_CB(skb)->dccpd_seq);
 
 	if (dccp_packet_without_ack(skb)) {
@@ -811,9 +811,8 @@ static int dccp_v4_rcv(struct sk_buff *skb)
 
 	/* Step 2:
 	 *	Look up flow ID in table and get corresponding socket */
-	sk = __inet_lookup(dev_net(skb->dst->dev), &dccp_hashinfo,
-			   iph->saddr, dh->dccph_sport,
-			   iph->daddr, dh->dccph_dport, inet_iif(skb));
+	sk = __inet_lookup_skb(&dccp_hashinfo, skb,
+			       dh->dccph_sport, dh->dccph_dport);
 	/*
 	 * Step 2:
 	 *	If no socket ...
@@ -881,7 +880,7 @@ discard_and_relse:
 	goto discard_it;
 }
 
-static struct inet_connection_sock_af_ops dccp_ipv4_af_ops = {
+static const struct inet_connection_sock_af_ops dccp_ipv4_af_ops = {
 	.queue_xmit	   = ip_queue_xmit,
 	.send_check	   = dccp_v4_send_check,
 	.rebuild_header	   = inet_sk_rebuild_header,
@@ -939,6 +938,7 @@ static struct proto dccp_v4_prot = {
 	.orphan_count		= &dccp_orphan_count,
 	.max_header		= MAX_DCCP_HEADER,
 	.obj_size		= sizeof(struct dccp_sock),
+	.slab_flags		= SLAB_DESTROY_BY_RCU,
 	.rsk_prot		= &dccp_request_sock_ops,
 	.twsk_prot		= &dccp_timewait_sock_ops,
 	.h.hashinfo		= &dccp_hashinfo,
@@ -948,7 +948,7 @@ static struct proto dccp_v4_prot = {
 #endif
 };
 
-static struct net_protocol dccp_v4_protocol = {
+static const struct net_protocol dccp_v4_protocol = {
 	.handler	= dccp_v4_rcv,
 	.err_handler	= dccp_v4_err,
 	.no_policy	= 1,

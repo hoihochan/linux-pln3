@@ -266,7 +266,7 @@ do {								\
 #define ADM8211_SYNCTL_CS1	(1 << 28)
 #define ADM8211_SYNCTL_CAL	(1 << 27)
 #define ADM8211_SYNCTL_SELCAL	(1 << 26)
-#define ADM8211_SYNCTL_RFtype	((1 << 24) || (1 << 23) || (1 << 22))
+#define ADM8211_SYNCTL_RFtype	((1 << 24) | (1 << 23) | (1 << 22))
 #define ADM8211_SYNCTL_RFMD	(1 << 22)
 #define ADM8211_SYNCTL_GENERAL	(0x7 << 22)
 /* SYNCTL 21:0 Data (Si4126: 18-bit data, 4-bit address) */
@@ -553,8 +553,6 @@ struct adm8211_priv {
 
 	int channel;
 	u8 bssid[ETH_ALEN];
-	u8 ssid[32];
-	size_t ssid_len;
 
 	u8 soft_rx_crc;
 	u8 retry_limit;

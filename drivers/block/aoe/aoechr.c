@@ -9,6 +9,7 @@
 #include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/smp_lock.h>
+#include <linux/skbuff.h>
 #include "aoe.h"
 
 enum {
@@ -103,7 +104,12 @@ loop:
 		spin_lock_irqsave(&d->lock, flags);
 		goto loop;
 	}
-	aoenet_xmit(skb);
+	if (skb) {
+		struct sk_buff_head queue;
+		__skb_queue_head_init(&queue);
+		__skb_queue_tail(&queue, skb);
+		aoenet_xmit(&queue);
+	}
 	aoecmd_cfg(major, minor);
 	return 0;
 }
@@ -260,6 +266,11 @@ static const struct file_operations aoe_fops = {
 	.owner = THIS_MODULE,
 };
 
+static char *aoe_devnode(struct device *dev, mode_t *mode)
+{
+	return kasprintf(GFP_KERNEL, "etherd/%s", dev_name(dev));
+}
+
 int __init
 aoechr_init(void)
 {
@@ -277,10 +288,12 @@ aoechr_init(void)
 		unregister_chrdev(AOE_MAJOR, "aoechr");
 		return PTR_ERR(aoe_class);
 	}
+	aoe_class->devnode = aoe_devnode;
+
 	for (i = 0; i < ARRAY_SIZE(chardevs); ++i)
-		device_create_drvdata(aoe_class, NULL,
-				      MKDEV(AOE_MAJOR, chardevs[i].minor),
-				      NULL, chardevs[i].name);
+		device_create(aoe_class, NULL,
+			      MKDEV(AOE_MAJOR, chardevs[i].minor), NULL,
+			      chardevs[i].name);
 
 	return 0;
 }

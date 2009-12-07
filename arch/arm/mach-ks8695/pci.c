@@ -27,8 +27,8 @@
 #include <linux/init.h>
 #include <linux/irq.h>
 #include <linux/delay.h>
+#include <linux/io.h>
 
-#include <asm/io.h>
 #include <asm/signal.h>
 #include <asm/mach/pci.h>
 #include <mach/hardware.h>
@@ -141,7 +141,7 @@ static struct pci_ops ks8695_pci_ops = {
 	.write	= ks8695_pci_writeconfig,
 };
 
-static struct pci_bus *ks8695_pci_scan_bus(int nr, struct pci_sys_data *sys)
+static struct pci_bus* __init ks8695_pci_scan_bus(int nr, struct pci_sys_data *sys)
 {
 	return pci_scan_bus(sys->busnr, &ks8695_pci_ops, sys);
 }
@@ -245,6 +245,9 @@ static int ks8695_pci_fault(unsigned long addr, unsigned int fsr, struct pt_regs
 
 static void __init ks8695_pci_preinit(void)
 {
+	/* make software reset to avoid freeze if PCI bus was messed up */
+	__raw_writel(0x80000000, KS8695_PCI_VA + KS8695_PBCS);
+
 	/* stage 1 initialization, subid, subdevice = 0x0001 */
 	__raw_writel(0x00010001, KS8695_PCI_VA + KS8695_CRCSID);
 

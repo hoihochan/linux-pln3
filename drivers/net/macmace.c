@@ -9,7 +9,7 @@
  *	2 of the License, or (at your option) any later version.
  *
  *	Copyright (C) 1996 Paul Mackerras.
- *	Copyright (C) 1998 Alan Cox <alan@redhat.com>
+ *	Copyright (C) 1998 Alan Cox <alan@lxorguk.ukuu.org.uk>
  *
  *	Modified heavily by Joshua M. Thompson based on Dave Huang's NetBSD driver
  *
@@ -180,6 +180,17 @@ static void mace_dma_off(struct net_device *dev)
 	psc_write_word(PSC_ENETWR_CMD + PSC_SET1, 0x1100);
 }
 
+static const struct net_device_ops mace_netdev_ops = {
+	.ndo_open		= mace_open,
+	.ndo_stop		= mace_close,
+	.ndo_start_xmit		= mace_xmit_start,
+	.ndo_tx_timeout		= mace_tx_timeout,
+	.ndo_set_multicast_list	= mace_set_multicast,
+	.ndo_set_mac_address	= mace_set_address,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_validate_addr	= eth_validate_addr,
+};
+
 /*
  * Not really much of a probe. The hardware table tells us if this
  * model of Macintrash has a MACE (AV macintoshes)
@@ -194,7 +205,6 @@ static int __devinit mace_probe(struct platform_device *pdev)
 	unsigned char checksum = 0;
 	static int found = 0;
 	int err;
-	DECLARE_MAC_BUF(mac);
 
 	if (found || macintosh_config->ether_type != MAC_ETHER_MACE)
 		return -ENODEV;
@@ -241,16 +251,11 @@ static int __devinit mace_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	dev->open		= mace_open;
-	dev->stop		= mace_close;
-	dev->hard_start_xmit	= mace_xmit_start;
-	dev->tx_timeout		= mace_tx_timeout;
+	dev->netdev_ops		= &mace_netdev_ops;
 	dev->watchdog_timeo	= TX_TIMEOUT;
-	dev->set_multicast_list	= mace_set_multicast;
-	dev->set_mac_address	= mace_set_address;
 
-	printk(KERN_INFO "%s: 68K MACE, hardware address %s\n",
-	       dev->name, print_mac(mac, dev->dev_addr));
+	printk(KERN_INFO "%s: 68K MACE, hardware address %pM\n",
+	       dev->name, dev->dev_addr);
 
 	err = register_netdev(dev);
 	if (!err)
@@ -674,7 +679,6 @@ static void mace_dma_rx_frame(struct net_device *dev, struct mace_frame *mf)
 
 		skb->protocol = eth_type_trans(skb, dev);
 		netif_rx(skb);
-		dev->last_rx = jiffies;
 		dev->stats.rx_packets++;
 		dev->stats.rx_bytes += frame_length;
 	}

@@ -1,6 +1,6 @@
 /*
   FUSE: Filesystem in Userspace
-  Copyright (C) 2001-2006  Miklos Szeredi <miklos@szeredi.hu>
+  Copyright (C) 2001-2008  Miklos Szeredi <miklos@szeredi.hu>
 
   This program can be distributed under the terms of the GNU GPL.
   See the file COPYING.
@@ -46,6 +46,7 @@ struct fuse_req *fuse_request_alloc(void)
 		fuse_request_init(req);
 	return req;
 }
+EXPORT_SYMBOL_GPL(fuse_request_alloc);
 
 struct fuse_req *fuse_request_alloc_nofs(void)
 {
@@ -87,8 +88,8 @@ static void __fuse_put_request(struct fuse_req *req)
 
 static void fuse_req_init_context(struct fuse_req *req)
 {
-	req->in.h.uid = current->fsuid;
-	req->in.h.gid = current->fsgid;
+	req->in.h.uid = current_fsuid();
+	req->in.h.gid = current_fsgid();
 	req->in.h.pid = current->pid;
 }
 
@@ -124,6 +125,7 @@ struct fuse_req *fuse_get_req(struct fuse_conn *fc)
 	atomic_dec(&fc->num_waiting);
 	return ERR_PTR(err);
 }
+EXPORT_SYMBOL_GPL(fuse_get_req);
 
 /*
  * Return request in fuse_file->reserved_req.  However that may
@@ -208,6 +210,7 @@ void fuse_put_request(struct fuse_conn *fc, struct fuse_req *req)
 			fuse_request_free(req);
 	}
 }
+EXPORT_SYMBOL_GPL(fuse_put_request);
 
 static unsigned len_args(unsigned numargs, struct fuse_arg *args)
 {
@@ -247,7 +250,7 @@ static void queue_request(struct fuse_conn *fc, struct fuse_req *req)
 
 static void flush_bg_queue(struct fuse_conn *fc)
 {
-	while (fc->active_background < FUSE_MAX_BACKGROUND &&
+	while (fc->active_background < fc->max_background &&
 	       !list_empty(&fc->bg_queue)) {
 		struct fuse_req *req;
 
@@ -269,7 +272,7 @@ static void flush_bg_queue(struct fuse_conn *fc)
  * Called with fc->lock, unlocks it
  */
 static void request_end(struct fuse_conn *fc, struct fuse_req *req)
-	__releases(fc->lock)
+__releases(&fc->lock)
 {
 	void (*end) (struct fuse_conn *, struct fuse_req *) = req->end;
 	req->end = NULL;
@@ -277,14 +280,14 @@ static void request_end(struct fuse_conn *fc, struct fuse_req *req)
 	list_del(&req->intr_entry);
 	req->state = FUSE_REQ_FINISHED;
 	if (req->background) {
-		if (fc->num_background == FUSE_MAX_BACKGROUND) {
+		if (fc->num_background == fc->max_background) {
 			fc->blocked = 0;
 			wake_up_all(&fc->blocked_waitq);
 		}
-		if (fc->num_background == FUSE_CONGESTION_THRESHOLD &&
-		    fc->connected) {
-			clear_bdi_congested(&fc->bdi, READ);
-			clear_bdi_congested(&fc->bdi, WRITE);
+		if (fc->num_background == fc->congestion_threshold &&
+		    fc->connected && fc->bdi_initialized) {
+			clear_bdi_congested(&fc->bdi, BLK_RW_SYNC);
+			clear_bdi_congested(&fc->bdi, BLK_RW_ASYNC);
 		}
 		fc->num_background--;
 		fc->active_background--;
@@ -294,13 +297,13 @@ static void request_end(struct fuse_conn *fc, struct fuse_req *req)
 	wake_up(&req->waitq);
 	if (end)
 		end(fc, req);
-	else
-		fuse_put_request(fc, req);
+	fuse_put_request(fc, req);
 }
 
 static void wait_answer_interruptible(struct fuse_conn *fc,
 				      struct fuse_req *req)
-	__releases(fc->lock) __acquires(fc->lock)
+__releases(&fc->lock)
+__acquires(&fc->lock)
 {
 	if (signal_pending(current))
 		return;
@@ -318,7 +321,8 @@ static void queue_interrupt(struct fuse_conn *fc, struct fuse_req *req)
 }
 
 static void request_wait_answer(struct fuse_conn *fc, struct fuse_req *req)
-	__releases(fc->lock) __acquires(fc->lock)
+__releases(&fc->lock)
+__acquires(&fc->lock)
 {
 	if (!fc->no_interrupt) {
 		/* Any signal may interrupt this */
@@ -381,7 +385,7 @@ static void request_wait_answer(struct fuse_conn *fc, struct fuse_req *req)
 	}
 }
 
-void request_send(struct fuse_conn *fc, struct fuse_req *req)
+void fuse_request_send(struct fuse_conn *fc, struct fuse_req *req)
 {
 	req->isreply = 1;
 	spin_lock(&fc->lock);
@@ -399,27 +403,29 @@ void request_send(struct fuse_conn *fc, struct fuse_req *req)
 	}
 	spin_unlock(&fc->lock);
 }
+EXPORT_SYMBOL_GPL(fuse_request_send);
 
-static void request_send_nowait_locked(struct fuse_conn *fc,
-				       struct fuse_req *req)
+static void fuse_request_send_nowait_locked(struct fuse_conn *fc,
+					    struct fuse_req *req)
 {
 	req->background = 1;
 	fc->num_background++;
-	if (fc->num_background == FUSE_MAX_BACKGROUND)
+	if (fc->num_background == fc->max_background)
 		fc->blocked = 1;
-	if (fc->num_background == FUSE_CONGESTION_THRESHOLD) {
-		set_bdi_congested(&fc->bdi, READ);
-		set_bdi_congested(&fc->bdi, WRITE);
+	if (fc->num_background == fc->congestion_threshold &&
+	    fc->bdi_initialized) {
+		set_bdi_congested(&fc->bdi, BLK_RW_SYNC);
+		set_bdi_congested(&fc->bdi, BLK_RW_ASYNC);
 	}
 	list_add_tail(&req->list, &fc->bg_queue);
 	flush_bg_queue(fc);
 }
 
-static void request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
+static void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 {
 	spin_lock(&fc->lock);
 	if (fc->connected) {
-		request_send_nowait_locked(fc, req);
+		fuse_request_send_nowait_locked(fc, req);
 		spin_unlock(&fc->lock);
 	} else {
 		req->out.h.error = -ENOTCONN;
@@ -427,27 +433,29 @@ static void request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 	}
 }
 
-void request_send_noreply(struct fuse_conn *fc, struct fuse_req *req)
+void fuse_request_send_noreply(struct fuse_conn *fc, struct fuse_req *req)
 {
 	req->isreply = 0;
-	request_send_nowait(fc, req);
+	fuse_request_send_nowait(fc, req);
 }
 
-void request_send_background(struct fuse_conn *fc, struct fuse_req *req)
+void fuse_request_send_background(struct fuse_conn *fc, struct fuse_req *req)
 {
 	req->isreply = 1;
-	request_send_nowait(fc, req);
+	fuse_request_send_nowait(fc, req);
 }
+EXPORT_SYMBOL_GPL(fuse_request_send_background);
 
 /*
  * Called under fc->lock
  *
  * fc->connected must have been checked previously
  */
-void request_send_background_locked(struct fuse_conn *fc, struct fuse_req *req)
+void fuse_request_send_background_locked(struct fuse_conn *fc,
+					 struct fuse_req *req)
 {
 	req->isreply = 1;
-	request_send_nowait_locked(fc, req);
+	fuse_request_send_nowait_locked(fc, req);
 }
 
 /*
@@ -540,8 +548,8 @@ static int fuse_copy_fill(struct fuse_copy_state *cs)
 		BUG_ON(!cs->nr_segs);
 		cs->seglen = cs->iov[0].iov_len;
 		cs->addr = (unsigned long) cs->iov[0].iov_base;
-		cs->iov ++;
-		cs->nr_segs --;
+		cs->iov++;
+		cs->nr_segs--;
 	}
 	down_read(&current->mm->mmap_sem);
 	err = get_user_pages(current, current->mm, cs->addr, 1, cs->write, 0,
@@ -590,9 +598,11 @@ static int fuse_copy_page(struct fuse_copy_state *cs, struct page *page,
 		kunmap_atomic(mapaddr, KM_USER1);
 	}
 	while (count) {
-		int err;
-		if (!cs->len && (err = fuse_copy_fill(cs)))
-			return err;
+		if (!cs->len) {
+			int err = fuse_copy_fill(cs);
+			if (err)
+				return err;
+		}
 		if (page) {
 			void *mapaddr = kmap_atomic(page, KM_USER1);
 			void *buf = mapaddr + offset;
@@ -632,9 +642,11 @@ static int fuse_copy_pages(struct fuse_copy_state *cs, unsigned nbytes,
 static int fuse_copy_one(struct fuse_copy_state *cs, void *val, unsigned size)
 {
 	while (size) {
-		int err;
-		if (!cs->len && (err = fuse_copy_fill(cs)))
-			return err;
+		if (!cs->len) {
+			int err = fuse_copy_fill(cs);
+			if (err)
+				return err;
+		}
 		fuse_copy_do(cs, &val, &size);
 	}
 	return 0;
@@ -665,6 +677,8 @@ static int request_pending(struct fuse_conn *fc)
 
 /* Wait until a request is available on the pending list */
 static void request_wait(struct fuse_conn *fc)
+__releases(&fc->lock)
+__acquires(&fc->lock)
 {
 	DECLARE_WAITQUEUE(wait, current);
 
@@ -692,7 +706,7 @@ static void request_wait(struct fuse_conn *fc)
  */
 static int fuse_read_interrupt(struct fuse_conn *fc, struct fuse_req *req,
 			       const struct iovec *iov, unsigned long nr_segs)
-	__releases(fc->lock)
+__releases(&fc->lock)
 {
 	struct fuse_copy_state cs;
 	struct fuse_in_header ih;
@@ -814,6 +828,121 @@ static ssize_t fuse_dev_read(struct kiocb *iocb, const struct iovec *iov,
 	return err;
 }
 
+static int fuse_notify_poll(struct fuse_conn *fc, unsigned int size,
+			    struct fuse_copy_state *cs)
+{
+	struct fuse_notify_poll_wakeup_out outarg;
+	int err = -EINVAL;
+
+	if (size != sizeof(outarg))
+		goto err;
+
+	err = fuse_copy_one(cs, &outarg, sizeof(outarg));
+	if (err)
+		goto err;
+
+	fuse_copy_finish(cs);
+	return fuse_notify_poll_wakeup(fc, &outarg);
+
+err:
+	fuse_copy_finish(cs);
+	return err;
+}
+
+static int fuse_notify_inval_inode(struct fuse_conn *fc, unsigned int size,
+				   struct fuse_copy_state *cs)
+{
+	struct fuse_notify_inval_inode_out outarg;
+	int err = -EINVAL;
+
+	if (size != sizeof(outarg))
+		goto err;
+
+	err = fuse_copy_one(cs, &outarg, sizeof(outarg));
+	if (err)
+		goto err;
+	fuse_copy_finish(cs);
+
+	down_read(&fc->killsb);
+	err = -ENOENT;
+	if (!fc->sb)
+		goto err_unlock;
+
+	err = fuse_reverse_inval_inode(fc->sb, outarg.ino,
+				       outarg.off, outarg.len);
+
+err_unlock:
+	up_read(&fc->killsb);
+	return err;
+
+err:
+	fuse_copy_finish(cs);
+	return err;
+}
+
+static int fuse_notify_inval_entry(struct fuse_conn *fc, unsigned int size,
+				   struct fuse_copy_state *cs)
+{
+	struct fuse_notify_inval_entry_out outarg;
+	int err = -EINVAL;
+	char buf[FUSE_NAME_MAX+1];
+	struct qstr name;
+
+	if (size < sizeof(outarg))
+		goto err;
+
+	err = fuse_copy_one(cs, &outarg, sizeof(outarg));
+	if (err)
+		goto err;
+
+	err = -ENAMETOOLONG;
+	if (outarg.namelen > FUSE_NAME_MAX)
+		goto err;
+
+	name.name = buf;
+	name.len = outarg.namelen;
+	err = fuse_copy_one(cs, buf, outarg.namelen + 1);
+	if (err)
+		goto err;
+	fuse_copy_finish(cs);
+	buf[outarg.namelen] = 0;
+	name.hash = full_name_hash(name.name, name.len);
+
+	down_read(&fc->killsb);
+	err = -ENOENT;
+	if (!fc->sb)
+		goto err_unlock;
+
+	err = fuse_reverse_inval_entry(fc->sb, outarg.parent, &name);
+
+err_unlock:
+	up_read(&fc->killsb);
+	return err;
+
+err:
+	fuse_copy_finish(cs);
+	return err;
+}
+
+static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
+		       unsigned int size, struct fuse_copy_state *cs)
+{
+	switch (code) {
+	case FUSE_NOTIFY_POLL:
+		return fuse_notify_poll(fc, size, cs);
+
+	case FUSE_NOTIFY_INVAL_INODE:
+		return fuse_notify_inval_inode(fc, size, cs);
+
+	case FUSE_NOTIFY_INVAL_ENTRY:
+		return fuse_notify_inval_entry(fc, size, cs);
+
+	default:
+		fuse_copy_finish(cs);
+		return -EINVAL;
+	}
+}
+
 /* Look up request on processing list by unique ID */
 static struct fuse_req *request_find(struct fuse_conn *fc, u64 unique)
 {
@@ -862,7 +991,7 @@ static ssize_t fuse_dev_write(struct kiocb *iocb, const struct iovec *iov,
 			       unsigned long nr_segs, loff_t pos)
 {
 	int err;
-	unsigned nbytes = iov_length(iov, nr_segs);
+	size_t nbytes = iov_length(iov, nr_segs);
 	struct fuse_req *req;
 	struct fuse_out_header oh;
 	struct fuse_copy_state cs;
@@ -877,9 +1006,22 @@ static ssize_t fuse_dev_write(struct kiocb *iocb, const struct iovec *iov,
 	err = fuse_copy_one(&cs, &oh, sizeof(oh));
 	if (err)
 		goto err_finish;
+
 	err = -EINVAL;
-	if (!oh.unique || oh.error <= -1000 || oh.error > 0 ||
-	    oh.len != nbytes)
+	if (oh.len != nbytes)
+		goto err_finish;
+
+	/*
+	 * Zero oh.unique indicates unsolicited notification message
+	 * and error contains notification code.
+	 */
+	if (!oh.unique) {
+		err = fuse_notify(fc, oh.error, nbytes - sizeof(oh), &cs);
+		return err ? err : nbytes;
+	}
+
+	err = -EINVAL;
+	if (oh.error <= -1000 || oh.error > 0)
 		goto err_finish;
 
 	spin_lock(&fc->lock);
@@ -967,6 +1109,8 @@ static unsigned fuse_dev_poll(struct file *file, poll_table *wait)
  * This function releases and reacquires fc->lock
  */
 static void end_requests(struct fuse_conn *fc, struct list_head *head)
+__releases(&fc->lock)
+__acquires(&fc->lock)
 {
 	while (!list_empty(head)) {
 		struct fuse_req *req;
@@ -989,7 +1133,8 @@ static void end_requests(struct fuse_conn *fc, struct list_head *head)
  * locked).
  */
 static void end_io_requests(struct fuse_conn *fc)
-	__releases(fc->lock) __acquires(fc->lock)
+__releases(&fc->lock)
+__acquires(&fc->lock)
 {
 	while (!list_empty(&fc->io)) {
 		struct fuse_req *req =
@@ -1003,11 +1148,11 @@ static void end_io_requests(struct fuse_conn *fc)
 		wake_up(&req->waitq);
 		if (end) {
 			req->end = NULL;
-			/* The end function will consume this reference */
 			__fuse_get_request(req);
 			spin_unlock(&fc->lock);
 			wait_event(req->waitq, !req->locked);
 			end(fc, req);
+			fuse_put_request(fc, req);
 			spin_lock(&fc->lock);
 		}
 	}
@@ -1047,8 +1192,9 @@ void fuse_abort_conn(struct fuse_conn *fc)
 	}
 	spin_unlock(&fc->lock);
 }
+EXPORT_SYMBOL_GPL(fuse_abort_conn);
 
-static int fuse_dev_release(struct inode *inode, struct file *file)
+int fuse_dev_release(struct inode *inode, struct file *file)
 {
 	struct fuse_conn *fc = fuse_get_conn(file);
 	if (fc) {
@@ -1057,12 +1203,12 @@ static int fuse_dev_release(struct inode *inode, struct file *file)
 		end_requests(fc, &fc->pending);
 		end_requests(fc, &fc->processing);
 		spin_unlock(&fc->lock);
-		fasync_helper(-1, file, 0, &fc->fasync);
 		fuse_conn_put(fc);
 	}
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(fuse_dev_release);
 
 static int fuse_dev_fasync(int fd, struct file *file, int on)
 {
@@ -1085,6 +1231,7 @@ const struct file_operations fuse_dev_operations = {
 	.release	= fuse_dev_release,
 	.fasync		= fuse_dev_fasync,
 };
+EXPORT_SYMBOL_GPL(fuse_dev_operations);
 
 static struct miscdevice fuse_miscdevice = {
 	.minor = FUSE_MINOR,

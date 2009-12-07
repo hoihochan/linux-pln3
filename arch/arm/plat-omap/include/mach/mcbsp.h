@@ -43,9 +43,20 @@
 
 #define OMAP24XX_MCBSP1_BASE	0x48074000
 #define OMAP24XX_MCBSP2_BASE	0x48076000
+#define OMAP2430_MCBSP3_BASE	0x4808c000
+#define OMAP2430_MCBSP4_BASE	0x4808e000
+#define OMAP2430_MCBSP5_BASE	0x48096000
 
 #define OMAP34XX_MCBSP1_BASE	0x48074000
 #define OMAP34XX_MCBSP2_BASE	0x49022000
+#define OMAP34XX_MCBSP3_BASE	0x49024000
+#define OMAP34XX_MCBSP4_BASE	0x49026000
+#define OMAP34XX_MCBSP5_BASE	0x48096000
+
+#define OMAP44XX_MCBSP1_BASE	0x49022000
+#define OMAP44XX_MCBSP2_BASE	0x49024000
+#define OMAP44XX_MCBSP3_BASE	0x49026000
+#define OMAP44XX_MCBSP4_BASE	0x48074000
 
 #if defined(CONFIG_ARCH_OMAP15XX) || defined(CONFIG_ARCH_OMAP16XX) || defined(CONFIG_ARCH_OMAP730)
 
@@ -81,8 +92,9 @@
 #define OMAP_MCBSP_REG_XCERG	0x3A
 #define OMAP_MCBSP_REG_XCERH	0x3C
 
-#define OMAP_MAX_MCBSP_COUNT	3
-#define MAX_MCBSP_CLOCKS	3
+/* Dummy defines, these are not available on omap1 */
+#define OMAP_MCBSP_REG_XCCR	0x00
+#define OMAP_MCBSP_REG_RCCR	0x00
 
 #define AUDIO_MCBSP_DATAWRITE	(OMAP1510_MCBSP1_BASE + OMAP_MCBSP_REG_DXR1)
 #define AUDIO_MCBSP_DATAREAD	(OMAP1510_MCBSP1_BASE + OMAP_MCBSP_REG_DRR1)
@@ -91,12 +103,15 @@
 #define AUDIO_DMA_TX		OMAP_DMA_MCBSP1_TX
 #define AUDIO_DMA_RX		OMAP_DMA_MCBSP1_RX
 
-#elif defined(CONFIG_ARCH_OMAP24XX)
+#elif defined(CONFIG_ARCH_OMAP24XX) || defined(CONFIG_ARCH_OMAP34XX) || \
+	defined(CONFIG_ARCH_OMAP4)
 
 #define OMAP_MCBSP_REG_DRR2	0x00
 #define OMAP_MCBSP_REG_DRR1	0x04
 #define OMAP_MCBSP_REG_DXR2	0x08
 #define OMAP_MCBSP_REG_DXR1	0x0C
+#define OMAP_MCBSP_REG_DRR	0x00
+#define OMAP_MCBSP_REG_DXR	0x08
 #define OMAP_MCBSP_REG_SPCR2	0x10
 #define OMAP_MCBSP_REG_SPCR1	0x14
 #define OMAP_MCBSP_REG_RCR2	0x18
@@ -124,9 +139,14 @@
 #define OMAP_MCBSP_REG_RCERH	0x70
 #define OMAP_MCBSP_REG_XCERG	0x74
 #define OMAP_MCBSP_REG_XCERH	0x78
-
-#define OMAP_MAX_MCBSP_COUNT	2
-#define MAX_MCBSP_CLOCKS	2
+#define OMAP_MCBSP_REG_SYSCON	0x8C
+#define OMAP_MCBSP_REG_THRSH2	0x90
+#define OMAP_MCBSP_REG_THRSH1	0x94
+#define OMAP_MCBSP_REG_IRQST	0xA0
+#define OMAP_MCBSP_REG_IRQEN	0xA4
+#define OMAP_MCBSP_REG_WAKEUPEN	0xA8
+#define OMAP_MCBSP_REG_XCCR	0xAC
+#define OMAP_MCBSP_REG_RCCR	0xB0
 
 #define AUDIO_MCBSP_DATAWRITE	(OMAP24XX_MCBSP2_BASE + OMAP_MCBSP_REG_DXR1)
 #define AUDIO_MCBSP_DATAREAD	(OMAP24XX_MCBSP2_BASE + OMAP_MCBSP_REG_DRR1)
@@ -136,10 +156,6 @@
 #define AUDIO_DMA_RX		OMAP24XX_DMA_MCBSP2_RX
 
 #endif
-
-#define OMAP_MCBSP_READ(base, reg)		__raw_readw((base) + OMAP_MCBSP_REG_##reg)
-#define OMAP_MCBSP_WRITE(base, reg, val)	__raw_writew((val), (base) + OMAP_MCBSP_REG_##reg)
-
 
 /************************** McBSP SPCR1 bit definitions ***********************/
 #define RRST			0x0001
@@ -151,6 +167,7 @@
 #define DXENA			0x0080
 #define CLKSTP(value)		((value)<<11)	/* bits 11:12 */
 #define RJUST(value)		((value)<<13)	/* bits 13:14 */
+#define ALB			0x8000
 #define DLB			0x8000
 
 /************************** McBSP SPCR2 bit definitions ***********************/
@@ -228,6 +245,41 @@
 #define XPABLK(value)		((value)<<5)	/* Bits 5:6 */
 #define XPBBLK(value)		((value)<<7)	/* Bits 7:8 */
 
+/*********************** McBSP XCCR bit definitions *************************/
+#define EXTCLKGATE		0x8000
+#define PPCONNECT		0x4000
+#define DXENDLY(value)		((value)<<12)	/* Bits 12:13 */
+#define XFULL_CYCLE		0x0800
+#define DILB			0x0020
+#define XDMAEN			0x0008
+#define XDISABLE		0x0001
+
+/********************** McBSP RCCR bit definitions *************************/
+#define RFULL_CYCLE		0x0800
+#define RDMAEN			0x0008
+#define RDISABLE		0x0001
+
+/********************** McBSP SYSCONFIG bit definitions ********************/
+#define CLOCKACTIVITY(value)	((value)<<8)
+#define SIDLEMODE(value)	((value)<<3)
+#define ENAWAKEUP		0x0004
+#define SOFTRST			0x0002
+
+/********************** McBSP DMA operating modes **************************/
+#define MCBSP_DMA_MODE_ELEMENT		0
+#define MCBSP_DMA_MODE_THRESHOLD	1
+#define MCBSP_DMA_MODE_FRAME		2
+
+/********************** McBSP WAKEUPEN bit definitions *********************/
+#define XEMPTYEOFEN		0x4000
+#define XRDYEN			0x0400
+#define XEOFEN			0x0200
+#define XFSXEN			0x0100
+#define XSYNCERREN		0x0080
+#define RRDYEN			0x0008
+#define REOFEN			0x0004
+#define RFSREN			0x0002
+#define RSYNCERREN		0x0001
 
 /* we don't do multichannel for now */
 struct omap_mcbsp_reg_cfg {
@@ -254,12 +306,16 @@ struct omap_mcbsp_reg_cfg {
 	u16 rcerh;
 	u16 xcerg;
 	u16 xcerh;
+	u16 xccr;
+	u16 rccr;
 };
 
 typedef enum {
 	OMAP_MCBSP1 = 0,
 	OMAP_MCBSP2,
 	OMAP_MCBSP3,
+	OMAP_MCBSP4,
+	OMAP_MCBSP5
 } omap_mcbsp_id;
 
 typedef int __bitwise omap_mcbsp_io_type_t;
@@ -311,22 +367,22 @@ struct omap_mcbsp_spi_cfg {
 struct omap_mcbsp_ops {
 	void (*request)(unsigned int);
 	void (*free)(unsigned int);
-	int (*check)(unsigned int);
 };
 
 struct omap_mcbsp_platform_data {
 	unsigned long phys_base;
-	u32 virt_base;
 	u8 dma_rx_sync, dma_tx_sync;
 	u16 rx_irq, tx_irq;
 	struct omap_mcbsp_ops *ops;
-	char const *clk_name;
+#ifdef CONFIG_ARCH_OMAP34XX
+	u16 buffer_size;
+#endif
 };
 
 struct omap_mcbsp {
 	struct device *dev;
 	unsigned long phys_base;
-	u32 io_base;
+	void __iomem *io_base;
 	u8 id;
 	u8 free;
 	omap_mcbsp_word_length rx_word_length;
@@ -352,17 +408,40 @@ struct omap_mcbsp {
 	/* Protect the field .free, while checking if the mcbsp is in use */
 	spinlock_t lock;
 	struct omap_mcbsp_platform_data *pdata;
-	struct clk *clk;
+	struct clk *iclk;
+	struct clk *fclk;
+#ifdef CONFIG_ARCH_OMAP34XX
+	int dma_op_mode;
+	u16 max_tx_thres;
+	u16 max_rx_thres;
+#endif
 };
+extern struct omap_mcbsp **mcbsp_ptr;
+extern int omap_mcbsp_count;
 
 int omap_mcbsp_init(void);
 void omap_mcbsp_register_board_cfg(struct omap_mcbsp_platform_data *config,
 					int size);
 void omap_mcbsp_config(unsigned int id, const struct omap_mcbsp_reg_cfg * config);
+#ifdef CONFIG_ARCH_OMAP34XX
+void omap_mcbsp_set_tx_threshold(unsigned int id, u16 threshold);
+void omap_mcbsp_set_rx_threshold(unsigned int id, u16 threshold);
+u16 omap_mcbsp_get_max_tx_threshold(unsigned int id);
+u16 omap_mcbsp_get_max_rx_threshold(unsigned int id);
+int omap_mcbsp_get_dma_op_mode(unsigned int id);
+#else
+static inline void omap_mcbsp_set_tx_threshold(unsigned int id, u16 threshold)
+{ }
+static inline void omap_mcbsp_set_rx_threshold(unsigned int id, u16 threshold)
+{ }
+static inline u16 omap_mcbsp_get_max_tx_threshold(unsigned int id) { return 0; }
+static inline u16 omap_mcbsp_get_max_rx_threshold(unsigned int id) { return 0; }
+static inline int omap_mcbsp_get_dma_op_mode(unsigned int id) { return 0; }
+#endif
 int omap_mcbsp_request(unsigned int id);
 void omap_mcbsp_free(unsigned int id);
-void omap_mcbsp_start(unsigned int id);
-void omap_mcbsp_stop(unsigned int id);
+void omap_mcbsp_start(unsigned int id, int tx, int rx);
+void omap_mcbsp_stop(unsigned int id, int tx, int rx);
 void omap_mcbsp_xmit_word(unsigned int id, u32 word);
 u32 omap_mcbsp_recv_word(unsigned int id);
 
@@ -378,5 +457,6 @@ void omap_mcbsp_set_spi_mode(unsigned int id, const struct omap_mcbsp_spi_cfg * 
 /* Polled read/write functions */
 int omap_mcbsp_pollread(unsigned int id, u16 * buf);
 int omap_mcbsp_pollwrite(unsigned int id, u16 buf);
+int omap_mcbsp_set_io_type(unsigned int id, omap_mcbsp_io_type_t io_type);
 
 #endif

@@ -217,8 +217,10 @@ static void scx200_acb_machine(struct scx200_acb_iface *iface, u8 status)
 	return;
 
  error:
-	dev_err(&iface->adapter.dev, "%s in state %s\n", errmsg,
-		scx200_acb_state_name[iface->state]);
+	dev_err(&iface->adapter.dev,
+		"%s in state %s (addr=0x%02x, len=%d, status=0x%02x)\n", errmsg,
+		scx200_acb_state_name[iface->state], iface->address_byte,
+		iface->len, status);
 
 	iface->state = state_idle;
 	iface->result = -EIO;
@@ -440,7 +442,6 @@ static __init struct scx200_acb_iface *scx200_create_iface(const char *text,
 	i2c_set_adapdata(adapter, iface);
 	snprintf(adapter->name, sizeof(adapter->name), "%s ACB%d", text, index);
 	adapter->owner = THIS_MODULE;
-	adapter->id = I2C_HW_SMBUS_SCX200;
 	adapter->algo = &scx200_acb_algorithm;
 	adapter->class = I2C_CLASS_HWMON | I2C_CLASS_SPD;
 	adapter->dev.parent = dev;

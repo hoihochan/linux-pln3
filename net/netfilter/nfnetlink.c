@@ -44,15 +44,17 @@ static struct sock *nfnl = NULL;
 static const struct nfnetlink_subsystem *subsys_table[NFNL_SUBSYS_COUNT];
 static DEFINE_MUTEX(nfnl_mutex);
 
-static inline void nfnl_lock(void)
+void nfnl_lock(void)
 {
 	mutex_lock(&nfnl_mutex);
 }
+EXPORT_SYMBOL_GPL(nfnl_lock);
 
-static inline void nfnl_unlock(void)
+void nfnl_unlock(void)
 {
 	mutex_unlock(&nfnl_mutex);
 }
+EXPORT_SYMBOL_GPL(nfnl_unlock);
 
 int nfnetlink_subsys_register(const struct nfnetlink_subsystem *n)
 {
@@ -105,11 +107,18 @@ int nfnetlink_has_listeners(unsigned int group)
 }
 EXPORT_SYMBOL_GPL(nfnetlink_has_listeners);
 
-int nfnetlink_send(struct sk_buff *skb, u32 pid, unsigned group, int echo)
+int nfnetlink_send(struct sk_buff *skb, u32 pid,
+		   unsigned group, int echo, gfp_t flags)
 {
-	return nlmsg_notify(nfnl, skb, pid, group, echo, gfp_any());
+	return nlmsg_notify(nfnl, skb, pid, group, echo, flags);
 }
 EXPORT_SYMBOL_GPL(nfnetlink_send);
+
+void nfnetlink_set_err(u32 pid, u32 group, int error)
+{
+	netlink_set_err(nfnl, pid, group, error);
+}
+EXPORT_SYMBOL_GPL(nfnetlink_set_err);
 
 int nfnetlink_unicast(struct sk_buff *skb, u_int32_t pid, int flags)
 {
@@ -128,13 +137,14 @@ static int nfnetlink_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
 		return -EPERM;
 
 	/* All the messages must at least contain nfgenmsg */
-	if (nlh->nlmsg_len < NLMSG_SPACE(sizeof(struct nfgenmsg)))
+	if (nlh->nlmsg_len < NLMSG_LENGTH(sizeof(struct nfgenmsg)))
 		return 0;
 
 	type = nlh->nlmsg_type;
+replay:
 	ss = nfnetlink_get_subsys(type);
 	if (!ss) {
-#ifdef CONFIG_KMOD
+#ifdef CONFIG_MODULES
 		nfnl_unlock();
 		request_module("nfnetlink-subsys-%d", NFNL_SUBSYS_ID(type));
 		nfnl_lock();
@@ -151,21 +161,19 @@ static int nfnetlink_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
 	{
 		int min_len = NLMSG_SPACE(sizeof(struct nfgenmsg));
 		u_int8_t cb_id = NFNL_MSG_TYPE(nlh->nlmsg_type);
-		u_int16_t attr_count = ss->cb[cb_id].attr_count;
-		struct nlattr *cda[attr_count+1];
+		struct nlattr *cda[ss->cb[cb_id].attr_count + 1];
+		struct nlattr *attr = (void *)nlh + min_len;
+		int attrlen = nlh->nlmsg_len - min_len;
 
-		if (likely(nlh->nlmsg_len >= min_len)) {
-			struct nlattr *attr = (void *)nlh + NLMSG_ALIGN(min_len);
-			int attrlen = nlh->nlmsg_len - NLMSG_ALIGN(min_len);
+		err = nla_parse(cda, ss->cb[cb_id].attr_count,
+				attr, attrlen, ss->cb[cb_id].policy);
+		if (err < 0)
+			return err;
 
-			err = nla_parse(cda, attr_count, attr, attrlen,
-					ss->cb[cb_id].policy);
-			if (err < 0)
-				return err;
-		} else
-			return -EINVAL;
-
-		return nc->call(nfnl, skb, nlh, cda);
+		err = nc->call(nfnl, skb, nlh, (const struct nlattr **)cda);
+		if (err == -EAGAIN)
+			goto replay;
+		return err;
 	}
 }
 
@@ -191,7 +199,7 @@ static int __init nfnetlink_init(void)
 				     nfnetlink_rcv, NULL, THIS_MODULE);
 	if (!nfnl) {
 		printk(KERN_ERR "cannot initialize nfnetlink!\n");
-		return -1;
+		return -ENOMEM;
 	}
 
 	return 0;

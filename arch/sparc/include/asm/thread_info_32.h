@@ -45,7 +45,7 @@ struct thread_info {
 	/* A place to store user windows and stack pointers
 	 * when the stack needs inspection.
 	 */
-	struct reg_window	reg_window[NSWINS];	/* align for ldd! */
+	struct reg_window32	reg_window[NSWINS];	/* align for ldd! */
 	unsigned long		rwbuf_stkptrs[NSWINS];
 	unsigned long		w_saved;
 
@@ -54,8 +54,6 @@ struct thread_info {
 
 /*
  * macros/functions for gaining access to the thread information structure
- *
- * preempt_count needs to be 1 initially, until the scheduler is functional.
  */
 #define INIT_THREAD_INFO(tsk)				\
 {							\
@@ -64,7 +62,7 @@ struct thread_info {
 	.exec_domain	=	&default_exec_domain,	\
 	.flags		=	0,			\
 	.cpu		=	0,			\
-	.preempt_count	=	1,			\
+	.preempt_count	=	INIT_PREEMPT_COUNT,	\
 	.restart_block	= {				\
 		.fn	=	do_no_restart_syscall,	\
 	},						\
@@ -80,11 +78,7 @@ register struct thread_info *current_thread_info_reg asm("g6");
 /*
  * thread information allocation
  */
-#if PAGE_SHIFT == 13
-#define THREAD_INFO_ORDER  0
-#else /* PAGE_SHIFT */
 #define THREAD_INFO_ORDER  1
-#endif
 
 #define __HAVE_ARCH_THREAD_INFO_ALLOCATOR
 
@@ -139,6 +133,7 @@ BTFIXUPDEF_CALL(void, free_thread_info, struct thread_info *)
 #define TIF_POLLING_NRFLAG	9	/* true if poll_idle() is polling
 					 * TIF_NEED_RESCHED */
 #define TIF_MEMDIE		10
+#define TIF_FREEZE		11	/* is freezing for suspend */
 
 /* as above, but as bit values */
 #define _TIF_SYSCALL_TRACE	(1<<TIF_SYSCALL_TRACE)
@@ -152,6 +147,7 @@ BTFIXUPDEF_CALL(void, free_thread_info, struct thread_info *)
 #define _TIF_DO_NOTIFY_RESUME_MASK	(_TIF_NOTIFY_RESUME | \
 					 _TIF_SIGPENDING | \
 					 _TIF_RESTORE_SIGMASK)
+#define _TIF_FREEZE		(1<<TIF_FREEZE)
 
 #endif /* __KERNEL__ */
 

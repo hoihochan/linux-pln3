@@ -129,6 +129,14 @@ static inline void ptep_set_wrprotect(struct mm_struct *mm, unsigned long addres
 #define move_pte(pte, prot, old_addr, new_addr)	(pte)
 #endif
 
+#ifndef pgprot_noncached
+#define pgprot_noncached(prot)	(prot)
+#endif
+
+#ifndef pgprot_writecombine
+#define pgprot_writecombine pgprot_noncached
+#endif
+
 /*
  * When walking page tables, get the address of the next boundary,
  * or the end address of the range if that comes earlier.  Although no
@@ -276,17 +284,64 @@ static inline void ptep_modify_prot_commit(struct mm_struct *mm,
 #endif
 
 /*
- * A facility to provide batching of the reload of page tables with the
- * actual context switch code for paravirtualized guests.  By convention,
- * only one of the lazy modes (CPU, MMU) should be active at any given
- * time, entry should never be nested, and entry and exits should always
- * be paired.  This is for sanity of maintaining and reasoning about the
- * kernel code.
+ * A facility to provide batching of the reload of page tables and
+ * other process state with the actual context switch code for
+ * paravirtualized guests.  By convention, only one of the batched
+ * update (lazy) modes (CPU, MMU) should be active at any given time,
+ * entry should never be nested, and entry and exits should always be
+ * paired.  This is for sanity of maintaining and reasoning about the
+ * kernel code.  In this case, the exit (end of the context switch) is
+ * in architecture-specific code, and so doesn't need a generic
+ * definition.
  */
-#ifndef __HAVE_ARCH_ENTER_LAZY_CPU_MODE
-#define arch_enter_lazy_cpu_mode()	do {} while (0)
-#define arch_leave_lazy_cpu_mode()	do {} while (0)
-#define arch_flush_lazy_cpu_mode()	do {} while (0)
+#ifndef __HAVE_ARCH_START_CONTEXT_SWITCH
+#define arch_start_context_switch(prev)	do {} while (0)
+#endif
+
+#ifndef __HAVE_PFNMAP_TRACKING
+/*
+ * Interface that can be used by architecture code to keep track of
+ * memory type of pfn mappings (remap_pfn_range, vm_insert_pfn)
+ *
+ * track_pfn_vma_new is called when a _new_ pfn mapping is being established
+ * for physical range indicated by pfn and size.
+ */
+static inline int track_pfn_vma_new(struct vm_area_struct *vma, pgprot_t *prot,
+					unsigned long pfn, unsigned long size)
+{
+	return 0;
+}
+
+/*
+ * Interface that can be used by architecture code to keep track of
+ * memory type of pfn mappings (remap_pfn_range, vm_insert_pfn)
+ *
+ * track_pfn_vma_copy is called when vma that is covering the pfnmap gets
+ * copied through copy_page_range().
+ */
+static inline int track_pfn_vma_copy(struct vm_area_struct *vma)
+{
+	return 0;
+}
+
+/*
+ * Interface that can be used by architecture code to keep track of
+ * memory type of pfn mappings (remap_pfn_range, vm_insert_pfn)
+ *
+ * untrack_pfn_vma is called while unmapping a pfnmap for a region.
+ * untrack can be called for a specific region indicated by pfn and size or
+ * can be for the entire vma (in which case size can be zero).
+ */
+static inline void untrack_pfn_vma(struct vm_area_struct *vma,
+					unsigned long pfn, unsigned long size)
+{
+}
+#else
+extern int track_pfn_vma_new(struct vm_area_struct *vma, pgprot_t *prot,
+				unsigned long pfn, unsigned long size);
+extern int track_pfn_vma_copy(struct vm_area_struct *vma);
+extern void untrack_pfn_vma(struct vm_area_struct *vma, unsigned long pfn,
+				unsigned long size);
 #endif
 
 #endif /* !__ASSEMBLY__ */

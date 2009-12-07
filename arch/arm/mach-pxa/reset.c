@@ -7,10 +7,10 @@
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/gpio.h>
-#include <asm/io.h>
+#include <linux/io.h>
 #include <asm/proc-fns.h>
 
-#include <mach/pxa-regs.h>
+#include <mach/regs-ost.h>
 #include <mach/reset.h>
 
 unsigned int reset_status;
@@ -20,7 +20,7 @@ static void do_hw_reset(void);
 
 static int reset_gpio = -1;
 
-int init_gpio_reset(int gpio, int output)
+int init_gpio_reset(int gpio, int output, int level)
 {
 	int rc;
 
@@ -31,7 +31,7 @@ int init_gpio_reset(int gpio, int output)
 	}
 
 	if (output)
-		rc = gpio_direction_output(gpio, 0);
+		rc = gpio_direction_output(gpio, level);
 	else
 		rc = gpio_direction_input(gpio);
 	if (rc) {
@@ -81,7 +81,7 @@ static void do_hw_reset(void)
 	OSMR3 = OSCR + 368640;	/* ... in 100 ms */
 }
 
-void arch_reset(char mode)
+void arch_reset(char mode, const char *cmd)
 {
 	clear_reset_status(RESET_STATUS_ALL);
 
@@ -90,11 +90,12 @@ void arch_reset(char mode)
 		/* Jump into ROM at address 0 */
 		cpu_reset(0);
 		break;
-	case 'h':
-		do_hw_reset();
-		break;
 	case 'g':
 		do_gpio_reset();
+		break;
+	case 'h':
+	default:
+		do_hw_reset();
 		break;
 	}
 }

@@ -7,19 +7,19 @@
 #include <net/inet_common.h>
 #include <net/transp_v6.h>
 
-extern int  	__udp6_lib_rcv(struct sk_buff *, struct hlist_head [], int );
+extern int  	__udp6_lib_rcv(struct sk_buff *, struct udp_table *, int );
 extern void 	__udp6_lib_err(struct sk_buff *, struct inet6_skb_parm *,
-			       int , int , int , __be32 , struct hlist_head []);
+			       u8 , u8 , int , __be32 , struct udp_table *);
 
 extern int	udp_v6_get_port(struct sock *sk, unsigned short snum);
 
 extern int	udpv6_getsockopt(struct sock *sk, int level, int optname,
 				 char __user *optval, int __user *optlen);
 extern int	udpv6_setsockopt(struct sock *sk, int level, int optname,
-				 char __user *optval, int optlen);
+				 char __user *optval, unsigned int optlen);
 #ifdef CONFIG_COMPAT
 extern int	compat_udpv6_setsockopt(struct sock *sk, int level, int optname,
-					char __user *optval, int optlen);
+					char __user *optval, unsigned int optlen);
 extern int	compat_udpv6_getsockopt(struct sock *sk, int level, int optname,
 				       char __user *optval, int __user *optlen);
 #endif

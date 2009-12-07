@@ -35,7 +35,9 @@
 #include <linux/spinlock.h>
 #include <linux/ethtool.h>
 #include <linux/netdevice.h>
+#include <linux/etherdevice.h>
 #include <linux/crc32.h>
+#include <linux/mii.h>
 #include "../8390.h"
 
 #include <pcmcia/cs_types.h>
@@ -91,6 +93,11 @@ static void axnet_release(struct pcmcia_device *link);
 static int axnet_open(struct net_device *dev);
 static int axnet_close(struct net_device *dev);
 static int axnet_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
+static netdev_tx_t axnet_start_xmit(struct sk_buff *skb,
+					  struct net_device *dev);
+static struct net_device_stats *get_stats(struct net_device *dev);
+static void set_multicast_list(struct net_device *dev);
+static void axnet_tx_timeout(struct net_device *dev);
 static const struct ethtool_ops netdev_ethtool_ops;
 static irqreturn_t ei_irq_wrapper(int irq, void *dev_id);
 static void ei_watchdog(u_long arg);
@@ -108,7 +115,6 @@ static void block_output(struct net_device *dev, int count,
 
 static void axnet_detach(struct pcmcia_device *p_dev);
 
-static void axdev_setup(struct net_device *dev);
 static void AX88190_init(struct net_device *dev, int startp);
 static int ax_open(struct net_device *dev);
 static int ax_close(struct net_device *dev);
@@ -134,6 +140,19 @@ static inline axnet_dev_t *PRIV(struct net_device *dev)
 	return p;
 }
 
+static const struct net_device_ops axnet_netdev_ops = {
+	.ndo_open 		= axnet_open,
+	.ndo_stop		= axnet_close,
+	.ndo_do_ioctl		= axnet_ioctl,
+	.ndo_start_xmit		= axnet_start_xmit,
+	.ndo_tx_timeout		= axnet_tx_timeout,
+	.ndo_get_stats		= get_stats,
+	.ndo_set_multicast_list = set_multicast_list,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+};
+
 /*======================================================================
 
     axnet_attach() creates an "instance" of the driver, allocating
@@ -146,14 +165,16 @@ static int axnet_probe(struct pcmcia_device *link)
 {
     axnet_dev_t *info;
     struct net_device *dev;
+    struct ei_device *ei_local;
 
     DEBUG(0, "axnet_attach()\n");
 
-    dev = alloc_netdev(sizeof(struct ei_device) + sizeof(axnet_dev_t),
-			"eth%d", axdev_setup);
-
+    dev = alloc_etherdev(sizeof(struct ei_device) + sizeof(axnet_dev_t));
     if (!dev)
 	return -ENOMEM;
+
+    ei_local = netdev_priv(dev);
+    spin_lock_init(&ei_local->page_lock);
 
     info = PRIV(dev);
     info->p_dev = link;
@@ -163,10 +184,10 @@ static int axnet_probe(struct pcmcia_device *link)
     link->conf.Attributes = CONF_ENABLE_IRQ;
     link->conf.IntType = INT_MEMORY_AND_IO;
 
-    dev->open = &axnet_open;
-    dev->stop = &axnet_close;
-    dev->do_ioctl = &axnet_ioctl;
+    dev->netdev_ops = &axnet_netdev_ops;
+
     SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
+    dev->watchdog_timeo = TX_TIMEOUT;
 
     return axnet_config(link);
 } /* axnet_attach */
@@ -262,7 +283,7 @@ static int try_io_port(struct pcmcia_device *link)
 	if (link->io.NumPorts2 > 0) {
 	    /* for master/slave multifunction cards */
 	    link->io.Attributes2 = IO_DATA_PATH_WIDTH_8;
-	    link->irq.Attributes = 
+	    link->irq.Attributes =
 		IRQ_TYPE_DYNAMIC_SHARING|IRQ_FIRST_SHARED;
 	}
     } else {
@@ -276,7 +297,8 @@ static int try_io_port(struct pcmcia_device *link)
 	    link->io.BasePort1 = j ^ 0x300;
 	    link->io.BasePort2 = (j ^ 0x300) + 0x10;
 	    ret = pcmcia_request_io(link, &link->io);
-	    if (ret == CS_SUCCESS) return ret;
+	    if (ret == 0)
+		    return ret;
 	}
 	return ret;
     } else {
@@ -284,59 +306,49 @@ static int try_io_port(struct pcmcia_device *link)
     }
 }
 
+static int axnet_configcheck(struct pcmcia_device *p_dev,
+			     cistpl_cftable_entry_t *cfg,
+			     cistpl_cftable_entry_t *dflt,
+			     unsigned int vcc,
+			     void *priv_data)
+{
+	int i;
+	cistpl_io_t *io = &cfg->io;
+
+	if (cfg->index == 0 || cfg->io.nwin == 0)
+		return -ENODEV;
+
+	p_dev->conf.ConfigIndex = 0x05;
+	/* For multifunction cards, by convention, we configure the
+	   network function with window 0, and serial with window 1 */
+	if (io->nwin > 1) {
+		i = (io->win[1].len > io->win[0].len);
+		p_dev->io.BasePort2 = io->win[1-i].base;
+		p_dev->io.NumPorts2 = io->win[1-i].len;
+	} else {
+		i = p_dev->io.NumPorts2 = 0;
+	}
+	p_dev->io.BasePort1 = io->win[i].base;
+	p_dev->io.NumPorts1 = io->win[i].len;
+	p_dev->io.IOAddrLines = io->flags & CISTPL_IO_LINES_MASK;
+	if (p_dev->io.NumPorts1 + p_dev->io.NumPorts2 >= 32)
+		return try_io_port(p_dev);
+
+	return -ENODEV;
+}
+
 static int axnet_config(struct pcmcia_device *link)
 {
     struct net_device *dev = link->priv;
     axnet_dev_t *info = PRIV(dev);
-    tuple_t tuple;
-    cisparse_t parse;
-    int i, j, last_ret, last_fn;
-    u_short buf[64];
-    DECLARE_MAC_BUF(mac);
+    int i, j, j2, last_ret, last_fn;
 
     DEBUG(0, "axnet_config(0x%p)\n", link);
 
-    tuple.Attributes = 0;
-    tuple.TupleData = (cisdata_t *)buf;
-    tuple.TupleDataMax = sizeof(buf);
-    tuple.TupleOffset = 0;
-
     /* don't trust the CIS on this; Linksys got it wrong */
     link->conf.Present = 0x63;
-
-    tuple.DesiredTuple = CISTPL_CFTABLE_ENTRY;
-    tuple.Attributes = 0;
-    CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(link, &tuple));
-    while (last_ret == CS_SUCCESS) {
-	cistpl_cftable_entry_t *cfg = &(parse.cftable_entry);
-	cistpl_io_t *io = &(parse.cftable_entry.io);
-	
-	if (pcmcia_get_tuple_data(link, &tuple) != 0 ||
-		pcmcia_parse_tuple(link, &tuple, &parse) != 0 ||
-		cfg->index == 0 || cfg->io.nwin == 0)
-	    goto next_entry;
-	
-	link->conf.ConfigIndex = 0x05;
-	/* For multifunction cards, by convention, we configure the
-	   network function with window 0, and serial with window 1 */
-	if (io->nwin > 1) {
-	    i = (io->win[1].len > io->win[0].len);
-	    link->io.BasePort2 = io->win[1-i].base;
-	    link->io.NumPorts2 = io->win[1-i].len;
-	} else {
-	    i = link->io.NumPorts2 = 0;
-	}
-	link->io.BasePort1 = io->win[i].base;
-	link->io.NumPorts1 = io->win[i].len;
-	link->io.IOAddrLines = io->flags & CISTPL_IO_LINES_MASK;
-	if (link->io.NumPorts1 + link->io.NumPorts2 >= 32) {
-	    last_ret = try_io_port(link);
-	    if (last_ret == CS_SUCCESS) break;
-	}
-    next_entry:
-	last_ret = pcmcia_get_next_tuple(link, &tuple);
-    }
-    if (last_ret != CS_SUCCESS) {
+    last_ret = pcmcia_loop_config(link, axnet_configcheck, NULL);
+    if (last_ret != 0) {
 	cs_error(link, RequestIO, last_ret);
 	goto failed;
     }
@@ -378,6 +390,8 @@ static int axnet_config(struct pcmcia_device *link)
 
     for (i = 0; i < 32; i++) {
 	j = mdio_read(dev->base_addr + AXNET_MII_EEP, i, 1);
+	j2 = mdio_read(dev->base_addr + AXNET_MII_EEP, i, 2);
+	if (j == j2) continue;
 	if ((j != 0) && (j != 0xffff)) break;
     }
 
@@ -388,6 +402,8 @@ static int axnet_config(struct pcmcia_device *link)
  	pcmcia_access_configuration_register(link, &reg);
 	for (i = 0; i < 32; i++) {
 	    j = mdio_read(dev->base_addr + AXNET_MII_EEP, i, 1);
+	    j2 = mdio_read(dev->base_addr + AXNET_MII_EEP, i, 2);
+	    if (j == j2) continue;
 	    if ((j != 0) && (j != 0xffff)) break;
 	}
     }
@@ -405,10 +421,10 @@ static int axnet_config(struct pcmcia_device *link)
     strcpy(info->node.dev_name, dev->name);
 
     printk(KERN_INFO "%s: Asix AX88%d90: io %#3lx, irq %d, "
-	   "hw_addr %s\n",
+	   "hw_addr %pM\n",
 	   dev->name, ((info->flags & IS_AX88790) ? 7 : 1),
 	   dev->base_addr, dev->irq,
-	   print_mac(mac, dev->dev_addr));
+	   dev->dev_addr);
     if (info->phy_id != -1) {
 	DEBUG(0, "  MII transceiver at index %d, status %x.\n", info->phy_id, j);
     } else {
@@ -682,18 +698,16 @@ static const struct ethtool_ops netdev_ethtool_ops = {
 static int axnet_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 {
     axnet_dev_t *info = PRIV(dev);
-    u16 *data = (u16 *)&rq->ifr_ifru;
+    struct mii_ioctl_data *data = if_mii(rq);
     unsigned int mii_addr = dev->base_addr + AXNET_MII_EEP;
     switch (cmd) {
     case SIOCGMIIPHY:
-	data[0] = info->phy_id;
+	data->phy_id = info->phy_id;
     case SIOCGMIIREG:		/* Read MII PHY register. */
-	data[3] = mdio_read(mii_addr, data[0], data[1] & 0x1f);
+	data->val_out = mdio_read(mii_addr, data->phy_id, data->reg_num & 0x1f);
 	return 0;
     case SIOCSMIIREG:		/* Write MII PHY register. */
-	if (!capable(CAP_NET_ADMIN))
-	    return -EPERM;
-	mdio_write(mii_addr, data[0], data[1] & 0x1f, data[2]);
+	mdio_write(mii_addr, data->phy_id, data->reg_num & 0x1f, data->val_in);
 	return 0;
     }
     return -EOPNOTSUPP;
@@ -870,7 +884,7 @@ module_exit(exit_axnet_cs);
 
   */
 
-static const char *version_8390 =
+static const char version_8390[] = KERN_INFO \
     "8390.c:v1.10cvs 9/23/94 Donald Becker (becker@scyld.com)\n";
 
 #include <linux/bitops.h>
@@ -878,8 +892,6 @@ static const char *version_8390 =
 #include <linux/fcntl.h>
 #include <linux/in.h>
 #include <linux/interrupt.h>
-
-#include <linux/etherdevice.h>
 
 #define BUG_83C690
 
@@ -914,14 +926,12 @@ int ei_debug = 1;
 /* Index to functions. */
 static void ei_tx_intr(struct net_device *dev);
 static void ei_tx_err(struct net_device *dev);
-static void ei_tx_timeout(struct net_device *dev);
 static void ei_receive(struct net_device *dev);
 static void ei_rx_overrun(struct net_device *dev);
 
 /* Routines generic to NS8390-based boards. */
 static void NS8390_trigger_send(struct net_device *dev, unsigned int length,
 								int start_page);
-static void set_multicast_list(struct net_device *dev);
 static void do_set_multicast_list(struct net_device *dev);
 
 /*
@@ -963,15 +973,6 @@ static int ax_open(struct net_device *dev)
 	unsigned long flags;
 	struct ei_device *ei_local = (struct ei_device *) netdev_priv(dev);
 
-#ifdef HAVE_TX_TIMEOUT
-	/* The card I/O part of the driver (e.g. 3c503) can hook a Tx timeout
-	    wrapper that does e.g. media check & then calls ei_tx_timeout. */
-	if (dev->tx_timeout == NULL)
-		 dev->tx_timeout = ei_tx_timeout;
-	if (dev->watchdog_timeo <= 0)
-		 dev->watchdog_timeo = TX_TIMEOUT;
-#endif
-
 	/*
 	 *	Grab the page lock so we own the register set, then call
 	 *	the init function.
@@ -1011,14 +1012,14 @@ static int ax_close(struct net_device *dev)
 }
 
 /**
- * ei_tx_timeout - handle transmit time out condition
+ * axnet_tx_timeout - handle transmit time out condition
  * @dev: network device which has apparently fallen asleep
  *
  * Called by kernel when device never acknowledges a transmit has
  * completed (or failed) - i.e. never posted a Tx related interrupt.
  */
 
-static void ei_tx_timeout(struct net_device *dev)
+static void axnet_tx_timeout(struct net_device *dev)
 {
 	long e8390_base = dev->base_addr;
 	struct ei_device *ei_local = (struct ei_device *) netdev_priv(dev);
@@ -1055,14 +1056,15 @@ static void ei_tx_timeout(struct net_device *dev)
 }
     
 /**
- * ei_start_xmit - begin packet transmission
+ * axnet_start_xmit - begin packet transmission
  * @skb: packet to be sent
  * @dev: network device to which packet is sent
  *
  * Sends a packet to an 8390 network device.
  */
  
-static int ei_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t axnet_start_xmit(struct sk_buff *skb,
+					  struct net_device *dev)
 {
 	long e8390_base = dev->base_addr;
 	struct ei_device *ei_local = (struct ei_device *) netdev_priv(dev);
@@ -1127,7 +1129,7 @@ static int ei_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		outb_p(ENISR_ALL, e8390_base + EN0_IMR);
 		spin_unlock_irqrestore(&ei_local->page_lock, flags);
 		dev->stats.tx_errors++;
-		return 1;
+		return NETDEV_TX_BUSY;
 	}
 
 	/*
@@ -1176,14 +1178,13 @@ static int ei_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	dev_kfree_skb (skb);
 	dev->stats.tx_bytes += send_length;
     
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /**
  * ax_interrupt - handle the interrupts from an 8390
  * @irq: interrupt number
  * @dev_id: a pointer to the net_device
- * @regs: unused
  *
  * Handle the ether interface interrupts. We pull packets from
  * the 8390 via the card specific functions and fire them at the networking
@@ -1502,7 +1503,6 @@ static void ei_receive(struct net_device *dev)
 				ei_block_input(dev, pkt_len, skb, current_offset + sizeof(rx_frame));
 				skb->protocol=eth_type_trans(skb,dev);
 				netif_rx(skb);
-				dev->last_rx = jiffies;
 				dev->stats.rx_packets++;
 				dev->stats.rx_bytes += pkt_len;
 				if (pkt_stat & ENRSR_PHY)
@@ -1712,30 +1712,6 @@ static void set_multicast_list(struct net_device *dev)
 	spin_unlock_irqrestore(&dev_lock(dev), flags);
 }	
 
-/**
- * axdev_setup - init rest of 8390 device struct
- * @dev: network device structure to init
- *
- * Initialize the rest of the 8390 device structure.  Do NOT __init
- * this, as it is used by 8390 based modular drivers too.
- */
-
-static void axdev_setup(struct net_device *dev)
-{
-	struct ei_device *ei_local;
-	if (ei_debug > 1)
-		printk(version_8390);
-    
-	ei_local = (struct ei_device *)netdev_priv(dev);
-	spin_lock_init(&ei_local->page_lock);
-    
-	dev->hard_start_xmit = &ei_start_xmit;
-	dev->get_stats	= get_stats;
-	dev->set_multicast_list = &set_multicast_list;
-
-	ether_setup(dev);
-}
-
 /* This page of functions should be 8390 generic */
 /* Follow National Semi's recommendations for initializing the "NIC". */
 
@@ -1793,6 +1769,9 @@ static void AX88190_init(struct net_device *dev, int startp)
 	netif_start_queue(dev);
 	ei_local->tx1 = ei_local->tx2 = 0;
 	ei_local->txing = 0;
+
+	if (info->flags & IS_AX88790)	/* select Internal PHY */
+		outb(0x10, e8390_base + AXNET_GPIO);
 
 	if (startp) 
 	{

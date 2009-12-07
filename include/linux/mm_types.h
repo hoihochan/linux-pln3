@@ -11,6 +11,7 @@
 #include <linux/rwsem.h>
 #include <linux/completion.h>
 #include <linux/cpumask.h>
+#include <linux/page-debug-flags.h>
 #include <asm/page.h>
 #include <asm/mmu.h>
 
@@ -21,11 +22,13 @@
 
 struct address_space;
 
-#if NR_CPUS >= CONFIG_SPLIT_PTLOCK_CPUS
+#define USE_SPLIT_PTLOCKS	(NR_CPUS >= CONFIG_SPLIT_PTLOCK_CPUS)
+
+#if USE_SPLIT_PTLOCKS
 typedef atomic_long_t mm_counter_t;
-#else  /* NR_CPUS < CONFIG_SPLIT_PTLOCK_CPUS */
+#else  /* !USE_SPLIT_PTLOCKS */
 typedef unsigned long mm_counter_t;
-#endif /* NR_CPUS < CONFIG_SPLIT_PTLOCK_CPUS */
+#endif /* !USE_SPLIT_PTLOCKS */
 
 /*
  * Each physical page in the system has a struct page associated with
@@ -65,7 +68,7 @@ struct page {
 						 * see PAGE_MAPPING_ANON below.
 						 */
 	    };
-#if NR_CPUS >= CONFIG_SPLIT_PTLOCK_CPUS
+#if USE_SPLIT_PTLOCKS
 	    spinlock_t ptl;
 #endif
 	    struct kmem_cache *slab;	/* SLUB: Pointer to slab */
@@ -92,9 +95,34 @@ struct page {
 	void *virtual;			/* Kernel virtual address (NULL if
 					   not kmapped, ie. highmem) */
 #endif /* WANT_PAGE_VIRTUAL */
-#ifdef CONFIG_CGROUP_MEM_RES_CTLR
-	unsigned long page_cgroup;
+#ifdef CONFIG_WANT_PAGE_DEBUG_FLAGS
+	unsigned long debug_flags;	/* Use atomic bitops on this */
 #endif
+
+#ifdef CONFIG_KMEMCHECK
+	/*
+	 * kmemcheck wants to track the status of each byte in a page; this
+	 * is a pointer to such a status block. NULL if not tracked.
+	 */
+	void *shadow;
+#endif
+};
+
+/*
+ * A region containing a mapping of a non-memory backed file under NOMMU
+ * conditions.  These are held in a global tree and are pinned by the VMAs that
+ * map parts of them.
+ */
+struct vm_region {
+	struct rb_node	vm_rb;		/* link in global region tree */
+	unsigned long	vm_flags;	/* VMA vm_flags */
+	unsigned long	vm_start;	/* start address of region */
+	unsigned long	vm_end;		/* region initialised to here */
+	unsigned long	vm_top;		/* region allocated to here */
+	unsigned long	vm_pgoff;	/* the offset in vm_file corresponding to vm_start */
+	struct file	*vm_file;	/* the backing file or NULL */
+
+	atomic_t	vm_usage;	/* region usage count */
 };
 
 /*
@@ -143,7 +171,7 @@ struct vm_area_struct {
 	struct anon_vma *anon_vma;	/* Serialized by page_table_lock */
 
 	/* Function pointers to deal with this struct. */
-	struct vm_operations_struct * vm_ops;
+	const struct vm_operations_struct *vm_ops;
 
 	/* Information about our backing store: */
 	unsigned long vm_pgoff;		/* Offset (within vm_file) in PAGE_SIZE
@@ -153,7 +181,7 @@ struct vm_area_struct {
 	unsigned long vm_truncate_count;/* truncate_count or restart_addr */
 
 #ifndef CONFIG_MMU
-	atomic_t vm_usage;		/* refcount (VMAs shared if !MMU) */
+	struct vm_region *vm_region;	/* NOMMU mapping region */
 #endif
 #ifdef CONFIG_NUMA
 	struct mempolicy *vm_policy;	/* NUMA policy for the VMA */
@@ -212,6 +240,8 @@ struct mm_struct {
 
 	unsigned long saved_auxv[AT_VECTOR_SIZE]; /* for /proc/PID/auxv */
 
+	struct linux_binfmt *binfmt;
+
 	cpumask_t cpu_vm_mask;
 
 	/* Architecture-specific MM context */
@@ -231,10 +261,10 @@ struct mm_struct {
 	unsigned long flags; /* Must use atomic bitops to access the bits */
 
 	struct core_state *core_state; /* coredumping support */
-
-	/* aio bits */
-	rwlock_t		ioctx_list_lock;	/* aio lock */
-	struct kioctx		*ioctx_list;
+#ifdef CONFIG_AIO
+	spinlock_t		ioctx_lock;
+	struct hlist_head	ioctx_list;
+#endif
 #ifdef CONFIG_MM_OWNER
 	/*
 	 * "owner" points to a task that is regarded as the canonical
@@ -258,5 +288,8 @@ struct mm_struct {
 	struct mmu_notifier_mm *mmu_notifier_mm;
 #endif
 };
+
+/* Future-safe accessor for struct mm_struct's cpu_vm_mask. */
+#define mm_cpumask(mm) (&(mm)->cpu_vm_mask)
 
 #endif /* _LINUX_MM_TYPES_H */

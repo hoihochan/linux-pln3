@@ -39,7 +39,7 @@ struct psmouse {
 	void *private;
 	struct input_dev *dev;
 	struct ps2dev ps2dev;
-	struct work_struct resync_work;
+	struct delayed_work resync_work;
 	char *vendor;
 	char *name;
 	unsigned char packet[8];
@@ -47,10 +47,10 @@ struct psmouse {
 	unsigned char pktcnt;
 	unsigned char pktsize;
 	unsigned char type;
-	unsigned char acks_disable_command;
+	bool acks_disable_command;
 	unsigned int model;
 	unsigned long last;
-	unsigned long out_of_sync;
+	unsigned long out_of_sync_cnt;
 	unsigned long num_resyncs;
 	enum psmouse_state state;
 	char devname[64];
@@ -60,7 +60,7 @@ struct psmouse {
 	unsigned int resolution;
 	unsigned int resetafter;
 	unsigned int resync_time;
-	unsigned int smartscroll;	/* Logitech only */
+	bool smartscroll;	/* Logitech only */
 
 	psmouse_ret_t (*protocol_handler)(struct psmouse *psmouse);
 	void (*set_rate)(struct psmouse *psmouse, unsigned int rate);
@@ -89,13 +89,18 @@ enum psmouse_type {
 	PSMOUSE_TRACKPOINT,
 	PSMOUSE_TOUCHKIT_PS2,
 	PSMOUSE_CORTRON,
+	PSMOUSE_HGPK,
+	PSMOUSE_ELANTECH,
+	PSMOUSE_FSP,
 	PSMOUSE_AUTO		/* This one should always be last */
 };
 
+void psmouse_queue_work(struct psmouse *psmouse, struct delayed_work *work,
+		unsigned long delay);
 int psmouse_sliced_command(struct psmouse *psmouse, unsigned char command);
 int psmouse_reset(struct psmouse *psmouse);
+void psmouse_set_state(struct psmouse *psmouse, enum psmouse_state new_state);
 void psmouse_set_resolution(struct psmouse *psmouse, unsigned int resolution);
-
 
 struct psmouse_attribute {
 	struct device_attribute dattr;
@@ -103,6 +108,7 @@ struct psmouse_attribute {
 	ssize_t (*show)(struct psmouse *psmouse, void *data, char *buf);
 	ssize_t (*set)(struct psmouse *psmouse, void *data,
 			const char *buf, size_t count);
+	bool protect;
 };
 #define to_psmouse_attr(a)	container_of((a), struct psmouse_attribute, dattr)
 
@@ -111,9 +117,7 @@ ssize_t psmouse_attr_show_helper(struct device *dev, struct device_attribute *at
 ssize_t psmouse_attr_set_helper(struct device *dev, struct device_attribute *attr,
 				const char *buf, size_t count);
 
-#define PSMOUSE_DEFINE_ATTR(_name, _mode, _data, _show, _set)			\
-static ssize_t _show(struct psmouse *, void *data, char *);			\
-static ssize_t _set(struct psmouse *, void *data, const char *, size_t);	\
+#define __PSMOUSE_DEFINE_ATTR_VAR(_name, _mode, _data, _show, _set, _protect)	\
 static struct psmouse_attribute psmouse_attr_##_name = {			\
 	.dattr	= {								\
 		.attr	= {							\
@@ -126,6 +130,23 @@ static struct psmouse_attribute psmouse_attr_##_name = {			\
 	.data	= _data,							\
 	.show	= _show,							\
 	.set	= _set,								\
+	.protect = _protect,							\
 }
+
+#define __PSMOUSE_DEFINE_ATTR(_name, _mode, _data, _show, _set, _protect)	\
+	static ssize_t _show(struct psmouse *, void *, char *);			\
+	static ssize_t _set(struct psmouse *, void *, const char *, size_t);	\
+	__PSMOUSE_DEFINE_ATTR_VAR(_name, _mode, _data, _show, _set, _protect)
+
+#define PSMOUSE_DEFINE_ATTR(_name, _mode, _data, _show, _set)			\
+	__PSMOUSE_DEFINE_ATTR(_name, _mode, _data, _show, _set, true)
+
+#define PSMOUSE_DEFINE_RO_ATTR(_name, _mode, _data, _show)			\
+	static ssize_t _show(struct psmouse *, void *, char *);			\
+	__PSMOUSE_DEFINE_ATTR_VAR(_name, _mode, _data, _show, NULL, true)
+
+#define PSMOUSE_DEFINE_WO_ATTR(_name, _mode, _data, _set)			\
+	static ssize_t _set(struct psmouse *, void *, const char *, size_t);	\
+	__PSMOUSE_DEFINE_ATTR_VAR(_name, _mode, _data, NULL, _set, true)
 
 #endif /* _PSMOUSE_H */

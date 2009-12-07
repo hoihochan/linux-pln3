@@ -220,8 +220,8 @@ static void aircable_send(struct usb_serial_port *port)
 
 	buf = kzalloc(count + HCI_HEADER_LENGTH, GFP_ATOMIC);
 	if (!buf) {
-		err("%s- kzalloc(%d) failed.", __func__,
-		    count + HCI_HEADER_LENGTH);
+		dev_err(&port->dev, "%s- kzalloc(%d) failed.\n",
+			__func__, count + HCI_HEADER_LENGTH);
 		return;
 	}
 
@@ -272,23 +272,24 @@ static void aircable_read(struct work_struct *work)
 	 * 64 bytes, to ensure I do not get throttled.
 	 * Ask USB mailing list for better aproach.
 	 */
-	tty = port->port.tty;
+	tty = tty_port_tty_get(&port->port);
 
 	if (!tty) {
 		schedule_work(&priv->rx_work);
-		err("%s - No tty available", __func__);
+		dev_err(&port->dev, "%s - No tty available\n", __func__);
 		return ;
 	}
 
 	count = min(64, serial_buf_data_avail(priv->rx_buf));
 
 	if (count <= 0)
-		return; /* We have finished sending everything. */
+		goto out; /* We have finished sending everything. */
 
 	tty_prepare_flip_string(tty, &data, count);
 	if (!data) {
-		err("%s- kzalloc(%d) failed.", __func__, count);
-		return;
+		dev_err(&port->dev, "%s- kzalloc(%d) failed.",
+							__func__, count);
+		goto out;
 	}
 
 	serial_buf_get(priv->rx_buf, data, count);
@@ -297,7 +298,8 @@ static void aircable_read(struct work_struct *work)
 
 	if (serial_buf_data_avail(priv->rx_buf))
 		schedule_work(&priv->rx_work);
-
+out:		
+	tty_kref_put(tty);
 	return;
 }
 /* End of private methods */
@@ -334,7 +336,7 @@ static int aircable_attach(struct usb_serial *serial)
 
 	priv = kzalloc(sizeof(struct aircable_private), GFP_KERNEL);
 	if (!priv) {
-		err("%s- kmalloc(%Zd) failed.", __func__,
+		dev_err(&port->dev, "%s- kmalloc(%Zd) failed.\n", __func__,
 			sizeof(struct aircable_private));
 		return -ENOMEM;
 	}
@@ -362,7 +364,7 @@ static int aircable_attach(struct usb_serial *serial)
 	return 0;
 }
 
-static void aircable_shutdown(struct usb_serial *serial)
+static void aircable_release(struct usb_serial *serial)
 {
 
 	struct usb_serial_port *port = serial->port[0];
@@ -373,7 +375,6 @@ static void aircable_shutdown(struct usb_serial *serial)
 	if (priv) {
 		serial_buf_free(priv->tx_buf);
 		serial_buf_free(priv->rx_buf);
-		usb_set_serial_port_data(port, NULL);
 		kfree(priv);
 	}
 }
@@ -495,7 +496,7 @@ static void aircable_read_bulk_callback(struct urb *urb)
 	usb_serial_debug_data(debug, &port->dev, __func__,
 				urb->actual_length, urb->transfer_buffer);
 
-	tty = port->port.tty;
+	tty = tty_port_tty_get(&port->port);
 	if (tty && urb->actual_length) {
 		if (urb->actual_length <= 2) {
 			/* This is an incomplete package */
@@ -527,6 +528,7 @@ static void aircable_read_bulk_callback(struct urb *urb)
 		}
 		aircable_read(&priv->rx_work);
 	}
+	tty_kref_put(tty);
 
 	/* Schedule the next read _if_ we are still open */
 	if (port->port.count) {
@@ -552,13 +554,12 @@ static void aircable_throttle(struct tty_struct *tty)
 {
 	struct usb_serial_port *port = tty->driver_data;
 	struct aircable_private *priv = usb_get_serial_port_data(port);
-	unsigned long flags;
 
 	dbg("%s - port %d", __func__, port->number);
 
-	spin_lock_irqsave(&priv->rx_lock, flags);
+	spin_lock_irq(&priv->rx_lock);
 	priv->rx_flags |= THROTTLED;
-	spin_unlock_irqrestore(&priv->rx_lock, flags);
+	spin_unlock_irq(&priv->rx_lock);
 }
 
 /* Based on ftdi_sio.c unthrottle */
@@ -567,14 +568,13 @@ static void aircable_unthrottle(struct tty_struct *tty)
 	struct usb_serial_port *port = tty->driver_data;
 	struct aircable_private *priv = usb_get_serial_port_data(port);
 	int actually_throttled;
-	unsigned long flags;
 
 	dbg("%s - port %d", __func__, port->number);
 
-	spin_lock_irqsave(&priv->rx_lock, flags);
+	spin_lock_irq(&priv->rx_lock);
 	actually_throttled = priv->rx_flags & ACTUALLY_THROTTLED;
 	priv->rx_flags &= ~(THROTTLED | ACTUALLY_THROTTLED);
-	spin_unlock_irqrestore(&priv->rx_lock, flags);
+	spin_unlock_irq(&priv->rx_lock);
 
 	if (actually_throttled)
 		schedule_work(&priv->rx_work);
@@ -598,7 +598,7 @@ static struct usb_serial_driver aircable_device = {
 	.num_ports =		1,
 	.attach =		aircable_attach,
 	.probe =		aircable_probe,
-	.shutdown =		aircable_shutdown,
+	.release =		aircable_release,
 	.write =		aircable_write,
 	.write_room =		aircable_write_room,
 	.write_bulk_callback =	aircable_write_bulk_callback,
@@ -618,9 +618,9 @@ static int __init aircable_init(void)
 		goto failed_usb_register;
 	return 0;
 
-failed_serial_register:
-	usb_serial_deregister(&aircable_device);
 failed_usb_register:
+	usb_serial_deregister(&aircable_device);
+failed_serial_register:
 	return retval;
 }
 

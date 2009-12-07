@@ -36,6 +36,7 @@
 #include <linux/errno.h>
 #include <asm/system.h>
 #include <linux/poll.h>
+#include <linux/sched.h>
 #include <linux/spinlock.h>
 #include <linux/slab.h>
 #include <linux/ipmi.h>
@@ -161,8 +162,6 @@ static int ipmi_release(struct inode *inode, struct file *file)
 	rv = ipmi_destroy_user(priv->user);
 	if (rv)
 		return rv;
-
-	ipmi_fasync (-1, file, 0);
 
 	/* FIXME - free the messages in the list. */
 	kfree(priv);
@@ -871,7 +870,7 @@ static void ipmi_new_smi(int if_num, struct device *device)
 	entry->dev = dev;
 
 	mutex_lock(&reg_list_mutex);
-	device_create_drvdata(ipmi_class, device, dev, NULL, "ipmi%d", if_num);
+	device_create(ipmi_class, device, dev, NULL, "ipmi%d", if_num);
 	list_add(&entry->link, &reg_list);
 	mutex_unlock(&reg_list_mutex);
 }

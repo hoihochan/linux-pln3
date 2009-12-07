@@ -1,15 +1,13 @@
 /*
- *  File: arch/blackfin/mach-bf561/tepla.c
+ * Copyright 2004-2007 Analog Devices Inc.
+ *                2005 National ICT Australia (NICTA)
+ *                      Aidan Williams <aidan@nicta.com.au>
  *
- *  Copyright 2004-2007 Analog Devices Inc.
- *  Only SMSC91C1111 was registered, may do more later.
+ * Thanks to Jamey Hicks.
  *
- *  Copyright 2005 National ICT Australia (NICTA), Aidan Williams <aidan@nicta.com.au>
- *  Thanks to Jamey Hicks.
+ * Only SMSC91C1111 was registered, may do more later.
  *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License version 2 as
- *  published by the Free Software Foundation.
+ * Licensed under the GPL-2
  */
 
 #include <linux/device.h>
@@ -44,8 +42,42 @@ static struct platform_device smc91x_device = {
 	.resource      = smc91x_resources,
 };
 
+#if defined(CONFIG_BFIN_SIR) || defined(CONFIG_BFIN_SIR_MODULE)
+#ifdef CONFIG_BFIN_SIR0
+static struct resource bfin_sir0_resources[] = {
+	{
+		.start = 0xFFC00400,
+		.end = 0xFFC004FF,
+		.flags = IORESOURCE_MEM,
+	},
+	{
+		.start = IRQ_UART0_RX,
+		.end = IRQ_UART0_RX+1,
+		.flags = IORESOURCE_IRQ,
+	},
+	{
+		.start = CH_UART0_RX,
+		.end = CH_UART0_RX+1,
+		.flags = IORESOURCE_DMA,
+	},
+};
+
+static struct platform_device bfin_sir0_device = {
+	.name = "bfin_sir",
+	.id = 0,
+	.num_resources = ARRAY_SIZE(bfin_sir0_resources),
+	.resource = bfin_sir0_resources,
+};
+#endif
+#endif
+
 static struct platform_device *tepla_devices[] __initdata = {
 	&smc91x_device,
+#if defined(CONFIG_BFIN_SIR) || defined(CONFIG_BFIN_SIR_MODULE)
+#ifdef CONFIG_BFIN_SIR0
+	&bfin_sir0_device,
+#endif
+#endif
 };
 
 static int __init tepla_init(void)

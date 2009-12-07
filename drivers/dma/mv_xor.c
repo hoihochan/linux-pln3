@@ -18,7 +18,6 @@
 
 #include <linux/init.h>
 #include <linux/module.h>
-#include <linux/async_tx.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/spinlock.h>
@@ -340,7 +339,7 @@ mv_xor_run_tx_complete_actions(struct mv_xor_desc_slot *desc,
 	}
 
 	/* run dependent operations */
-	async_tx_run_dependencies(&desc->async_tx);
+	dma_run_dependencies(&desc->async_tx);
 
 	return cookie;
 }
@@ -518,7 +517,7 @@ retry:
 			}
 			alloc_tail->group_head = alloc_start;
 			alloc_tail->async_tx.cookie = -EBUSY;
-			list_splice(&chain, &alloc_tail->async_tx.tx_list);
+			list_splice(&chain, &alloc_tail->tx_list);
 			mv_chan->last_used = last_used;
 			mv_desc_clear_next_desc(alloc_start);
 			mv_desc_clear_next_desc(alloc_tail);
@@ -566,14 +565,14 @@ mv_xor_tx_submit(struct dma_async_tx_descriptor *tx)
 	cookie = mv_desc_assign_cookie(mv_chan, sw_desc);
 
 	if (list_empty(&mv_chan->chain))
-		list_splice_init(&sw_desc->async_tx.tx_list, &mv_chan->chain);
+		list_splice_init(&sw_desc->tx_list, &mv_chan->chain);
 	else {
 		new_hw_chain = 0;
 
 		old_chain_tail = list_entry(mv_chan->chain.prev,
 					    struct mv_xor_desc_slot,
 					    chain_node);
-		list_splice_init(&grp_start->async_tx.tx_list,
+		list_splice_init(&grp_start->tx_list,
 				 &old_chain_tail->chain_node);
 
 		if (!mv_can_chain(grp_start))
@@ -607,8 +606,7 @@ submit_done:
 }
 
 /* returns the number of allocated descriptors */
-static int mv_xor_alloc_chan_resources(struct dma_chan *chan,
-				       struct dma_client *client)
+static int mv_xor_alloc_chan_resources(struct dma_chan *chan)
 {
 	char *hw_desc;
 	int idx;
@@ -634,7 +632,7 @@ static int mv_xor_alloc_chan_resources(struct dma_chan *chan,
 		slot->async_tx.tx_submit = mv_xor_tx_submit;
 		INIT_LIST_HEAD(&slot->chain_node);
 		INIT_LIST_HEAD(&slot->slot_node);
-		INIT_LIST_HEAD(&slot->async_tx.tx_list);
+		INIT_LIST_HEAD(&slot->tx_list);
 		hw_desc = (char *) mv_chan->device->dma_desc_pool;
 		slot->async_tx.phys =
 			(dma_addr_t) &hw_desc[idx * MV_XOR_SLOT_SIZE];
@@ -958,7 +956,7 @@ static int __devinit mv_xor_memcpy_self_test(struct mv_xor_device *device)
 	dma_chan = container_of(device->common.channels.next,
 				struct dma_chan,
 				device_node);
-	if (mv_xor_alloc_chan_resources(dma_chan, NULL) < 1) {
+	if (mv_xor_alloc_chan_resources(dma_chan) < 1) {
 		err = -ENODEV;
 		goto out;
 	}
@@ -1021,19 +1019,19 @@ mv_xor_xor_self_test(struct mv_xor_device *device)
 
 	for (src_idx = 0; src_idx < MV_XOR_NUM_SRC_TEST; src_idx++) {
 		xor_srcs[src_idx] = alloc_page(GFP_KERNEL);
-		if (!xor_srcs[src_idx])
-			while (src_idx--) {
+		if (!xor_srcs[src_idx]) {
+			while (src_idx--)
 				__free_page(xor_srcs[src_idx]);
-				return -ENOMEM;
-			}
+			return -ENOMEM;
+		}
 	}
 
 	dest = alloc_page(GFP_KERNEL);
-	if (!dest)
-		while (src_idx--) {
+	if (!dest) {
+		while (src_idx--)
 			__free_page(xor_srcs[src_idx]);
-			return -ENOMEM;
-		}
+		return -ENOMEM;
+	}
 
 	/* Fill in src buffers */
 	for (src_idx = 0; src_idx < MV_XOR_NUM_SRC_TEST; src_idx++) {
@@ -1053,7 +1051,7 @@ mv_xor_xor_self_test(struct mv_xor_device *device)
 	dma_chan = container_of(device->common.channels.next,
 				struct dma_chan,
 				device_node);
-	if (mv_xor_alloc_chan_resources(dma_chan, NULL) < 1) {
+	if (mv_xor_alloc_chan_resources(dma_chan) < 1) {
 		err = -ENODEV;
 		goto out;
 	}
@@ -1179,7 +1177,7 @@ static int __devinit mv_xor_probe(struct platform_device *pdev)
 	if (dma_has_cap(DMA_MEMSET, dma_dev->cap_mask))
 		dma_dev->device_prep_dma_memset = mv_xor_prep_dma_memset;
 	if (dma_has_cap(DMA_XOR, dma_dev->cap_mask)) {
-		dma_dev->max_xor = 8;                  ;
+		dma_dev->max_xor = 8;
 		dma_dev->device_prep_dma_xor = mv_xor_prep_dma_xor;
 	}
 
@@ -1221,7 +1219,6 @@ static int __devinit mv_xor_probe(struct platform_device *pdev)
 	INIT_LIST_HEAD(&mv_chan->chain);
 	INIT_LIST_HEAD(&mv_chan->completed_slots);
 	INIT_LIST_HEAD(&mv_chan->all_slots);
-	INIT_RCU_HEAD(&mv_chan->common.rcu);
 	mv_chan->common.device = dma_dev;
 
 	list_add_tail(&mv_chan->common.device_node, &dma_dev->channels);
@@ -1290,7 +1287,7 @@ mv_xor_conf_mbus_windows(struct mv_xor_shared_private *msp,
 
 static struct platform_driver mv_xor_driver = {
 	.probe		= mv_xor_probe,
-	.remove		= mv_xor_remove,
+	.remove		= __devexit_p(mv_xor_remove),
 	.driver		= {
 		.owner	= THIS_MODULE,
 		.name	= MV_XOR_NAME,

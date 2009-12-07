@@ -20,7 +20,7 @@
 #include "br_private.h"
 
 /* net device transmit always called with no BH (preempt_disabled) */
-int br_dev_xmit(struct sk_buff *skb, struct net_device *dev)
+netdev_tx_t br_dev_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct net_bridge *br = netdev_priv(dev);
 	const unsigned char *dest = skb->data;
@@ -39,7 +39,7 @@ int br_dev_xmit(struct sk_buff *skb, struct net_device *dev)
 	else
 		br_flood_deliver(br, skb);
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 static int br_dev_open(struct net_device *dev)
@@ -147,7 +147,7 @@ static int br_set_tx_csum(struct net_device *dev, u32 data)
 	return 0;
 }
 
-static struct ethtool_ops br_ethtool_ops = {
+static const struct ethtool_ops br_ethtool_ops = {
 	.get_drvinfo    = br_getinfo,
 	.get_link	= ethtool_op_get_link,
 	.get_tx_csum	= ethtool_op_get_tx_csum,
@@ -160,23 +160,28 @@ static struct ethtool_ops br_ethtool_ops = {
 	.get_flags	= ethtool_op_get_flags,
 };
 
+static const struct net_device_ops br_netdev_ops = {
+	.ndo_open		 = br_dev_open,
+	.ndo_stop		 = br_dev_stop,
+	.ndo_start_xmit		 = br_dev_xmit,
+	.ndo_set_mac_address	 = br_set_mac_address,
+	.ndo_set_multicast_list	 = br_dev_set_multicast_list,
+	.ndo_change_mtu		 = br_change_mtu,
+	.ndo_do_ioctl		 = br_dev_ioctl,
+};
+
 void br_dev_setup(struct net_device *dev)
 {
 	random_ether_addr(dev->dev_addr);
 	ether_setup(dev);
 
-	dev->do_ioctl = br_dev_ioctl;
-	dev->hard_start_xmit = br_dev_xmit;
-	dev->open = br_dev_open;
-	dev->set_multicast_list = br_dev_set_multicast_list;
-	dev->change_mtu = br_change_mtu;
+	dev->netdev_ops = &br_netdev_ops;
 	dev->destructor = free_netdev;
 	SET_ETHTOOL_OPS(dev, &br_ethtool_ops);
-	dev->stop = br_dev_stop;
 	dev->tx_queue_len = 0;
-	dev->set_mac_address = br_set_mac_address;
 	dev->priv_flags = IFF_EBRIDGE;
 
 	dev->features = NETIF_F_SG | NETIF_F_FRAGLIST | NETIF_F_HIGHDMA |
-			NETIF_F_GSO_MASK | NETIF_F_NO_CSUM | NETIF_F_LLTX;
+			NETIF_F_GSO_MASK | NETIF_F_NO_CSUM | NETIF_F_LLTX |
+			NETIF_F_NETNS_LOCAL | NETIF_F_GSO;
 }

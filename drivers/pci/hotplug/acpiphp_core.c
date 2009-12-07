@@ -77,7 +77,6 @@ static int get_latch_status	(struct hotplug_slot *slot, u8 *value);
 static int get_adapter_status	(struct hotplug_slot *slot, u8 *value);
 
 static struct hotplug_slot_ops acpi_hotplug_slot_ops = {
-	.owner			= THIS_MODULE,
 	.enable_slot		= enable_slot,
 	.disable_slot		= disable_slot,
 	.set_attention_status	= set_attention_status,
@@ -337,7 +336,7 @@ int acpiphp_register_hotplug_slot(struct acpiphp_slot *acpiphp_slot)
 	slot->hotplug_slot->info->cur_bus_speed = PCI_SPEED_UNKNOWN;
 
 	acpiphp_slot->slot = slot;
-	snprintf(name, SLOT_NAME_SIZE, "%u", slot->acpi_slot->sun);
+	snprintf(name, SLOT_NAME_SIZE, "%llu", slot->acpi_slot->sun);
 
 	retval = pci_hp_register(slot->hotplug_slot,
 					acpiphp_slot->bridge->pci_bus,

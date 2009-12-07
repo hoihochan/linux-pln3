@@ -28,6 +28,9 @@
 /* These are code, but not functions.  Defined in entry.S */
 extern const char xen_hypervisor_callback[];
 extern const char xen_failsafe_callback[];
+extern void xen_sysenter_target(void);
+extern void xen_syscall_target(void);
+extern void xen_syscall32_target(void);
 
 
 /**
@@ -58,9 +61,9 @@ char * __init xen_memory_setup(void)
 	 *  - xen_start_info
 	 * See comment above "struct start_info" in <xen/interface/xen.h>
 	 */
-	e820_add_region(__pa(xen_start_info->mfn_list),
-			xen_start_info->pt_base - xen_start_info->mfn_list,
-			E820_RESERVED);
+	reserve_early(__pa(xen_start_info->mfn_list),
+		      __pa(xen_start_info->pt_base),
+			"XEN START INFO");
 
 	sanitize_e820_map(e820.map, ARRAY_SIZE(e820.map), &e820.nr_map);
 
@@ -110,7 +113,6 @@ static __cpuinit int register_callback(unsigned type, const void *func)
 
 void __cpuinit xen_enable_sysenter(void)
 {
-	extern void xen_sysenter_target(void);
 	int ret;
 	unsigned sysenter_feature;
 
@@ -132,8 +134,6 @@ void __cpuinit xen_enable_syscall(void)
 {
 #ifdef CONFIG_X86_64
 	int ret;
-	extern void xen_syscall_target(void);
-	extern void xen_syscall32_target(void);
 
 	ret = register_callback(CALLBACKTYPE_syscall, xen_syscall_target);
 	if (ret != 0) {
@@ -160,7 +160,8 @@ void __init xen_arch_setup(void)
 	HYPERVISOR_vm_assist(VMASST_CMD_enable, VMASST_TYPE_writable_pagetables);
 
 	if (!xen_feature(XENFEAT_auto_translated_physmap))
-		HYPERVISOR_vm_assist(VMASST_CMD_enable, VMASST_TYPE_pae_extended_cr3);
+		HYPERVISOR_vm_assist(VMASST_CMD_enable,
+				     VMASST_TYPE_pae_extended_cr3);
 
 	if (register_callback(CALLBACKTYPE_event, xen_hypervisor_callback) ||
 	    register_callback(CALLBACKTYPE_failsafe, xen_failsafe_callback))

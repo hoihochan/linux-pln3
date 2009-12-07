@@ -38,15 +38,16 @@
 
 	.globl system_reset_iSeries
 system_reset_iSeries:
+	bl	.relative_toc
 	mfspr	r13,SPRN_SPRG3		/* Get alpaca address */
-	LOAD_REG_IMMEDIATE(r23, alpaca)
+	LOAD_REG_ADDR(r23, alpaca)
 	li	r0,ALPACA_SIZE
 	sub	r23,r13,r23
 	divdu	r23,r23,r0		/* r23 has cpu number */
-	LOAD_REG_IMMEDIATE(r13, paca)
+	LOAD_REG_ADDR(r13, paca)
 	mulli	r0,r23,PACA_SIZE
 	add	r13,r13,r0
-	mtspr	SPRN_SPRG3,r13		/* Save it away for the future */
+	mtspr	SPRN_SPRG_PACA,r13	/* Save it away for the future */
 	mfmsr	r24
 	ori	r24,r24,MSR_RI
 	mtmsrd	r24			/* RI on */
@@ -60,14 +61,14 @@ system_reset_iSeries:
 	mtspr	SPRN_CTRLT,r4
 
 /* Spin on __secondary_hold_spinloop until it is updated by the boot cpu. */
-/* In the UP case we'll yeild() later, and we will not access the paca anyway */
+/* In the UP case we'll yield() later, and we will not access the paca anyway */
 #ifdef CONFIG_SMP
 1:
 	HMT_LOW
-	LOAD_REG_IMMEDIATE(r23, __secondary_hold_spinloop)
+	LOAD_REG_ADDR(r23, __secondary_hold_spinloop)
 	ld	r23,0(r23)
 	sync
-	LOAD_REG_IMMEDIATE(r3,current_set)
+	LOAD_REG_ADDR(r3,current_set)
 	sldi	r28,r24,3		/* get current_set[cpu#] */
 	ldx	r3,r3,r28
 	addi	r1,r3,THREAD_SIZE
@@ -90,7 +91,7 @@ system_reset_iSeries:
 	lbz	r23,PACAPROCSTART(r13)	/* Test if this processor
 					 * should start */
 	sync
-	LOAD_REG_IMMEDIATE(r3,current_set)
+	LOAD_REG_ADDR(r3,current_set)
 	sldi	r28,r24,3		/* get current_set[cpu#] */
 	ldx	r3,r3,r28
 	addi	r1,r3,THREAD_SIZE
@@ -115,7 +116,7 @@ iSeries_secondary_smp_loop:
 #endif /* CONFIG_SMP */
 	li	r0,-1			/* r0=-1 indicates a Hypervisor call */
 	sc				/* Invoke the hypervisor via a system call */
-	mfspr	r13,SPRN_SPRG3		/* Put r13 back ???? */
+	mfspr	r13,SPRN_SPRG_PACA	/* Put r13 back ???? */
 	b	2b			/* If SMP not configured, secondaries
 					 * loop forever */
 
@@ -125,34 +126,45 @@ iSeries_secondary_smp_loop:
 
 	.globl data_access_iSeries
 data_access_iSeries:
-	mtspr	SPRN_SPRG1,r13
+	mtspr	SPRN_SPRG_SCRATCH0,r13
 BEGIN_FTR_SECTION
-	mtspr	SPRN_SPRG2,r12
-	mfspr	r13,SPRN_DAR
-	mfspr	r12,SPRN_DSISR
-	srdi	r13,r13,60
-	rlwimi	r13,r12,16,0x20
-	mfcr	r12
-	cmpwi	r13,0x2c
+	mfspr	r13,SPRN_SPRG_PACA
+	std	r9,PACA_EXSLB+EX_R9(r13)
+	std	r10,PACA_EXSLB+EX_R10(r13)
+	mfspr	r10,SPRN_DAR
+	mfspr	r9,SPRN_DSISR
+	srdi	r10,r10,60
+	rlwimi	r10,r9,16,0x20
+	mfcr	r9
+	cmpwi	r10,0x2c
 	beq	.do_stab_bolted_iSeries
-	mtcrf	0x80,r12
-	mfspr	r12,SPRN_SPRG2
-END_FTR_SECTION_IFCLR(CPU_FTR_SLB)
+	ld	r10,PACA_EXSLB+EX_R10(r13)
+	std	r11,PACA_EXGEN+EX_R11(r13)
+	ld	r11,PACA_EXSLB+EX_R9(r13)
+	std	r12,PACA_EXGEN+EX_R12(r13)
+	mfspr	r12,SPRN_SPRG_SCRATCH0
+	std	r10,PACA_EXGEN+EX_R10(r13)
+	std	r11,PACA_EXGEN+EX_R9(r13)
+	std	r12,PACA_EXGEN+EX_R13(r13)
+	EXCEPTION_PROLOG_ISERIES_1
+FTR_SECTION_ELSE
 	EXCEPTION_PROLOG_1(PACA_EXGEN)
 	EXCEPTION_PROLOG_ISERIES_1
+ALT_FTR_SECTION_END_IFCLR(CPU_FTR_SLB)
 	b	data_access_common
 
 .do_stab_bolted_iSeries:
-	mtcrf	0x80,r12
-	mfspr	r12,SPRN_SPRG2
-	EXCEPTION_PROLOG_1(PACA_EXSLB)
+	std	r11,PACA_EXSLB+EX_R11(r13)
+	std	r12,PACA_EXSLB+EX_R12(r13)
+	mfspr	r10,SPRN_SPRG_SCRATCH0
+	std	r10,PACA_EXSLB+EX_R13(r13)
 	EXCEPTION_PROLOG_ISERIES_1
 	b	.do_stab_bolted
 
 	.globl	data_access_slb_iSeries
 data_access_slb_iSeries:
-	mtspr	SPRN_SPRG1,r13		/* save r13 */
-	mfspr	r13,SPRN_SPRG3		/* get paca address into r13 */
+	mtspr	SPRN_SPRG_SCRATCH0,r13	/* save r13 */
+	mfspr	r13,SPRN_SPRG_PACA	/* get paca address into r13 */
 	std	r3,PACA_EXSLB+EX_R3(r13)
 	mfspr	r3,SPRN_DAR
 	std	r9,PACA_EXSLB+EX_R9(r13)
@@ -164,7 +176,7 @@ data_access_slb_iSeries:
 	std	r10,PACA_EXSLB+EX_R10(r13)
 	std	r11,PACA_EXSLB+EX_R11(r13)
 	std	r12,PACA_EXSLB+EX_R12(r13)
-	mfspr	r10,SPRN_SPRG1
+	mfspr	r10,SPRN_SPRG_SCRATCH0
 	std	r10,PACA_EXSLB+EX_R13(r13)
 	ld	r12,PACALPPACAPTR(r13)
 	ld	r12,LPPACASRR1(r12)
@@ -174,8 +186,8 @@ data_access_slb_iSeries:
 
 	.globl	instruction_access_slb_iSeries
 instruction_access_slb_iSeries:
-	mtspr	SPRN_SPRG1,r13		/* save r13 */
-	mfspr	r13,SPRN_SPRG3		/* get paca address into r13 */
+	mtspr	SPRN_SPRG_SCRATCH0,r13	/* save r13 */
+	mfspr	r13,SPRN_SPRG_PACA	/* get paca address into r13 */
 	std	r3,PACA_EXSLB+EX_R3(r13)
 	ld	r3,PACALPPACAPTR(r13)
 	ld	r3,LPPACASRR0(r3)	/* get SRR0 value */
@@ -188,7 +200,7 @@ instruction_access_slb_iSeries:
 	std	r10,PACA_EXSLB+EX_R10(r13)
 	std	r11,PACA_EXSLB+EX_R11(r13)
 	std	r12,PACA_EXSLB+EX_R12(r13)
-	mfspr	r10,SPRN_SPRG1
+	mfspr	r10,SPRN_SPRG_SCRATCH0
 	std	r10,PACA_EXSLB+EX_R13(r13)
 	ld	r12,PACALPPACAPTR(r13)
 	ld	r12,LPPACASRR1(r12)
@@ -199,7 +211,7 @@ slb_miss_user_iseries:
 	std	r10,PACA_EXGEN+EX_R10(r13)
 	std	r11,PACA_EXGEN+EX_R11(r13)
 	std	r12,PACA_EXGEN+EX_R12(r13)
-	mfspr	r10,SPRG1
+	mfspr	r10,SPRG_SCRATCH0
 	ld	r11,PACA_EXSLB+EX_R9(r13)
 	ld	r12,PACA_EXSLB+EX_R3(r13)
 	std	r10,PACA_EXGEN+EX_R13(r13)
@@ -220,7 +232,7 @@ slb_miss_user_iseries:
 	.globl	system_call_iSeries
 system_call_iSeries:
 	mr	r9,r13
-	mfspr	r13,SPRN_SPRG3
+	mfspr	r13,SPRN_SPRG_PACA
 	EXCEPTION_PROLOG_ISERIES_1
 	b	system_call_common
 
@@ -255,8 +267,8 @@ hardware_interrupt_iSeries_masked:
 
 _INIT_STATIC(__start_initialization_iSeries)
 	/* Clear out the BSS */
-	LOAD_REG_IMMEDIATE(r11,__bss_stop)
-	LOAD_REG_IMMEDIATE(r8,__bss_start)
+	LOAD_REG_ADDR(r11,__bss_stop)
+	LOAD_REG_ADDR(r8,__bss_start)
 	sub	r11,r11,r8		/* bss size			*/
 	addi	r11,r11,7		/* round up to an even double word */
 	rldicl. r11,r11,61,3		/* shift right by 3		*/
@@ -267,14 +279,10 @@ _INIT_STATIC(__start_initialization_iSeries)
 3:	stdu	r0,8(r8)
 	bdnz	3b
 4:
-	LOAD_REG_IMMEDIATE(r1,init_thread_union)
+	LOAD_REG_ADDR(r1,init_thread_union)
 	addi	r1,r1,THREAD_SIZE
 	li	r0,0
 	stdu	r0,-STACK_FRAME_OVERHEAD(r1)
-
-	LOAD_REG_IMMEDIATE(r2,__toc_start)
-	addi	r2,r2,0x4000
-	addi	r2,r2,0x4000
 
 	bl	.iSeries_early_setup
 	bl	.early_setup

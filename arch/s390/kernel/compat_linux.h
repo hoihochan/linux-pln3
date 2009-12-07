@@ -198,15 +198,11 @@ long sys32_rt_sigprocmask(int how, compat_sigset_t __user *set,
 			  compat_sigset_t __user *oset, size_t sigsetsize);
 long sys32_rt_sigpending(compat_sigset_t __user *set, size_t sigsetsize);
 long sys32_rt_sigqueueinfo(int pid, int sig, compat_siginfo_t __user *uinfo);
-long sys32_execve(void);
+long sys32_execve(char __user *name, compat_uptr_t __user *argv,
+		  compat_uptr_t __user *envp);
 long sys32_init_module(void __user *umod, unsigned long len,
 		       const char __user *uargs);
 long sys32_delete_module(const char __user *name_user, unsigned int flags);
-long sys32_gettimeofday(struct compat_timeval __user *tv,
-			struct timezone __user *tz);
-long sys32_settimeofday(struct compat_timeval __user *tv,
-			struct timezone __user *tz);
-long sys32_pause(void);
 long sys32_pread64(unsigned int fd, char __user *ubuf, size_t count,
 		   u32 poshi, u32 poslo);
 long sys32_pwrite64(unsigned int fd, const char __user *ubuf,
@@ -227,7 +223,6 @@ unsigned long old32_mmap(struct mmap_arg_struct_emu31 __user *arg);
 long sys32_mmap2(struct mmap_arg_struct_emu31 __user *arg);
 long sys32_read(unsigned int fd, char __user * buf, size_t count);
 long sys32_write(unsigned int fd, char __user * buf, size_t count);
-long sys32_clone(void);
 long sys32_fadvise64(int fd, loff_t offset, size_t len, int advise);
 long sys32_fadvise64_64(struct fadvise64_64_args __user *args);
 long sys32_sigaction(int sig, const struct old_sigaction32 __user *act,

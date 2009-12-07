@@ -1,7 +1,7 @@
 /*
  *	Initialisation code for Cyrix/NatSemi VSA1 softaudio
  *
- *	(C) Copyright 2003 Red Hat Inc <alan@redhat.com>
+ *	(C) Copyright 2003 Red Hat Inc <alan@lxorguk.ukuu.org.uk>
  *
  * XpressAudio(tm) is used on the Cyrix MediaGX (now NatSemi Geode) systems.
  * The older version (VSA1) provides fairly good soundblaster emulation
@@ -199,7 +199,7 @@ MODULE_LICENSE("GPL");
  */
 
 static struct pci_device_id id_tbl[] = {
-	{ PCI_VENDOR_ID_CYRIX, PCI_DEVICE_ID_CYRIX_5530_AUDIO, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ PCI_VDEVICE(CYRIX, PCI_DEVICE_ID_CYRIX_5530_AUDIO), 0 },
 	{ }
 };
 

@@ -172,8 +172,9 @@ static void keyspan_pda_wakeup_write(struct work_struct *work)
 	struct keyspan_pda_private *priv =
 		container_of(work, struct keyspan_pda_private, wakeup_work);
 	struct usb_serial_port *port = priv->port;
-
-	tty_wakeup(port->port.tty);
+	struct tty_struct *tty = tty_port_tty_get(&port->port);
+	tty_wakeup(tty);
+	tty_kref_put(tty);
 }
 
 static void keyspan_pda_request_unthrottle(struct work_struct *work)
@@ -205,7 +206,7 @@ static void keyspan_pda_request_unthrottle(struct work_struct *work)
 static void keyspan_pda_rx_interrupt(struct urb *urb)
 {
 	struct usb_serial_port *port = urb->context;
-	struct tty_struct *tty = port->port.tty;
+	struct tty_struct *tty = tty_port_tty_get(&port->port);
 	unsigned char *data = urb->transfer_buffer;
 	int retval;
 	int status = urb->status;
@@ -222,7 +223,7 @@ static void keyspan_pda_rx_interrupt(struct urb *urb)
 		/* this urb is terminated, clean up */
 		dbg("%s - urb shutting down with status: %d",
 		    __func__, status);
-		return;
+		goto out;
 	default:
 		dbg("%s - nonzero urb status received: %d",
 		    __func__, status);
@@ -261,8 +262,11 @@ static void keyspan_pda_rx_interrupt(struct urb *urb)
 exit:
 	retval = usb_submit_urb(urb, GFP_ATOMIC);
 	if (retval)
-		err("%s - usb_submit_urb failed with result %d",
-		     __func__, retval);
+		dev_err(&port->dev,
+			"%s - usb_submit_urb failed with result %d",
+			__func__, retval);
+out:
+	tty_kref_put(tty);		     
 }
 
 
@@ -286,7 +290,7 @@ static void keyspan_pda_rx_unthrottle(struct tty_struct *tty)
 	/* just restart the receive interrupt URB */
 	dbg("keyspan_pda_rx_unthrottle port %d", port->number);
 	port->interrupt_in_urb->dev = port->serial->dev;
-	if (usb_submit_urb(port->interrupt_in_urb, GFP_ATOMIC))
+	if (usb_submit_urb(port->interrupt_in_urb, GFP_KERNEL))
 		dbg(" usb_submit_urb(read urb) failed");
 	return;
 }
@@ -647,8 +651,37 @@ static int keyspan_pda_chars_in_buffer(struct tty_struct *tty)
 }
 
 
+static void keyspan_pda_dtr_rts(struct usb_serial_port *port, int on)
+{
+	struct usb_serial *serial = port->serial;
+
+	if (serial->dev) {
+		if (on)
+			keyspan_pda_set_modem_info(serial, (1<<7) | (1<< 2));
+		else
+			keyspan_pda_set_modem_info(serial, 0);
+	}
+}
+
+static int keyspan_pda_carrier_raised(struct usb_serial_port *port)
+{
+	struct usb_serial *serial = port->serial;
+	unsigned char modembits;
+
+	/* If we can read the modem status and the DCD is low then
+	   carrier is not raised yet */
+	if (keyspan_pda_get_modem_info(serial, &modembits) >= 0) {
+		if (!(modembits & (1>>6)))
+			return 0;
+	}
+	/* Carrier raised, or we failed (eg disconnected) so
+	   progress accordingly */
+	return 1;
+}
+
+
 static int keyspan_pda_open(struct tty_struct *tty,
-			struct usb_serial_port *port, struct file *filp)
+					struct usb_serial_port *port)
 {
 	struct usb_serial *serial = port->serial;
 	unsigned char room;
@@ -678,13 +711,6 @@ static int keyspan_pda_open(struct tty_struct *tty,
 	priv->tx_room = room;
 	priv->tx_throttled = room ? 0 : 1;
 
-	/* the normal serial device seems to always turn on DTR and RTS here,
-	   so do the same */
-	if (tty && (tty->termios->c_cflag & CBAUD))
-		keyspan_pda_set_modem_info(serial, (1<<7) | (1<<2));
-	else
-		keyspan_pda_set_modem_info(serial, 0);
-
 	/*Start reading from the device*/
 	port->interrupt_in_urb->dev = serial->dev;
 	rc = usb_submit_urb(port->interrupt_in_urb, GFP_KERNEL);
@@ -696,19 +722,11 @@ static int keyspan_pda_open(struct tty_struct *tty,
 error:
 	return rc;
 }
-
-
-static void keyspan_pda_close(struct tty_struct *tty,
-			struct usb_serial_port *port, struct file *filp)
+static void keyspan_pda_close(struct usb_serial_port *port)
 {
 	struct usb_serial *serial = port->serial;
 
 	if (serial->dev) {
-		/* the normal serial device seems to always shut
-		   off DTR and RTS now */
-		if (tty->termios->c_cflag & HUPCL)
-			keyspan_pda_set_modem_info(serial, 0);
-
 		/* shutdown our bulk reads and writes */
 		usb_kill_urb(port->write_urb);
 		usb_kill_urb(port->interrupt_in_urb);
@@ -738,11 +756,13 @@ static int keyspan_pda_fake_startup(struct usb_serial *serial)
 		fw_name = "keyspan_pda/xircom_pgs.fw";
 #endif
 	else {
-		err("%s: unknown vendor, aborting.", __func__);
+		dev_err(&serial->dev->dev, "%s: unknown vendor, aborting.\n",
+			__func__);
 		return -ENODEV;
 	}
 	if (request_ihex_firmware(&fw, fw_name, &serial->dev->dev)) {
-		err("failed to load firmware \"%s\"\n", fw_name);
+		dev_err(&serial->dev->dev, "failed to load firmware \"%s\"\n",
+			fw_name);
 		return -ENOENT;
 	}
 	record = (const struct ihex_binrec *)fw->data;
@@ -752,10 +772,10 @@ static int keyspan_pda_fake_startup(struct usb_serial *serial)
 					     (unsigned char *)record->data,
 					     be16_to_cpu(record->len), 0xa0);
 		if (response < 0) {
-			err("ezusb_writememory failed for Keyspan PDA "
-			    "firmware (%d %04X %p %d)",
-			    response, be32_to_cpu(record->addr),
-			    record->data, be16_to_cpu(record->len));
+			dev_err(&serial->dev->dev, "ezusb_writememory failed "
+				"for Keyspan PDA firmware (%d %04X %p %d)\n",
+				response, be32_to_cpu(record->addr),
+				record->data, be16_to_cpu(record->len));
 			break;
 		}
 		record = ihex_next_binrec(record);
@@ -789,7 +809,7 @@ static int keyspan_pda_startup(struct usb_serial *serial)
 	return 0;
 }
 
-static void keyspan_pda_shutdown(struct usb_serial *serial)
+static void keyspan_pda_release(struct usb_serial *serial)
 {
 	dbg("%s", __func__);
 
@@ -833,6 +853,8 @@ static struct usb_serial_driver keyspan_pda_device = {
 	.usb_driver = 		&keyspan_pda_driver,
 	.id_table =		id_table_std,
 	.num_ports =		1,
+	.dtr_rts =		keyspan_pda_dtr_rts,
+	.carrier_raised	=	keyspan_pda_carrier_raised,
 	.open =			keyspan_pda_open,
 	.close =		keyspan_pda_close,
 	.write =		keyspan_pda_write,
@@ -847,7 +869,7 @@ static struct usb_serial_driver keyspan_pda_device = {
 	.tiocmget =		keyspan_pda_tiocmget,
 	.tiocmset =		keyspan_pda_tiocmset,
 	.attach =		keyspan_pda_startup,
-	.shutdown =		keyspan_pda_shutdown,
+	.release =		keyspan_pda_release,
 };
 
 
@@ -870,7 +892,8 @@ static int __init keyspan_pda_init(void)
 	retval = usb_register(&keyspan_pda_driver);
 	if (retval)
 		goto failed_usb_register;
-	info(DRIVER_DESC " " DRIVER_VERSION);
+	printk(KERN_INFO KBUILD_MODNAME ": " DRIVER_VERSION ":"
+	       DRIVER_DESC "\n");
 	return 0;
 failed_usb_register:
 #ifdef XIRCOM

@@ -39,8 +39,6 @@
 
 static int numdummies = 1;
 
-static int dummy_xmit(struct sk_buff *skb, struct net_device *dev);
-
 static int dummy_set_address(struct net_device *dev, void *p)
 {
 	struct sockaddr *sa = p;
@@ -57,32 +55,37 @@ static void set_multicast_list(struct net_device *dev)
 {
 }
 
-static void dummy_setup(struct net_device *dev)
-{
-	/* Initialize the device structure. */
-	dev->hard_start_xmit = dummy_xmit;
-	dev->set_multicast_list = set_multicast_list;
-	dev->set_mac_address = dummy_set_address;
-	dev->destructor = free_netdev;
 
-	/* Fill in device structure with ethernet-generic values. */
-	ether_setup(dev);
-	dev->tx_queue_len = 0;
-	dev->change_mtu = NULL;
-	dev->flags |= IFF_NOARP;
-	dev->flags &= ~IFF_MULTICAST;
-	random_ether_addr(dev->dev_addr);
-}
-
-static int dummy_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t dummy_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	dev->stats.tx_packets++;
 	dev->stats.tx_bytes += skb->len;
 
 	dev_kfree_skb(skb);
-	return 0;
+	return NETDEV_TX_OK;
 }
 
+static const struct net_device_ops dummy_netdev_ops = {
+	.ndo_start_xmit		= dummy_xmit,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_set_multicast_list = set_multicast_list,
+	.ndo_set_mac_address	= dummy_set_address,
+};
+
+static void dummy_setup(struct net_device *dev)
+{
+	ether_setup(dev);
+
+	/* Initialize the device structure. */
+	dev->netdev_ops = &dummy_netdev_ops;
+	dev->destructor = free_netdev;
+
+	/* Fill in device structure with ethernet-generic values. */
+	dev->tx_queue_len = 0;
+	dev->flags |= IFF_NOARP;
+	dev->flags &= ~IFF_MULTICAST;
+	random_ether_addr(dev->dev_addr);
+}
 static int dummy_validate(struct nlattr *tb[], struct nlattr *data[])
 {
 	if (tb[IFLA_ADDRESS]) {

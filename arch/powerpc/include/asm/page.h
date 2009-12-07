@@ -10,17 +10,26 @@
  * 2 of the License, or (at your option) any later version.
  */
 
+#ifndef __ASSEMBLY__
+#include <linux/types.h>
+#else
+#include <asm/types.h>
+#endif
 #include <asm/asm-compat.h>
 #include <asm/kdump.h>
-#include <asm/types.h>
 
 /*
- * On PPC32 page size is 4K. For PPC64 we support either 4K or 64K software
+ * On regular PPC32 page size is 4K (but we support 4K/16K/64K/256K pages
+ * on PPC44x). For PPC64 we support either 4K or 64K software
  * page size. When using 64K pages however, whether we are really supporting
  * 64K pages in HW or not is irrelevant to those definitions.
  */
-#ifdef CONFIG_PPC_64K_PAGES
+#if defined(CONFIG_PPC_256K_PAGES)
+#define PAGE_SHIFT		18
+#elif defined(CONFIG_PPC_64K_PAGES)
 #define PAGE_SHIFT		16
+#elif defined(CONFIG_PPC_16K_PAGES)
+#define PAGE_SHIFT		14
 #else
 #define PAGE_SHIFT		12
 #endif
@@ -71,15 +80,22 @@
 #define PAGE_OFFSET	ASM_CONST(CONFIG_PAGE_OFFSET)
 #define LOAD_OFFSET	ASM_CONST((CONFIG_KERNEL_START-CONFIG_PHYSICAL_START))
 
-#if defined(CONFIG_RELOCATABLE) && defined(CONFIG_FLATMEM)
+#if defined(CONFIG_RELOCATABLE)
 #ifndef __ASSEMBLY__
+
 extern phys_addr_t memstart_addr;
 extern phys_addr_t kernstart_addr;
 #endif
 #define PHYSICAL_START	kernstart_addr
-#define MEMORY_START	memstart_addr
 #else
 #define PHYSICAL_START	ASM_CONST(CONFIG_PHYSICAL_START)
+#endif
+
+#ifdef CONFIG_PPC64
+#define MEMORY_START	0UL
+#elif defined(CONFIG_RELOCATABLE)
+#define MEMORY_START	memstart_addr
+#else
 #define MEMORY_START	(PHYSICAL_START + PAGE_OFFSET - KERNELBASE)
 #endif
 
@@ -92,8 +108,8 @@ extern phys_addr_t kernstart_addr;
 #define pfn_to_kaddr(pfn)	__va((pfn) << PAGE_SHIFT)
 #define virt_addr_valid(kaddr)	pfn_valid(__pa(kaddr) >> PAGE_SHIFT)
 
-#define __va(x) ((void *)((unsigned long)(x) - PHYSICAL_START + KERNELBASE))
-#define __pa(x) ((unsigned long)(x) + PHYSICAL_START - KERNELBASE)
+#define __va(x) ((void *)((unsigned long)(x) + PAGE_OFFSET - MEMORY_START))
+#define __pa(x) ((unsigned long)(x) - PAGE_OFFSET + MEMORY_START)
 
 /*
  * Unfortunately the PLT is in the BSS in the PPC32 ELF ABI,
@@ -123,7 +139,11 @@ extern phys_addr_t kernstart_addr;
  * Don't compare things with KERNELBASE or PAGE_OFFSET to test for
  * "kernelness", use is_kernel_addr() - it should do what you want.
  */
+#ifdef CONFIG_PPC_BOOK3E_64
+#define is_kernel_addr(x)	((x) >= 0x8000000000000000ul)
+#else
 #define is_kernel_addr(x)	((x) >= PAGE_OFFSET)
+#endif
 
 #ifndef __ASSEMBLY__
 
@@ -140,7 +160,7 @@ typedef struct { pte_basic_t pte; } pte_t;
 /* 64k pages additionally define a bigger "real PTE" type that gathers
  * the "second half" part of the PTE for pseudo 64k pages
  */
-#ifdef CONFIG_PPC_64K_PAGES
+#if defined(CONFIG_PPC_64K_PAGES) && defined(CONFIG_PPC_STD_MMU_64)
 typedef struct { pte_t pte; unsigned long hidx; } real_pte_t;
 #else
 typedef struct { pte_t pte; } real_pte_t;
@@ -180,10 +200,10 @@ typedef pte_basic_t pte_t;
 #define pte_val(x)	(x)
 #define __pte(x)	(x)
 
-#ifdef CONFIG_PPC_64K_PAGES
+#if defined(CONFIG_PPC_64K_PAGES) && defined(CONFIG_PPC_STD_MMU_64)
 typedef struct { pte_t pte; unsigned long hidx; } real_pte_t;
 #else
-typedef unsigned long real_pte_t;
+typedef pte_t real_pte_t;
 #endif
 
 
@@ -214,6 +234,11 @@ extern void clear_user_page(void *page, unsigned long vaddr, struct page *pg);
 extern void copy_user_page(void *to, void *from, unsigned long vaddr,
 		struct page *p);
 extern int page_is_ram(unsigned long pfn);
+
+#ifdef CONFIG_PPC_SMLPAR
+void arch_free_page(struct page *page, int order);
+#define HAVE_ARCH_FREE_PAGE
+#endif
 
 struct vm_area_struct;
 

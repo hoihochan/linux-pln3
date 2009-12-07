@@ -5,6 +5,7 @@
 #include <linux/workqueue.h>
 #include <linux/aio_abi.h>
 #include <linux/uio.h>
+#include <linux/rcupdate.h>
 
 #include <asm/atomic.h>
 
@@ -120,9 +121,9 @@ struct kiocb {
 
 	/*
 	 * If the aio_resfd field of the userspace iocb is not zero,
-	 * this is the underlying file* to deliver event to.
+	 * this is the underlying eventfd context to deliver events to.
 	 */
-	struct file		*ki_eventfd;
+	struct eventfd_ctx	*ki_eventfd;
 };
 
 #define is_sync_kiocb(iocb)	((iocb)->ki_key == KIOCB_SYNC_KEY)
@@ -183,7 +184,7 @@ struct kioctx {
 
 	/* This needs improving */
 	unsigned long		user_id;
-	struct kioctx		*next;
+	struct hlist_node	list;
 
 	wait_queue_head_t	wait;
 
@@ -199,21 +200,30 @@ struct kioctx {
 	struct aio_ring_info	ring_info;
 
 	struct delayed_work	wq;
+
+	struct rcu_head		rcu_head;
 };
 
 /* prototypes */
 extern unsigned aio_max_size;
 
+#ifdef CONFIG_AIO
 extern ssize_t wait_on_sync_kiocb(struct kiocb *iocb);
 extern int aio_put_req(struct kiocb *iocb);
 extern void kick_iocb(struct kiocb *iocb);
 extern int aio_complete(struct kiocb *iocb, long res, long res2);
 struct mm_struct;
 extern void exit_aio(struct mm_struct *mm);
+#else
+static inline ssize_t wait_on_sync_kiocb(struct kiocb *iocb) { return 0; }
+static inline int aio_put_req(struct kiocb *iocb) { return 0; }
+static inline void kick_iocb(struct kiocb *iocb) { }
+static inline int aio_complete(struct kiocb *iocb, long res, long res2) { return 0; }
+struct mm_struct;
+static inline void exit_aio(struct mm_struct *mm) { }
+#endif /* CONFIG_AIO */
 
 #define io_wait_to_kiocb(wait) container_of(wait, struct kiocb, ki_wait)
-
-#include <linux/aio_abi.h>
 
 static inline struct kiocb *list_kiocb(struct list_head *h)
 {

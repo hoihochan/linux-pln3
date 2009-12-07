@@ -17,6 +17,7 @@
 #include <linux/io.h>
 #include <linux/mod_devicetable.h>
 #include <linux/edac.h>
+#include <linux/smp.h>
 
 #include <linux/of_platform.h>
 #include <linux/of_device.h>
@@ -25,7 +26,9 @@
 #include "mpc85xx_edac.h"
 
 static int edac_dev_idx;
+#ifdef CONFIG_PCI
 static int edac_pci_idx;
+#endif
 static int edac_mc_idx;
 
 static u32 orig_ddr_err_disable;
@@ -40,7 +43,9 @@ static u32 orig_pci_err_en;
 #endif
 
 static u32 orig_l2_err_disable;
-static u32 orig_hid1;
+#ifdef CONFIG_MPC85xx
+static u32 orig_hid1[2];
+#endif
 
 /************************ MC SYSFS parts ***********************************/
 
@@ -217,7 +222,7 @@ static int __devinit mpc85xx_pci_err_probe(struct of_device *op,
 	pci->dev = &op->dev;
 	pci->mod_name = EDAC_MOD_STR;
 	pci->ctl_name = pdata->name;
-	pci->dev_name = op->dev.bus_id;
+	pci->dev_name = dev_name(&op->dev);
 
 	if (edac_op_state == EDAC_OPSTATE_POLL)
 		pci->edac_check = mpc85xx_pci_check;
@@ -629,24 +634,23 @@ static int mpc85xx_l2_err_remove(struct of_device *op)
 }
 
 static struct of_device_id mpc85xx_l2_err_of_match[] = {
-	{
-	 .compatible = "fsl,8540-l2-cache-controller",
-	 },
-	{
-	 .compatible = "fsl,8541-l2-cache-controller",
-	 },
-	{
-	 .compatible = "fsl,8544-l2-cache-controller",
-	 },
-	{
-	 .compatible = "fsl,8548-l2-cache-controller",
-	 },
-	{
-	 .compatible = "fsl,8555-l2-cache-controller",
-	 },
-	{
-	 .compatible = "fsl,8568-l2-cache-controller",
-	 },
+/* deprecate the fsl,85.. forms in the future, 2.6.30? */
+	{ .compatible = "fsl,8540-l2-cache-controller", },
+	{ .compatible = "fsl,8541-l2-cache-controller", },
+	{ .compatible = "fsl,8544-l2-cache-controller", },
+	{ .compatible = "fsl,8548-l2-cache-controller", },
+	{ .compatible = "fsl,8555-l2-cache-controller", },
+	{ .compatible = "fsl,8568-l2-cache-controller", },
+	{ .compatible = "fsl,mpc8536-l2-cache-controller", },
+	{ .compatible = "fsl,mpc8540-l2-cache-controller", },
+	{ .compatible = "fsl,mpc8541-l2-cache-controller", },
+	{ .compatible = "fsl,mpc8544-l2-cache-controller", },
+	{ .compatible = "fsl,mpc8548-l2-cache-controller", },
+	{ .compatible = "fsl,mpc8555-l2-cache-controller", },
+	{ .compatible = "fsl,mpc8560-l2-cache-controller", },
+	{ .compatible = "fsl,mpc8568-l2-cache-controller", },
+	{ .compatible = "fsl,mpc8572-l2-cache-controller", },
+	{ .compatible = "fsl,p2020-l2-cache-controller", },
 	{},
 };
 
@@ -675,7 +679,7 @@ static void mpc85xx_mc_check(struct mem_ctl_info *mci)
 	int row_index;
 
 	err_detect = in_be32(pdata->mc_vbase + MPC85XX_MC_ERR_DETECT);
-	if (err_detect)
+	if (!err_detect)
 		return;
 
 	mpc85xx_mc_printk(mci, KERN_ERR, "Err Detect Register: %#8.8x\n",
@@ -758,6 +762,9 @@ static void __devinit mpc85xx_init_csrows(struct mem_ctl_info *mci)
 		case DSC_SDTYPE_DDR2:
 			mtype = MEM_RDDR2;
 			break;
+		case DSC_SDTYPE_DDR3:
+			mtype = MEM_RDDR3;
+			break;
 		default:
 			mtype = MEM_UNKNOWN;
 			break;
@@ -769,6 +776,9 @@ static void __devinit mpc85xx_init_csrows(struct mem_ctl_info *mci)
 			break;
 		case DSC_SDTYPE_DDR2:
 			mtype = MEM_DDR2;
+			break;
+		case DSC_SDTYPE_DDR3:
+			mtype = MEM_DDR3;
 			break;
 		default:
 			mtype = MEM_UNKNOWN;
@@ -783,19 +793,20 @@ static void __devinit mpc85xx_init_csrows(struct mem_ctl_info *mci)
 		csrow = &mci->csrows[index];
 		cs_bnds = in_be32(pdata->mc_vbase + MPC85XX_MC_CS_BNDS_0 +
 				  (index * MPC85XX_MC_CS_BNDS_OFS));
-		start = (cs_bnds & 0xfff0000) << 4;
-		end = ((cs_bnds & 0xfff) << 20);
-		if (start)
-			start |= 0xfffff;
-		if (end)
-			end |= 0xfffff;
+
+		start = (cs_bnds & 0xffff0000) >> 16;
+		end   = (cs_bnds & 0x0000ffff);
 
 		if (start == end)
 			continue;	/* not populated */
 
+		start <<= (24 - PAGE_SHIFT);
+		end   <<= (24 - PAGE_SHIFT);
+		end    |= (1 << (24 - PAGE_SHIFT)) - 1;
+
 		csrow->first_page = start >> PAGE_SHIFT;
 		csrow->last_page = end >> PAGE_SHIFT;
-		csrow->nr_pages = csrow->last_page + 1 - csrow->first_page;
+		csrow->nr_pages = end + 1 - start;
 		csrow->grain = 8;
 		csrow->mtype = mtype;
 		csrow->dtype = DEV_UNKNOWN;
@@ -912,7 +923,8 @@ static int __devinit mpc85xx_mc_err_probe(struct of_device *op,
 		/* register interrupts */
 		pdata->irq = irq_of_parse_and_map(op->node, 0);
 		res = devm_request_irq(&op->dev, pdata->irq,
-				       mpc85xx_mc_isr, IRQF_DISABLED,
+				       mpc85xx_mc_isr,
+					IRQF_DISABLED | IRQF_SHARED,
 				       "[EDAC] MC err", mci);
 		if (res < 0) {
 			printk(KERN_ERR "%s: Unable to request irq %d for "
@@ -962,24 +974,24 @@ static int mpc85xx_mc_err_remove(struct of_device *op)
 }
 
 static struct of_device_id mpc85xx_mc_err_of_match[] = {
-	{
-	 .compatible = "fsl,8540-memory-controller",
-	 },
-	{
-	 .compatible = "fsl,8541-memory-controller",
-	 },
-	{
-	 .compatible = "fsl,8544-memory-controller",
-	 },
-	{
-	 .compatible = "fsl,8548-memory-controller",
-	 },
-	{
-	 .compatible = "fsl,8555-memory-controller",
-	 },
-	{
-	 .compatible = "fsl,8568-memory-controller",
-	 },
+/* deprecate the fsl,85.. forms in the future, 2.6.30? */
+	{ .compatible = "fsl,8540-memory-controller", },
+	{ .compatible = "fsl,8541-memory-controller", },
+	{ .compatible = "fsl,8544-memory-controller", },
+	{ .compatible = "fsl,8548-memory-controller", },
+	{ .compatible = "fsl,8555-memory-controller", },
+	{ .compatible = "fsl,8568-memory-controller", },
+	{ .compatible = "fsl,mpc8536-memory-controller", },
+	{ .compatible = "fsl,mpc8540-memory-controller", },
+	{ .compatible = "fsl,mpc8541-memory-controller", },
+	{ .compatible = "fsl,mpc8544-memory-controller", },
+	{ .compatible = "fsl,mpc8548-memory-controller", },
+	{ .compatible = "fsl,mpc8555-memory-controller", },
+	{ .compatible = "fsl,mpc8560-memory-controller", },
+	{ .compatible = "fsl,mpc8568-memory-controller", },
+	{ .compatible = "fsl,mpc8572-memory-controller", },
+	{ .compatible = "fsl,mpc8349-memory-controller", },
+	{ .compatible = "fsl,p2020-memory-controller", },
 	{},
 };
 
@@ -994,6 +1006,14 @@ static struct of_platform_driver mpc85xx_mc_err_driver = {
 		   .owner = THIS_MODULE,
 		   },
 };
+
+#ifdef CONFIG_MPC85xx
+static void __init mpc85xx_mc_clear_rfxe(void *data)
+{
+	orig_hid1[smp_processor_id()] = mfspr(SPRN_HID1);
+	mtspr(SPRN_HID1, (orig_hid1[smp_processor_id()] & ~0x20000));
+}
+#endif
 
 static int __init mpc85xx_mc_init(void)
 {
@@ -1026,23 +1046,32 @@ static int __init mpc85xx_mc_init(void)
 		printk(KERN_WARNING EDAC_MOD_STR "PCI fails to register\n");
 #endif
 
+#ifdef CONFIG_MPC85xx
 	/*
 	 * need to clear HID1[RFXE] to disable machine check int
 	 * so we can catch it
 	 */
-	if (edac_op_state == EDAC_OPSTATE_INT) {
-		orig_hid1 = mfspr(SPRN_HID1);
-		mtspr(SPRN_HID1, (orig_hid1 & ~0x20000));
-	}
+	if (edac_op_state == EDAC_OPSTATE_INT)
+		on_each_cpu(mpc85xx_mc_clear_rfxe, NULL, 0);
+#endif
 
 	return 0;
 }
 
 module_init(mpc85xx_mc_init);
 
+#ifdef CONFIG_MPC85xx
+static void __exit mpc85xx_mc_restore_hid1(void *data)
+{
+	mtspr(SPRN_HID1, orig_hid1[smp_processor_id()]);
+}
+#endif
+
 static void __exit mpc85xx_mc_exit(void)
 {
-	mtspr(SPRN_HID1, orig_hid1);
+#ifdef CONFIG_MPC85xx
+	on_each_cpu(mpc85xx_mc_restore_hid1, NULL, 0);
+#endif
 #ifdef CONFIG_PCI
 	of_unregister_platform_driver(&mpc85xx_pci_err_driver);
 #endif

@@ -17,8 +17,6 @@
 #include <linux/crc-ccitt.h>
 #include <linux/bitrev.h>
 
-//#define GIG_M10x_STUFF_VOICE_DATA
-
 /* check if byte must be stuffed/escaped
  * I'm not sure which data should be encoded.
  * Therefore I will go the hard way and decode every value
@@ -147,19 +145,17 @@ static inline int hdlc_loop(unsigned char c, unsigned char *src, int numbytes,
 			}
 byte_stuff:
 			c ^= PPP_TRANS;
-#ifdef CONFIG_GIGASET_DEBUG
 			if (unlikely(!muststuff(c)))
 				gig_dbg(DEBUG_HDLC, "byte stuffed: 0x%02x", c);
-#endif
 		} else if (unlikely(c == PPP_FLAG)) {
 			if (unlikely(inputstate & INS_skip_frame)) {
-				if (!(inputstate & INS_have_data)) { /* 7E 7E */
 #ifdef CONFIG_GIGASET_DEBUG
+				if (!(inputstate & INS_have_data)) { /* 7E 7E */
 					++bcs->emptycount;
-#endif
 				} else
 					gig_dbg(DEBUG_HDLC,
 					    "7e----------------------------");
+#endif
 
 				/* end of frame */
 				error = 1;
@@ -178,9 +174,8 @@ byte_stuff:
 
 				if (unlikely(fcs != PPP_GOODFCS)) {
 					dev_err(cs->dev,
-					    "Packet checksum at %lu failed, "
-					    "packet is corrupted (%u bytes)!\n",
-					    bcs->rcvbytes, skb->len);
+				"Checksum failed, %u bytes corrupted!\n",
+						skb->len);
 					compskb = NULL;
 					gigaset_rcv_error(compskb, cs, bcs);
 					error = 1;
@@ -226,11 +221,9 @@ byte_stuff:
 			}
 
 			break;
-#ifdef CONFIG_GIGASET_DEBUG
 		} else if (unlikely(muststuff(c))) {
 			/* Should not happen. Possible after ZDLE=1<CR><LF>. */
 			gig_dbg(DEBUG_HDLC, "not byte stuffed: 0x%02x", c);
-#endif
 		}
 
 		/* add character */
@@ -341,7 +334,14 @@ static inline int iraw_loop(unsigned char c, unsigned char *src, int numbytes,
 	return startbytes - numbytes;
 }
 
-/* process a block of data received from the device
+/**
+ * gigaset_m10x_input() - process a block of data received from the device
+ * @inbuf:	received data and device descriptor structure.
+ *
+ * Called by hardware module {ser,usb}_gigaset with a block of received
+ * bytes. Separates the bytes received over the serial data channel into
+ * user data and command replies (locked/unlocked) according to the
+ * current state of the interface.
  */
 void gigaset_m10x_input(struct inbuf_t *inbuf)
 {
@@ -394,20 +394,16 @@ void gigaset_m10x_input(struct inbuf_t *inbuf)
 					inbuf->inputstate &= ~INS_DLE_char;
 					switch (c) {
 					case 'X': /*begin of command*/
-#ifdef CONFIG_GIGASET_DEBUG
 						if (inbuf->inputstate & INS_command)
-							dev_err(cs->dev,
+							dev_warn(cs->dev,
 					"received <DLE> 'X' in command mode\n");
-#endif
 						inbuf->inputstate |=
 							INS_command | INS_DLE_command;
 						break;
 					case '.': /*end of command*/
-#ifdef CONFIG_GIGASET_DEBUG
 						if (!(inbuf->inputstate & INS_command))
-							dev_err(cs->dev,
+							dev_warn(cs->dev,
 					"received <DLE> '.' in hdlc mode\n");
-#endif
 						inbuf->inputstate &= cs->dle ?
 							~(INS_DLE_command|INS_command)
 							: ~INS_DLE_command;
@@ -554,16 +550,17 @@ static struct sk_buff *iraw_encode(struct sk_buff *skb, int head, int tail)
 	return iraw_skb;
 }
 
-/* gigaset_send_skb
- * called by common.c to queue an skb for sending
- * and start transmission if necessary
- * parameters:
- *	B Channel control structure
- *	skb
+/**
+ * gigaset_m10x_send_skb() - queue an skb for sending
+ * @bcs:	B channel descriptor structure.
+ * @skb:	data to send.
+ *
+ * Called by i4l.c to encode and queue an skb for sending, and start
+ * transmission if necessary.
+ *
  * Return value:
- *	number of bytes accepted for sending
- *	(skb->len if ok, 0 if out of buffer space)
- *	or error code (< 0, eg. -EINVAL)
+ *	number of bytes accepted for sending (skb->len) if ok,
+ *	error code < 0 (eg. -ENOMEM) on error
  */
 int gigaset_m10x_send_skb(struct bc_state *bcs, struct sk_buff *skb)
 {

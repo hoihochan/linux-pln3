@@ -18,7 +18,6 @@
 #include <linux/signal.h>
 #include <linux/resource.h>
 #include <linux/times.h>
-#include <linux/utsname.h>
 #include <linux/time.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
@@ -77,11 +76,6 @@ asmlinkage int sys32_execve(struct pt_regs *regs)
 		goto out;
 	error = compat_do_execve(filename, compat_ptr(regs->gr[25]),
 				 compat_ptr(regs->gr[24]), regs);
-	if (error == 0) {
-		task_lock(current);
-		current->ptrace &= ~PT_DTRACE;
-		task_unlock(current);
-	}
 	putname(filename);
 out:
 
@@ -177,173 +171,6 @@ asmlinkage long sys32_sched_rr_get_interval(pid_t pid,
 	if (put_compat_timespec(&t, interval))
 		return -EFAULT;
 	return ret;
-}
-
-static int
-put_compat_timeval(struct compat_timeval __user *u, struct timeval *t)
-{
-	struct compat_timeval t32;
-	t32.tv_sec = t->tv_sec;
-	t32.tv_usec = t->tv_usec;
-	return copy_to_user(u, &t32, sizeof t32);
-}
-
-static inline long get_ts32(struct timespec *o, struct compat_timeval __user *i)
-{
-	long usec;
-
-	if (__get_user(o->tv_sec, &i->tv_sec))
-		return -EFAULT;
-	if (__get_user(usec, &i->tv_usec))
-		return -EFAULT;
-	o->tv_nsec = usec * 1000;
-	return 0;
-}
-
-asmlinkage int
-sys32_gettimeofday(struct compat_timeval __user *tv, struct timezone __user *tz)
-{
-    extern void do_gettimeofday(struct timeval *tv);
-
-    if (tv) {
-	    struct timeval ktv;
-	    do_gettimeofday(&ktv);
-	    if (put_compat_timeval(tv, &ktv))
-		    return -EFAULT;
-    }
-    if (tz) {
-	    extern struct timezone sys_tz;
-	    if (copy_to_user(tz, &sys_tz, sizeof(sys_tz)))
-		    return -EFAULT;
-    }
-    return 0;
-}
-
-asmlinkage 
-int sys32_settimeofday(struct compat_timeval __user *tv, struct timezone __user *tz)
-{
-	struct timespec kts;
-	struct timezone ktz;
-
- 	if (tv) {
-		if (get_ts32(&kts, tv))
-			return -EFAULT;
-	}
-	if (tz) {
-		if (copy_from_user(&ktz, tz, sizeof(ktz)))
-			return -EFAULT;
-	}
-
-	return do_sys_settimeofday(tv ? &kts : NULL, tz ? &ktz : NULL);
-}
-
-int cp_compat_stat(struct kstat *stat, struct compat_stat __user *statbuf)
-{
-	compat_ino_t ino;
-	int err;
-
-	if (stat->size > MAX_NON_LFS || !new_valid_dev(stat->dev) ||
-	    !new_valid_dev(stat->rdev))
-		return -EOVERFLOW;
-
-	ino = stat->ino;
-	if (sizeof(ino) < sizeof(stat->ino) && ino != stat->ino)
-		return -EOVERFLOW;
-
-	err  = put_user(new_encode_dev(stat->dev), &statbuf->st_dev);
-	err |= put_user(ino, &statbuf->st_ino);
-	err |= put_user(stat->mode, &statbuf->st_mode);
-	err |= put_user(stat->nlink, &statbuf->st_nlink);
-	err |= put_user(0, &statbuf->st_reserved1);
-	err |= put_user(0, &statbuf->st_reserved2);
-	err |= put_user(new_encode_dev(stat->rdev), &statbuf->st_rdev);
-	err |= put_user(stat->size, &statbuf->st_size);
-	err |= put_user(stat->atime.tv_sec, &statbuf->st_atime);
-	err |= put_user(stat->atime.tv_nsec, &statbuf->st_atime_nsec);
-	err |= put_user(stat->mtime.tv_sec, &statbuf->st_mtime);
-	err |= put_user(stat->mtime.tv_nsec, &statbuf->st_mtime_nsec);
-	err |= put_user(stat->ctime.tv_sec, &statbuf->st_ctime);
-	err |= put_user(stat->ctime.tv_nsec, &statbuf->st_ctime_nsec);
-	err |= put_user(stat->blksize, &statbuf->st_blksize);
-	err |= put_user(stat->blocks, &statbuf->st_blocks);
-	err |= put_user(0, &statbuf->__unused1);
-	err |= put_user(0, &statbuf->__unused2);
-	err |= put_user(0, &statbuf->__unused3);
-	err |= put_user(0, &statbuf->__unused4);
-	err |= put_user(0, &statbuf->__unused5);
-	err |= put_user(0, &statbuf->st_fstype); /* not avail */
-	err |= put_user(0, &statbuf->st_realdev); /* not avail */
-	err |= put_user(0, &statbuf->st_basemode); /* not avail */
-	err |= put_user(0, &statbuf->st_spareshort);
-	err |= put_user(stat->uid, &statbuf->st_uid);
-	err |= put_user(stat->gid, &statbuf->st_gid);
-	err |= put_user(0, &statbuf->st_spare4[0]);
-	err |= put_user(0, &statbuf->st_spare4[1]);
-	err |= put_user(0, &statbuf->st_spare4[2]);
-
-	return err;
-}
-
-/*** copied from mips64 ***/
-/*
- * Ooo, nasty.  We need here to frob 32-bit unsigned longs to
- * 64-bit unsigned longs.
- */
-
-static inline int
-get_fd_set32(unsigned long n, u32 *ufdset, unsigned long *fdset)
-{
-	n = (n + 8*sizeof(u32) - 1) / (8*sizeof(u32));
-	if (ufdset) {
-		unsigned long odd;
-
-		if (!access_ok(VERIFY_WRITE, ufdset, n*sizeof(u32)))
-			return -EFAULT;
-
-		odd = n & 1UL;
-		n &= ~1UL;
-		while (n) {
-			unsigned long h, l;
-			__get_user(l, ufdset);
-			__get_user(h, ufdset+1);
-			ufdset += 2;
-			*fdset++ = h << 32 | l;
-			n -= 2;
-		}
-		if (odd)
-			__get_user(*fdset, ufdset);
-	} else {
-		/* Tricky, must clear full unsigned long in the
-		 * kernel fdset at the end, this makes sure that
-		 * actually happens.
-		 */
-		memset(fdset, 0, ((n + 1) & ~1)*sizeof(u32));
-	}
-	return 0;
-}
-
-static inline void
-set_fd_set32(unsigned long n, u32 *ufdset, unsigned long *fdset)
-{
-	unsigned long odd;
-	n = (n + 8*sizeof(u32) - 1) / (8*sizeof(u32));
-
-	if (!ufdset)
-		return;
-
-	odd = n & 1UL;
-	n &= ~1UL;
-	while (n) {
-		unsigned long h, l;
-		l = *fdset++;
-		h = l >> 32;
-		__put_user(l, ufdset);
-		__put_user(h, ufdset+1);
-		ufdset += 2;
-		n -= 2;
-	}
-	if (odd)
-		__put_user(*fdset, ufdset);
 }
 
 struct msgbuf32 {

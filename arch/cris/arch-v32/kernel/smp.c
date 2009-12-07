@@ -29,11 +29,7 @@
 spinlock_t cris_atomic_locks[] = { [0 ... LOCK_COUNT - 1] = SPIN_LOCK_UNLOCKED};
 
 /* CPU masks */
-cpumask_t cpu_online_map = CPU_MASK_NONE;
-EXPORT_SYMBOL(cpu_online_map);
 cpumask_t phys_cpu_present_map = CPU_MASK_NONE;
-cpumask_t cpu_possible_map;
-EXPORT_SYMBOL(cpu_possible_map);
 EXPORT_SYMBOL(phys_cpu_present_map);
 
 /* Variables used during SMP boot */
@@ -56,8 +52,6 @@ static struct mm_struct* flush_mm;
 static struct vm_area_struct* flush_vma;
 static unsigned long flush_addr;
 
-extern int setup_irq(int, struct irqaction *);
-
 /* Mode registers */
 static unsigned long irq_regs[NR_CPUS] = {
   regi_irq,
@@ -69,7 +63,6 @@ static int send_ipi(int vector, int wait, cpumask_t cpu_mask);
 static struct irqaction irq_ipi  = {
 	.handler = crisv32_ipi_interrupt,
 	.flags = IRQF_DISABLED,
-	.mask = CPU_MASK_NONE,
 	.name = "ipi",
 };
 
@@ -102,9 +95,9 @@ void __devinit smp_prepare_boot_cpu(void)
 	SUPP_BANK_SEL(2);
 	SUPP_REG_WR(RW_MM_TLB_PGD, pgd);
 
-	cpu_set(0, cpu_online_map);
+	set_cpu_online(0, true);
 	cpu_set(0, phys_cpu_present_map);
-	cpu_set(0, cpu_possible_map);
+	set_cpu_possible(0, true);
 }
 
 void __init smp_cpus_done(unsigned int max_cpus)
@@ -178,6 +171,7 @@ void __init smp_callin(void)
 	unmask_irq(IPI_INTR_VECT);
 	unmask_irq(TIMER0_INTR_VECT);
 	preempt_disable();
+	notify_cpu_starting(cpu);
 	local_irq_enable();
 
 	cpu_set(cpu, cpu_online_map);
@@ -235,7 +229,7 @@ void flush_tlb_common(struct mm_struct* mm, struct vm_area_struct* vma, unsigned
 	cpumask_t cpu_mask;
 
 	spin_lock_irqsave(&tlbstate_lock, flags);
-	cpu_mask = (mm == FLUSH_ALL ? CPU_MASK_ALL : mm->cpu_vm_mask);
+	cpu_mask = (mm == FLUSH_ALL ? cpu_all_mask : *mm_cpumask(mm));
 	cpu_clear(smp_processor_id(), cpu_mask);
 	flush_mm = mm;
 	flush_vma = vma;
@@ -255,8 +249,8 @@ void flush_tlb_mm(struct mm_struct *mm)
 	__flush_tlb_mm(mm);
 	flush_tlb_common(mm, FLUSH_ALL, 0);
 	/* No more mappings in other CPUs */
-	cpus_clear(mm->cpu_vm_mask);
-	cpu_set(smp_processor_id(), mm->cpu_vm_mask);
+	cpumask_clear(mm_cpumask(mm));
+	cpumask_set_cpu(smp_processor_id(), mm_cpumask(mm));
 }
 
 void flush_tlb_page(struct vm_area_struct *vma,

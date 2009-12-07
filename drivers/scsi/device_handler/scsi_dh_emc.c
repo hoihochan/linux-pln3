@@ -84,7 +84,7 @@ struct clariion_dh_data {
 	/*
 	 * I/O buffer for both MODE_SELECT and INQUIRY commands.
 	 */
-	char buffer[CLARIION_BUFFER_SIZE];
+	unsigned char buffer[CLARIION_BUFFER_SIZE];
 	/*
 	 * SCSI sense buffer for commands -- assumes serial issuance
 	 * and completion sequence of all commands for same multipath.
@@ -176,7 +176,7 @@ static int parse_sp_info_reply(struct scsi_device *sdev,
 		err = SCSI_DH_DEV_TEMP_BUSY;
 		goto out;
 	}
-	if (csdev->buffer[4] < 0 || csdev->buffer[4] > 2) {
+	if (csdev->buffer[4] > 2) {
 		/* Invalid buffer format */
 		sdev_printk(KERN_NOTICE, sdev,
 			    "%s: invalid VPD page 0xC0 format\n",
@@ -278,7 +278,6 @@ static struct request *get_req(struct scsi_device *sdev, int cmd,
 		return NULL;
 	}
 
-	memset(rq->cmd, 0, BLK_MAX_CDB);
 	rq->cmd_len = COMMAND_SIZE(cmd);
 	rq->cmd[0] = cmd;
 
@@ -304,7 +303,8 @@ static struct request *get_req(struct scsi_device *sdev, int cmd,
 
 	rq->cmd[4] = len;
 	rq->cmd_type = REQ_TYPE_BLOCK_PC;
-	rq->cmd_flags |= REQ_FAILFAST;
+	rq->cmd_flags |= REQ_FAILFAST_DEV | REQ_FAILFAST_TRANSPORT |
+			 REQ_FAILFAST_DRIVER;
 	rq->timeout = CLARIION_TIMEOUT;
 	rq->retries = CLARIION_RETRIES;
 
@@ -561,6 +561,61 @@ done:
 
 	return result;
 }
+/*
+ * params - parameters in the following format
+ *      "no_of_params\0param1\0param2\0param3\0...\0"
+ *      for example, string for 2 parameters with value 10 and 21
+ *      is specified as "2\010\021\0".
+ */
+static int clariion_set_params(struct scsi_device *sdev, const char *params)
+{
+	struct clariion_dh_data *csdev = get_clariion_data(sdev);
+	unsigned int hr = 0, st = 0, argc;
+	const char *p = params;
+	int result = SCSI_DH_OK;
+
+	if ((sscanf(params, "%u", &argc) != 1) || (argc != 2))
+		return -EINVAL;
+
+	while (*p++)
+		;
+	if ((sscanf(p, "%u", &st) != 1) || (st > 1))
+		return -EINVAL;
+
+	while (*p++)
+		;
+	if ((sscanf(p, "%u", &hr) != 1) || (hr > 1))
+		return -EINVAL;
+
+	if (st)
+		csdev->flags |= CLARIION_SHORT_TRESPASS;
+	else
+		csdev->flags &= ~CLARIION_SHORT_TRESPASS;
+
+	if (hr)
+		csdev->flags |= CLARIION_HONOR_RESERVATIONS;
+	else
+		csdev->flags &= ~CLARIION_HONOR_RESERVATIONS;
+
+	/*
+	 * If this path is owned, we have to send a trespass command
+	 * with the new parameters. If not, simply return. Next trespass
+	 * command would use the parameters.
+	 */
+	if (csdev->lun_state != CLARIION_LUN_OWNED)
+		goto done;
+
+	csdev->lun_state = CLARIION_LUN_UNINITIALIZED;
+	result = send_trespass_cmd(sdev, csdev);
+	if (result != SCSI_DH_OK)
+		goto done;
+
+	/* Update status */
+	result = clariion_send_inquiry(sdev, csdev);
+
+done:
+	return result;
+}
 
 static const struct scsi_dh_devlist clariion_dev_list[] = {
 	{"DGC", "RAID"},
@@ -581,11 +636,9 @@ static struct scsi_device_handler clariion_dh = {
 	.check_sense	= clariion_check_sense,
 	.activate	= clariion_activate,
 	.prep_fn	= clariion_prep_fn,
+	.set_params	= clariion_set_params,
 };
 
-/*
- * TODO: need some interface so we can set trespass values
- */
 static int clariion_bus_attach(struct scsi_device *sdev)
 {
 	struct scsi_dh_data *scsi_dh_data;

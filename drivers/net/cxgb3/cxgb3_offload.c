@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006-2007 Chelsio, Inc. All rights reserved.
+ * Copyright (c) 2006-2008 Chelsio, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -153,6 +153,18 @@ void cxgb3_remove_clients(struct t3cdev *tdev)
 	mutex_unlock(&cxgb3_db_lock);
 }
 
+void cxgb3_event_notify(struct t3cdev *tdev, u32 event, u32 port)
+{
+	struct cxgb3_client *client;
+
+	mutex_lock(&cxgb3_db_lock);
+	list_for_each_entry(client, &client_list, client_list) {
+		if (client->event_handler)
+			client->event_handler(tdev, event, port);
+	}
+	mutex_unlock(&cxgb3_db_lock);
+}
+
 static struct net_device *get_iff_from_mac(struct adapter *adapter,
 					   const unsigned char *mac,
 					   unsigned int vlan)
@@ -182,7 +194,9 @@ static struct net_device *get_iff_from_mac(struct adapter *adapter,
 static int cxgb_ulp_iscsi_ctl(struct adapter *adapter, unsigned int req,
 			      void *data)
 {
+	int i;
 	int ret = 0;
+	unsigned int val = 0;
 	struct ulp_iscsi_info *uiip = data;
 
 	switch (req) {
@@ -191,32 +205,55 @@ static int cxgb_ulp_iscsi_ctl(struct adapter *adapter, unsigned int req,
 		uiip->llimit = t3_read_reg(adapter, A_ULPRX_ISCSI_LLIMIT);
 		uiip->ulimit = t3_read_reg(adapter, A_ULPRX_ISCSI_ULIMIT);
 		uiip->tagmask = t3_read_reg(adapter, A_ULPRX_ISCSI_TAGMASK);
+
+		val = t3_read_reg(adapter, A_ULPRX_ISCSI_PSZ);
+		for (i = 0; i < 4; i++, val >>= 8)
+			uiip->pgsz_factor[i] = val & 0xFF;
+
+		val = t3_read_reg(adapter, A_TP_PARA_REG7);
+		uiip->max_txsz =
+		uiip->max_rxsz = min((val >> S_PMMAXXFERLEN0)&M_PMMAXXFERLEN0,
+				     (val >> S_PMMAXXFERLEN1)&M_PMMAXXFERLEN1);
 		/*
 		 * On tx, the iscsi pdu has to be <= tx page size and has to
 		 * fit into the Tx PM FIFO.
 		 */
-		uiip->max_txsz = min(adapter->params.tp.tx_pg_size,
-				     t3_read_reg(adapter, A_PM1_TX_CFG) >> 17);
-		/* on rx, the iscsi pdu has to be < rx page size and the
-		   whole pdu + cpl headers has to fit into one sge buffer */
-		uiip->max_rxsz = min_t(unsigned int,
-				       adapter->params.tp.rx_pg_size,
-				       (adapter->sge.qs[0].fl[1].buf_size -
-					sizeof(struct cpl_rx_data) * 2 -
-					sizeof(struct cpl_rx_data_ddp)));
+		val = min(adapter->params.tp.tx_pg_size,
+			  t3_read_reg(adapter, A_PM1_TX_CFG) >> 17);
+		uiip->max_txsz = min(val, uiip->max_txsz);
+
+		/* set MaxRxData to 16224 */
+		val = t3_read_reg(adapter, A_TP_PARA_REG2);
+		if ((val >> S_MAXRXDATA) != 0x3f60) {
+			val &= (M_RXCOALESCESIZE << S_RXCOALESCESIZE);
+			val |= V_MAXRXDATA(0x3f60);
+			printk(KERN_INFO
+				"%s, iscsi set MaxRxData to 16224 (0x%x).\n",
+				adapter->name, val);
+			t3_write_reg(adapter, A_TP_PARA_REG2, val);
+		}
+
+		/*
+		 * on rx, the iscsi pdu has to be < rx page size and the
+		 * the max rx data length programmed in TP
+		 */
+		val = min(adapter->params.tp.rx_pg_size,
+			  ((t3_read_reg(adapter, A_TP_PARA_REG2)) >>
+				S_MAXRXDATA) & M_MAXRXDATA);
+		uiip->max_rxsz = min(val, uiip->max_rxsz);
 		break;
 	case ULP_ISCSI_SET_PARAMS:
 		t3_write_reg(adapter, A_ULPRX_ISCSI_TAGMASK, uiip->tagmask);
-		/* set MaxRxData and MaxCoalesceSize to 16224 */
-		t3_write_reg(adapter, A_TP_PARA_REG2, 0x3f603f60);
 		/* program the ddp page sizes */
-		{
-			int i;
-			unsigned int val = 0;
-			for (i = 0; i < 4; i++)
-				val |= (uiip->pgsz_factor[i] & 0xF) << (8 * i);
-			if (val)
-				t3_write_reg(adapter, A_ULPRX_ISCSI_PSZ, val);
+		for (i = 0; i < 4; i++)
+			val |= (uiip->pgsz_factor[i] & 0xF) << (8 * i);
+		if (val && (val != t3_read_reg(adapter, A_ULPRX_ISCSI_PSZ))) {
+			printk(KERN_INFO
+				"%s, setting iscsi pgsz 0x%x, %u,%u,%u,%u.\n",
+				adapter->name, val, uiip->pgsz_factor[0],
+				uiip->pgsz_factor[1], uiip->pgsz_factor[2],
+				uiip->pgsz_factor[3]);
+			t3_write_reg(adapter, A_ULPRX_ISCSI_PSZ, val);
 		}
 		break;
 	default:
@@ -407,6 +444,21 @@ static int cxgb_offload_ctl(struct t3cdev *tdev, unsigned int req, void *data)
 		rx_page_info->page_size = tp->rx_pg_size;
 		rx_page_info->num = tp->rx_num_pgs;
 		break;
+	case GET_ISCSI_IPV4ADDR: {
+		struct iscsi_ipv4addr *p = data;
+		struct port_info *pi = netdev_priv(p->dev);
+		p->ipv4addr = pi->iscsi_ipv4addr;
+		break;
+	}
+	case GET_EMBEDDED_INFO: {
+		struct ch_embedded_info *e = data;
+
+		spin_lock(&adapter->stats_lock);
+		t3_get_fw_version(adapter, &e->fw_vers);
+		t3_get_tp_version(adapter, &e->tp_vers);
+		spin_unlock(&adapter->stats_lock);
+		break;
+	}
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -514,13 +566,31 @@ static void t3_process_tid_release_list(struct work_struct *work)
 		spin_unlock_bh(&td->tid_release_lock);
 
 		skb = alloc_skb(sizeof(struct cpl_tid_release),
-				GFP_KERNEL | __GFP_NOFAIL);
+				GFP_KERNEL);
+		if (!skb)
+			skb = td->nofail_skb;
+		if (!skb) {
+			spin_lock_bh(&td->tid_release_lock);
+			p->ctx = (void *)td->tid_release_list;
+			td->tid_release_list = (struct t3c_tid_entry *)p;
+			break;
+		}
 		mk_tid_release(skb, p - td->tid_maps.tid_tab);
 		cxgb3_ofld_send(tdev, skb);
 		p->ctx = NULL;
+		if (skb == td->nofail_skb)
+			td->nofail_skb =
+				alloc_skb(sizeof(struct cpl_tid_release),
+					GFP_KERNEL);
 		spin_lock_bh(&td->tid_release_lock);
 	}
+	td->release_list_incomplete = (td->tid_release_list == NULL) ? 0 : 1;
 	spin_unlock_bh(&td->tid_release_lock);
+
+	if (!td->nofail_skb)
+		td->nofail_skb =
+			alloc_skb(sizeof(struct cpl_tid_release),
+				GFP_KERNEL);
 }
 
 /* use ctx as a next pointer in the tid release list */
@@ -533,7 +603,7 @@ void cxgb3_queue_tid_release(struct t3cdev *tdev, unsigned int tid)
 	p->ctx = (void *)td->tid_release_list;
 	p->client = NULL;
 	td->tid_release_list = p;
-	if (!p->ctx)
+	if (!p->ctx || td->release_list_incomplete)
 		schedule_work(&td->tid_release_task);
 	spin_unlock_bh(&td->tid_release_lock);
 }
@@ -1018,7 +1088,7 @@ static void set_l2t_ix(struct t3cdev *tdev, u32 tid, struct l2t_entry *e)
 
 	skb = alloc_skb(sizeof(*req), GFP_ATOMIC);
 	if (!skb) {
-		printk(KERN_ERR "%s: cannot allocate skb!\n", __FUNCTION__);
+		printk(KERN_ERR "%s: cannot allocate skb!\n", __func__);
 		return;
 	}
 	skb->priority = CPL_PRIORITY_CONTROL;
@@ -1049,14 +1119,14 @@ void cxgb_redirect(struct dst_entry *old, struct dst_entry *new)
 		return;
 	if (!is_offloading(newdev)) {
 		printk(KERN_WARNING "%s: Redirect to non-offload "
-		       "device ignored.\n", __FUNCTION__);
+		       "device ignored.\n", __func__);
 		return;
 	}
 	tdev = dev2t3cdev(olddev);
 	BUG_ON(!tdev);
 	if (tdev != dev2t3cdev(newdev)) {
 		printk(KERN_WARNING "%s: Redirect to different "
-		       "offload device ignored.\n", __FUNCTION__);
+		       "offload device ignored.\n", __func__);
 		return;
 	}
 
@@ -1064,7 +1134,7 @@ void cxgb_redirect(struct dst_entry *old, struct dst_entry *new)
 	e = t3_l2t_get(tdev, new->neighbour, newdev);
 	if (!e) {
 		printk(KERN_ERR "%s: couldn't allocate new l2t entry!\n",
-		       __FUNCTION__);
+		       __func__);
 		return;
 	}
 
@@ -1222,6 +1292,9 @@ int cxgb3_offload_activate(struct adapter *adapter)
 	if (list_empty(&adapter_list))
 		register_netevent_notifier(&nb);
 
+	t->nofail_skb = alloc_skb(sizeof(struct cpl_tid_release), GFP_KERNEL);
+	t->release_list_incomplete = 0;
+
 	add_adapter(adapter);
 	return 0;
 
@@ -1246,6 +1319,8 @@ void cxgb3_offload_deactivate(struct adapter *adapter)
 	T3C_DATA(tdev) = NULL;
 	t3_free_l2t(L2DATA(tdev));
 	L2DATA(tdev) = NULL;
+	if (t->nofail_skb)
+		kfree_skb(t->nofail_skb);
 	kfree(t);
 }
 

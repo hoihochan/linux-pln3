@@ -17,11 +17,13 @@
 #include <linux/init.h>
 #include <linux/pagemap.h>
 
+#include <asm/bugs.h>
 #include <asm/cacheflush.h>
+#include <asm/cachetype.h>
 #include <asm/pgtable.h>
 #include <asm/tlbflush.h>
 
-static unsigned long shared_pte_mask = L_PTE_CACHEABLE;
+static unsigned long shared_pte_mask = L_PTE_MT_BUFFERABLE;
 
 /*
  * We take the easy way out of this problem - we make the
@@ -63,9 +65,13 @@ static int adjust_pte(struct vm_area_struct *vma, unsigned long address)
 	 * If this page isn't present, or is already setup to
 	 * fault (ie, is old), we can safely ignore any issues.
 	 */
-	if (ret && pte_val(entry) & shared_pte_mask) {
-		flush_cache_page(vma, address, pte_pfn(entry));
-		pte_val(entry) &= ~shared_pte_mask;
+	if (ret && (pte_val(entry) & L_PTE_MT_MASK) != shared_pte_mask) {
+		unsigned long pfn = pte_pfn(entry);
+		flush_cache_page(vma, address, pfn);
+		outer_flush_range((pfn << PAGE_SHIFT),
+				  (pfn << PAGE_SHIFT) + PAGE_SIZE);
+		pte_val(entry) &= ~L_PTE_MT_MASK;
+		pte_val(entry) |= shared_pte_mask;
 		set_pte_at(vma->vm_mm, address, pte, entry);
 		flush_tlb_page(vma, address);
 	}
@@ -147,14 +153,11 @@ void update_mmu_cache(struct vm_area_struct *vma, unsigned long addr, pte_t pte)
 
 	page = pfn_to_page(pfn);
 	mapping = page_mapping(page);
-	if (mapping) {
 #ifndef CONFIG_SMP
-		int dirty = test_and_clear_bit(PG_dcache_dirty, &page->flags);
-
-		if (dirty)
-			__flush_dcache_page(mapping, page);
+	if (test_and_clear_bit(PG_dcache_dirty, &page->flags))
+		__flush_dcache_page(mapping, page);
 #endif
-
+	if (mapping) {
 		if (cache_is_vivt())
 			make_coherent(mapping, vma, addr, pfn);
 		else if (vma->vm_flags & VM_EXEC)
@@ -197,7 +200,7 @@ void __init check_writebuffer_bugs(void)
 		unsigned long *p1, *p2;
 		pgprot_t prot = __pgprot(L_PTE_PRESENT|L_PTE_YOUNG|
 					 L_PTE_DIRTY|L_PTE_WRITE|
-					 L_PTE_BUFFERABLE);
+					 L_PTE_MT_BUFFERABLE);
 
 		p1 = vmap(&page, 1, VM_IOREMAP, prot);
 		p2 = vmap(&page, 1, VM_IOREMAP, prot);
@@ -218,7 +221,7 @@ void __init check_writebuffer_bugs(void)
 
 	if (v) {
 		printk("failed, %s\n", reason);
-		shared_pte_mask |= L_PTE_BUFFERABLE;
+		shared_pte_mask = L_PTE_MT_UNCACHED;
 	} else {
 		printk("ok\n");
 	}

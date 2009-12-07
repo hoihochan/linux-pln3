@@ -45,7 +45,6 @@
 #include "xfs_error.h"
 #include "xfs_quota.h"
 #include "xfs_trans_space.h"
-#include "xfs_acl.h"
 #include "xfs_rw.h"
 #include "xfs_vnodeops.h"
 
@@ -249,8 +248,9 @@ xfs_attr_set_int(xfs_inode_t *dp, struct xfs_name *name,
 	/*
 	 * Attach the dquots to the inode.
 	 */
-	if ((error = XFS_QM_DQATTACH(mp, dp, 0)))
-		return (error);
+	error = xfs_qm_dqattach(dp, 0);
+	if (error)
+		return error;
 
 	/*
 	 * If the inode doesn't have an attribute fork, add one.
@@ -311,7 +311,7 @@ xfs_attr_set_int(xfs_inode_t *dp, struct xfs_name *name,
 	}
 	xfs_ilock(dp, XFS_ILOCK_EXCL);
 
-	error = XFS_TRANS_RESERVE_QUOTA_NBLKS(mp, args.trans, dp, args.total, 0,
+	error = xfs_trans_reserve_quota_nblks(args.trans, dp, args.total, 0,
 				rsvd ? XFS_QMOPT_RES_REGBLKS | XFS_QMOPT_FORCE_RES :
 				       XFS_QMOPT_RES_REGBLKS);
 	if (error) {
@@ -374,7 +374,7 @@ xfs_attr_set_int(xfs_inode_t *dp, struct xfs_name *name,
 		 * It won't fit in the shortform, transform to a leaf block.
 		 * GROT: another possible req'mt for a double-split btree op.
 		 */
-		XFS_BMAP_INIT(args.flist, args.firstblock);
+		xfs_bmap_init(args.flist, args.firstblock);
 		error = xfs_attr_shortform_to_leaf(&args);
 		if (!error) {
 			error = xfs_bmap_finish(&args.trans, args.flist,
@@ -501,8 +501,9 @@ xfs_attr_remove_int(xfs_inode_t *dp, struct xfs_name *name, int flags)
 	/*
 	 * Attach the dquots to the inode.
 	 */
-	if ((error = XFS_QM_DQATTACH(mp, dp, 0)))
-		return (error);
+	error = xfs_qm_dqattach(dp, 0);
+	if (error)
+		return error;
 
 	/*
 	 * Start our first transaction of the day.
@@ -956,7 +957,7 @@ xfs_attr_leaf_addname(xfs_da_args_t *args)
 		 * Commit that transaction so that the node_addname() call
 		 * can manage its own transactions.
 		 */
-		XFS_BMAP_INIT(args->flist, args->firstblock);
+		xfs_bmap_init(args->flist, args->firstblock);
 		error = xfs_attr_leaf_to_node(args);
 		if (!error) {
 			error = xfs_bmap_finish(&args->trans, args->flist,
@@ -1057,7 +1058,7 @@ xfs_attr_leaf_addname(xfs_da_args_t *args)
 		 * If the result is small enough, shrink it all into the inode.
 		 */
 		if ((forkoff = xfs_attr_shortform_allfit(bp, dp))) {
-			XFS_BMAP_INIT(args->flist, args->firstblock);
+			xfs_bmap_init(args->flist, args->firstblock);
 			error = xfs_attr_leaf_to_shortform(bp, args, forkoff);
 			/* bp is gone due to xfs_da_shrink_inode */
 			if (!error) {
@@ -1135,7 +1136,7 @@ xfs_attr_leaf_removename(xfs_da_args_t *args)
 	 * If the result is small enough, shrink it all into the inode.
 	 */
 	if ((forkoff = xfs_attr_shortform_allfit(bp, dp))) {
-		XFS_BMAP_INIT(args->flist, args->firstblock);
+		xfs_bmap_init(args->flist, args->firstblock);
 		error = xfs_attr_leaf_to_shortform(bp, args, forkoff);
 		/* bp is gone due to xfs_da_shrink_inode */
 		if (!error) {
@@ -1290,7 +1291,7 @@ restart:
 			 * have been a b-tree.
 			 */
 			xfs_da_state_free(state);
-			XFS_BMAP_INIT(args->flist, args->firstblock);
+			xfs_bmap_init(args->flist, args->firstblock);
 			error = xfs_attr_leaf_to_node(args);
 			if (!error) {
 				error = xfs_bmap_finish(&args->trans,
@@ -1331,7 +1332,7 @@ restart:
 		 * in the index/blkno/rmtblkno/rmtblkcnt fields and
 		 * in the index2/blkno2/rmtblkno2/rmtblkcnt2 fields.
 		 */
-		XFS_BMAP_INIT(args->flist, args->firstblock);
+		xfs_bmap_init(args->flist, args->firstblock);
 		error = xfs_da_split(state);
 		if (!error) {
 			error = xfs_bmap_finish(&args->trans, args->flist,
@@ -1443,7 +1444,7 @@ restart:
 		 * Check to see if the tree needs to be collapsed.
 		 */
 		if (retval && (state->path.active > 1)) {
-			XFS_BMAP_INIT(args->flist, args->firstblock);
+			xfs_bmap_init(args->flist, args->firstblock);
 			error = xfs_da_join(state);
 			if (!error) {
 				error = xfs_bmap_finish(&args->trans,
@@ -1579,7 +1580,7 @@ xfs_attr_node_removename(xfs_da_args_t *args)
 	 * Check to see if the tree needs to be collapsed.
 	 */
 	if (retval && (state->path.active > 1)) {
-		XFS_BMAP_INIT(args->flist, args->firstblock);
+		xfs_bmap_init(args->flist, args->firstblock);
 		error = xfs_da_join(state);
 		if (!error) {
 			error = xfs_bmap_finish(&args->trans, args->flist,
@@ -1630,7 +1631,7 @@ xfs_attr_node_removename(xfs_da_args_t *args)
 						       == XFS_ATTR_LEAF_MAGIC);
 
 		if ((forkoff = xfs_attr_shortform_allfit(bp, dp))) {
-			XFS_BMAP_INIT(args->flist, args->firstblock);
+			xfs_bmap_init(args->flist, args->firstblock);
 			error = xfs_attr_leaf_to_shortform(bp, args, forkoff);
 			/* bp is gone due to xfs_da_shrink_inode */
 			if (!error) {
@@ -2009,7 +2010,9 @@ xfs_attr_rmtval_get(xfs_da_args_t *args)
 			dblkno = XFS_FSB_TO_DADDR(mp, map[i].br_startblock);
 			blkcnt = XFS_FSB_TO_BB(mp, map[i].br_blockcount);
 			error = xfs_read_buf(mp, mp->m_ddev_targp, dblkno,
-					     blkcnt, XFS_BUF_LOCK, &bp);
+					     blkcnt,
+					     XFS_BUF_LOCK | XBF_DONT_BLOCK,
+					     &bp);
 			if (error)
 				return(error);
 
@@ -2069,7 +2072,7 @@ xfs_attr_rmtval_set(xfs_da_args_t *args)
 		/*
 		 * Allocate a single extent, up to the size of the value.
 		 */
-		XFS_BMAP_INIT(args->flist, args->firstblock);
+		xfs_bmap_init(args->flist, args->firstblock);
 		nmap = 1;
 		error = xfs_bmapi(args->trans, dp, (xfs_fileoff_t)lblkno,
 				  blkcnt,
@@ -2123,7 +2126,7 @@ xfs_attr_rmtval_set(xfs_da_args_t *args)
 		/*
 		 * Try to remember where we decided to put the value.
 		 */
-		XFS_BMAP_INIT(args->flist, args->firstblock);
+		xfs_bmap_init(args->flist, args->firstblock);
 		nmap = 1;
 		error = xfs_bmapi(NULL, dp, (xfs_fileoff_t)lblkno,
 				  args->rmtblkcnt,
@@ -2140,8 +2143,8 @@ xfs_attr_rmtval_set(xfs_da_args_t *args)
 		dblkno = XFS_FSB_TO_DADDR(mp, map.br_startblock),
 		blkcnt = XFS_FSB_TO_BB(mp, map.br_blockcount);
 
-		bp = xfs_buf_get_flags(mp->m_ddev_targp, dblkno,
-							blkcnt, XFS_BUF_LOCK);
+		bp = xfs_buf_get_flags(mp->m_ddev_targp, dblkno, blkcnt,
+				       XFS_BUF_LOCK | XBF_DONT_BLOCK);
 		ASSERT(bp);
 		ASSERT(!XFS_BUF_GETERROR(bp));
 
@@ -2188,7 +2191,7 @@ xfs_attr_rmtval_remove(xfs_da_args_t *args)
 		/*
 		 * Try to remember where we decided to put the value.
 		 */
-		XFS_BMAP_INIT(args->flist, args->firstblock);
+		xfs_bmap_init(args->flist, args->firstblock);
 		nmap = 1;
 		error = xfs_bmapi(NULL, args->dp, (xfs_fileoff_t)lblkno,
 					args->rmtblkcnt,
@@ -2229,7 +2232,7 @@ xfs_attr_rmtval_remove(xfs_da_args_t *args)
 	blkcnt = args->rmtblkcnt;
 	done = 0;
 	while (!done) {
-		XFS_BMAP_INIT(args->flist, args->firstblock);
+		xfs_bmap_init(args->flist, args->firstblock);
 		error = xfs_bunmapi(args->trans, args->dp, lblkno, blkcnt,
 				    XFS_BMAPI_ATTRFORK | XFS_BMAPI_METADATA,
 				    1, args->firstblock, args->flist,

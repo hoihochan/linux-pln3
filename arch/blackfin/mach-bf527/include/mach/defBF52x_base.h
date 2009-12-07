@@ -1,31 +1,7 @@
 /*
- * File:         include/asm-blackfin/mach-bf527/defBF52x_base.h
- * Based on:
- * Author:
+ * Copyright 2007-2008 Analog Devices Inc.
  *
- * Created:
- * Description:
- *
- * Rev:
- *
- * Modified:
- *
- * Bugs:         Enter bugs at http://blackfin.uclinux.org/
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; see the file COPYING.
- * If not, write to the Free Software Foundation,
- * 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+ * Licensed under the ADI BSD license or the GPL-2 (or later)
  */
 
 #ifndef _DEF_BF52X_H
@@ -1839,6 +1815,33 @@
 /* Bit masks for CNT_DEBOUNCE */
 
 #define                 DPRESCALE  0xf        /* Load Counter Register */
+
+/* CNT_COMMAND bit field options */
+
+#define W1LCNT_ZERO   0x0001   /* write 1 to load CNT_COUNTER with zero */
+#define W1LCNT_MIN    0x0004   /* write 1 to load CNT_COUNTER from CNT_MIN */
+#define W1LCNT_MAX    0x0008   /* write 1 to load CNT_COUNTER from CNT_MAX */
+
+#define W1LMIN_ZERO   0x0010   /* write 1 to load CNT_MIN with zero */
+#define W1LMIN_CNT    0x0020   /* write 1 to load CNT_MIN from CNT_COUNTER */
+#define W1LMIN_MAX    0x0080   /* write 1 to load CNT_MIN from CNT_MAX */
+
+#define W1LMAX_ZERO   0x0100   /* write 1 to load CNT_MAX with zero */
+#define W1LMAX_CNT    0x0200   /* write 1 to load CNT_MAX from CNT_COUNTER */
+#define W1LMAX_MIN    0x0400   /* write 1 to load CNT_MAX from CNT_MIN */
+
+/* CNT_CONFIG bit field options */
+
+#define CNTMODE_QUADENC  0x0000  /* quadrature encoder mode */
+#define CNTMODE_BINENC   0x0100  /* binary encoder mode */
+#define CNTMODE_UDCNT    0x0200  /* up/down counter mode */
+#define CNTMODE_DIRCNT   0x0400  /* direction counter mode */
+#define CNTMODE_DIRTMR   0x0500  /* direction timer mode */
+
+#define BNDMODE_COMP     0x0000  /* boundary compare mode */
+#define BNDMODE_ZERO     0x1000  /* boundary compare and zero mode */
+#define BNDMODE_CAPT     0x2000  /* boundary capture mode */
+#define BNDMODE_AEXT     0x3000  /* boundary auto-extend mode */
 
 /* Bit masks for OTP_CONTROL */
 

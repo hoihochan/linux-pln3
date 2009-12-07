@@ -354,8 +354,9 @@ static u32 esp6_get_mtu(struct xfrm_state *x, int mtu)
 }
 
 static void esp6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
-		     int type, int code, int offset, __be32 info)
+		     u8 type, u8 code, int offset, __be32 info)
 {
+	struct net *net = dev_net(skb->dev);
 	struct ipv6hdr *iph = (struct ipv6hdr*)skb->data;
 	struct ip_esp_hdr *esph = (struct ip_esp_hdr *)(skb->data + offset);
 	struct xfrm_state *x;
@@ -364,11 +365,11 @@ static void esp6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
 	    type != ICMPV6_PKT_TOOBIG)
 		return;
 
-	x = xfrm_state_lookup((xfrm_address_t *)&iph->daddr, esph->spi, IPPROTO_ESP, AF_INET6);
+	x = xfrm_state_lookup(net, (xfrm_address_t *)&iph->daddr, esph->spi, IPPROTO_ESP, AF_INET6);
 	if (!x)
 		return;
-	printk(KERN_DEBUG "pmtu discovery on SA ESP/%08x/" NIP6_FMT "\n",
-			ntohl(esph->spi), NIP6(iph->daddr));
+	printk(KERN_DEBUG "pmtu discovery on SA ESP/%08x/%pI6\n",
+			ntohl(esph->spi), &iph->daddr);
 	xfrm_state_put(x);
 }
 
@@ -557,7 +558,7 @@ static const struct xfrm_type esp6_type =
 	.hdr_offset	= xfrm6_find_1stfragopt,
 };
 
-static struct inet6_protocol esp6_protocol = {
+static const struct inet6_protocol esp6_protocol = {
 	.handler 	=	xfrm6_rcv,
 	.err_handler	=	esp6_err,
 	.flags		=	INET6_PROTO_NOPOLICY,

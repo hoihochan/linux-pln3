@@ -11,7 +11,7 @@
 #include <linux/linkage.h>
 #include <linux/init.h>
 #include <asm/assembler.h>
-#include <asm/elf.h>
+#include <asm/hwcap.h>
 #include <asm/pgtable-hwdef.h>
 #include <asm/pgtable.h>
 #include <asm/ptrace.h>
@@ -322,7 +322,7 @@ __arm940_setup:
 	.type	arm940_processor_functions, #object
 ENTRY(arm940_processor_functions)
 	.word	nommu_early_abort
-	.word	pabort_noifar
+	.word	legacy_pabort
 	.word	cpu_arm940_proc_init
 	.word	cpu_arm940_proc_fin
 	.word	cpu_arm940_reset

@@ -18,6 +18,7 @@
 #include <linux/list.h>
 #include <linux/timer.h>
 #include <linux/init.h>
+#include <linux/gpio.h>
 #include <linux/dm9000.h>
 #include <linux/i2c.h>
 
@@ -25,6 +26,7 @@
 #include <linux/tty.h>
 #include <linux/serial_8250.h>
 #include <linux/serial_reg.h>
+#include <linux/io.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
@@ -36,17 +38,17 @@
 #include <mach/vr1000-cpld.h>
 
 #include <mach/hardware.h>
-#include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/mach-types.h>
 
-#include <asm/plat-s3c/regs-serial.h>
+#include <plat/regs-serial.h>
 #include <mach/regs-gpio.h>
 #include <mach/leds-gpio.h>
 
-#include <asm/plat-s3c24xx/clock.h>
-#include <asm/plat-s3c24xx/devs.h>
-#include <asm/plat-s3c24xx/cpu.h>
+#include <plat/clock.h>
+#include <plat/devs.h>
+#include <plat/cpu.h>
+#include <plat/iic.h>
 
 #include "usb-simtec.h"
 #include "nor-simtec.h"
@@ -276,19 +278,19 @@ static struct platform_device vr1000_dm9k1 = {
 
 static struct s3c24xx_led_platdata vr1000_led1_pdata = {
 	.name		= "led1",
-	.gpio		= S3C2410_GPB0,
+	.gpio		= S3C2410_GPB(0),
 	.def_trigger	= "",
 };
 
 static struct s3c24xx_led_platdata vr1000_led2_pdata = {
 	.name		= "led2",
-	.gpio		= S3C2410_GPB1,
+	.gpio		= S3C2410_GPB(1),
 	.def_trigger	= "",
 };
 
 static struct s3c24xx_led_platdata vr1000_led3_pdata = {
 	.name		= "led3",
-	.gpio		= S3C2410_GPB2,
+	.gpio		= S3C2410_GPB(2),
 	.def_trigger	= "",
 };
 
@@ -334,7 +336,7 @@ static struct platform_device *vr1000_devices[] __initdata = {
 	&s3c_device_usb,
 	&s3c_device_lcd,
 	&s3c_device_wdt,
-	&s3c_device_i2c,
+	&s3c_device_i2c0,
 	&s3c_device_adc,
 	&serial_device,
 	&vr1000_dm9k0,
@@ -354,8 +356,8 @@ static struct clk *vr1000_clocks[] __initdata = {
 
 static void vr1000_power_off(void)
 {
-	s3c2410_gpio_cfgpin(S3C2410_GPB9, S3C2410_GPB9_OUTP);
-	s3c2410_gpio_setpin(S3C2410_GPB9, 1);
+	s3c2410_gpio_cfgpin(S3C2410_GPB(9), S3C2410_GPIO_OUTPUT);
+	s3c2410_gpio_setpin(S3C2410_GPB(9), 1);
 }
 
 static void __init vr1000_map_io(void)
@@ -384,6 +386,7 @@ static void __init vr1000_map_io(void)
 
 static void __init vr1000_init(void)
 {
+	s3c_i2c0_set_platdata(NULL);
 	platform_add_devices(vr1000_devices, ARRAY_SIZE(vr1000_devices));
 
 	i2c_register_board_info(0, vr1000_i2c_devs,

@@ -38,6 +38,8 @@
 #include <asm/time.h>
 #include <asm/serial.h>
 #include <asm/udbg.h>
+#include <asm/mmu_context.h>
+#include <asm/swiotlb.h>
 
 #include "setup.h"
 
@@ -49,11 +51,11 @@ int boot_cpuid;
 EXPORT_SYMBOL_GPL(boot_cpuid);
 int boot_cpuid_phys;
 
+int smp_hw_index[NR_CPUS];
+
 unsigned long ISA_DMA_THRESHOLD;
 unsigned int DMA_MODE_READ;
 unsigned int DMA_MODE_WRITE;
-
-int have_of = 1;
 
 #ifdef CONFIG_VGA_CONSOLE
 unsigned long vgacon_remap_base;
@@ -97,6 +99,10 @@ notrace unsigned long __init early_init(unsigned long dt_ptr)
 			  PTRRELOC(&__start___ftr_fixup),
 			  PTRRELOC(&__stop___ftr_fixup));
 
+	do_feature_fixups(spec->mmu_features,
+			  PTRRELOC(&__start___mmu_ftr_fixup),
+			  PTRRELOC(&__stop___mmu_ftr_fixup));
+
 	do_lwsync_fixups(spec->cpu_features,
 			 PTRRELOC(&__start___lwsync_fixup),
 			 PTRRELOC(&__stop___lwsync_fixup));
@@ -111,8 +117,10 @@ notrace unsigned long __init early_init(unsigned long dt_ptr)
  * This is called very early on the boot process, after a minimal
  * MMU environment has been set up but before MMU_init is called.
  */
-notrace void __init machine_init(unsigned long dt_ptr, unsigned long phys)
+notrace void __init machine_init(unsigned long dt_ptr)
 {
+	lockdep_init();
+
 	/* Enable early debugging if any specified (see udbg.h) */
 	udbg_early_init();
 
@@ -120,6 +128,8 @@ notrace void __init machine_init(unsigned long dt_ptr, unsigned long phys)
 	early_init_devtree(__va(dt_ptr));
 
 	probe_machine();
+
+	setup_kdump_trampoline();
 
 #ifdef CONFIG_6xx
 	if (cpu_has_feature(CPU_FTR_CAN_DOZE) ||
@@ -200,6 +210,14 @@ void nvram_write_byte(unsigned char val, int addr)
 }
 EXPORT_SYMBOL(nvram_write_byte);
 
+ssize_t nvram_get_size(void)
+{
+	if (ppc_md.nvram_size)
+		return ppc_md.nvram_size();
+	return -1;
+}
+EXPORT_SYMBOL(nvram_get_size);
+
 void nvram_sync(void)
 {
 	if (ppc_md.nvram_sync)
@@ -209,22 +227,11 @@ EXPORT_SYMBOL(nvram_sync);
 
 #endif /* CONFIG_NVRAM */
 
-static DEFINE_PER_CPU(struct cpu, cpu_devices);
-
 int __init ppc_init(void)
 {
-	int cpu;
-
 	/* clear the progress line */
 	if (ppc_md.progress)
 		ppc_md.progress("             ", 0xffff);
-
-	/* register CPU devices */
-	for_each_possible_cpu(cpu) {
-		struct cpu *c = &per_cpu(cpu_devices, cpu);
-		c->hotpluggable = 1;
-		register_cpu(c, cpu);
-	}
 
 	/* call platform init */
 	if (ppc_md.init != NULL) {
@@ -336,5 +343,14 @@ void __init setup_arch(char **cmdline_p)
 		ppc_md.setup_arch();
 	if ( ppc_md.progress ) ppc_md.progress("arch: exit", 0x3eab);
 
+#ifdef CONFIG_SWIOTLB
+	if (ppc_swiotlb_enable)
+		swiotlb_init();
+#endif
+
 	paging_init();
+
+	/* Initialize the MMU context management stuff */
+	mmu_context_init();
+
 }

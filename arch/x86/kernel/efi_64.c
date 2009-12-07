@@ -36,6 +36,7 @@
 #include <asm/proto.h>
 #include <asm/efi.h>
 #include <asm/cacheflush.h>
+#include <asm/fixmap.h>
 
 static pgd_t save_pgd __initdata;
 static unsigned long efi_flags __initdata;
@@ -97,26 +98,17 @@ void __init efi_call_phys_epilog(void)
 	early_runtime_code_mapping_set_exec(0);
 }
 
-void __iomem *__init efi_ioremap(unsigned long phys_addr, unsigned long size)
+void __iomem *__init efi_ioremap(unsigned long phys_addr, unsigned long size,
+				 u32 type)
 {
-	static unsigned pages_mapped __initdata;
-	unsigned i, pages;
-	unsigned long offset;
+	unsigned long last_map_pfn;
 
-	pages = PFN_UP(phys_addr + size) - PFN_DOWN(phys_addr);
-	offset = phys_addr & ~PAGE_MASK;
-	phys_addr &= PAGE_MASK;
+	if (type == EFI_MEMORY_MAPPED_IO)
+		return ioremap(phys_addr, size);
 
-	if (pages_mapped + pages > MAX_EFI_IO_PAGES)
+	last_map_pfn = init_memory_mapping(phys_addr, phys_addr + size);
+	if ((last_map_pfn << PAGE_SHIFT) < phys_addr + size)
 		return NULL;
 
-	for (i = 0; i < pages; i++) {
-		__set_fixmap(FIX_EFI_IO_MAP_FIRST_PAGE - pages_mapped,
-			     phys_addr, PAGE_KERNEL);
-		phys_addr += PAGE_SIZE;
-		pages_mapped++;
-	}
-
-	return (void __iomem *)__fix_to_virt(FIX_EFI_IO_MAP_FIRST_PAGE - \
-					     (pages_mapped - pages)) + offset;
+	return (void __iomem *)__va(phys_addr);
 }

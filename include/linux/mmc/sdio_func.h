@@ -63,10 +63,11 @@ struct sdio_func {
 
 #define sdio_func_set_present(f) ((f)->state |= SDIO_STATE_PRESENT)
 
-#define sdio_func_id(f)		((f)->dev.bus_id)
+#define sdio_func_id(f)		(dev_name(&(f)->dev))
 
 #define sdio_get_drvdata(f)	dev_get_drvdata(&(f)->dev)
 #define sdio_set_drvdata(f,d)	dev_set_drvdata(&(f)->dev, d)
+#define dev_to_sdio_func(d)	container_of(d, struct sdio_func, dev)
 
 /*
  * SDIO function device driver
@@ -80,6 +81,8 @@ struct sdio_driver {
 
 	struct device_driver drv;
 };
+
+#define to_sdio_driver(d)	container_of(d, struct sdio_driver, drv)
 
 /**
  * SDIO_DEVICE - macro used to describe a specific SDIO device

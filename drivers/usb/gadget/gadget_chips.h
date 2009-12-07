@@ -110,7 +110,6 @@
 #define gadget_is_at91(g)	0
 #endif
 
-/* status unclear */
 #ifdef CONFIG_USB_GADGET_IMX
 #define gadget_is_imx(g)	!strcmp("imx_udc", (g)->name)
 #else
@@ -138,6 +137,12 @@
 #define gadget_is_musbhdrc(g)	0
 #endif
 
+#ifdef CONFIG_USB_GADGET_LANGWELL
+#define gadget_is_langwell(g)	(!strcmp("langwell_udc", (g)->name))
+#else
+#define gadget_is_langwell(g)	0
+#endif
+
 /* from Montavista kernel (?) */
 #ifdef CONFIG_USB_GADGET_MPC8272
 #define gadget_is_mpc8272(g)	!strcmp("mpc8272_udc", (g)->name)
@@ -151,10 +156,28 @@
 #define	gadget_is_m66592(g)	0
 #endif
 
+/* Freescale CPM/QE UDC SUPPORT */
+#ifdef CONFIG_USB_GADGET_FSL_QE
+#define gadget_is_fsl_qe(g)	!strcmp("fsl_qe_udc", (g)->name)
+#else
+#define gadget_is_fsl_qe(g)	0
+#endif
+
+#ifdef CONFIG_USB_GADGET_CI13XXX
+#define gadget_is_ci13xxx(g)	(!strcmp("ci13xxx_udc", (g)->name))
+#else
+#define gadget_is_ci13xxx(g)	0
+#endif
 
 // CONFIG_USB_GADGET_SX2
 // CONFIG_USB_GADGET_AU1X00
 // ...
+
+#ifdef CONFIG_USB_GADGET_R8A66597
+#define	gadget_is_r8a66597(g)	!strcmp("r8a66597_udc", (g)->name)
+#else
+#define	gadget_is_r8a66597(g)	0
+#endif
 
 
 /**
@@ -216,6 +239,14 @@ static inline int usb_gadget_controller_number(struct usb_gadget *gadget)
 		return 0x20;
 	else if (gadget_is_m66592(gadget))
 		return 0x21;
+	else if (gadget_is_fsl_qe(gadget))
+		return 0x22;
+	else if (gadget_is_ci13xxx(gadget))
+		return 0x23;
+	else if (gadget_is_langwell(gadget))
+		return 0x24;
+	else if (gadget_is_r8a66597(gadget))
+		return 0x25;
 	return -ENOENT;
 }
 

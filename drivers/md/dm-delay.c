@@ -13,8 +13,7 @@
 #include <linux/bio.h>
 #include <linux/slab.h>
 
-#include "dm.h"
-#include "dm-bio-list.h"
+#include <linux/device-mapper.h>
 
 #define DM_MSG_PREFIX "delay"
 
@@ -198,6 +197,7 @@ out:
 	mutex_init(&dc->timer_lock);
 	atomic_set(&dc->may_delay, 1);
 
+	ti->num_flush_requests = 1;
 	ti->private = dc;
 	return 0;
 
@@ -279,8 +279,9 @@ static int delay_map(struct dm_target *ti, struct bio *bio,
 
 	if ((bio_data_dir(bio) == WRITE) && (dc->dev_write)) {
 		bio->bi_bdev = dc->dev_write->bdev;
-		bio->bi_sector = dc->start_write +
-				 (bio->bi_sector - ti->begin);
+		if (bio_sectors(bio))
+			bio->bi_sector = dc->start_write +
+					 (bio->bi_sector - ti->begin);
 
 		return delay_bio(dc, dc->write_delay, bio);
 	}
@@ -317,9 +318,26 @@ static int delay_status(struct dm_target *ti, status_type_t type,
 	return 0;
 }
 
+static int delay_iterate_devices(struct dm_target *ti,
+				 iterate_devices_callout_fn fn, void *data)
+{
+	struct delay_c *dc = ti->private;
+	int ret = 0;
+
+	ret = fn(ti, dc->dev_read, dc->start_read, ti->len, data);
+	if (ret)
+		goto out;
+
+	if (dc->dev_write)
+		ret = fn(ti, dc->dev_write, dc->start_write, ti->len, data);
+
+out:
+	return ret;
+}
+
 static struct target_type delay_target = {
 	.name	     = "delay",
-	.version     = {1, 0, 2},
+	.version     = {1, 1, 0},
 	.module      = THIS_MODULE,
 	.ctr	     = delay_ctr,
 	.dtr	     = delay_dtr,
@@ -327,6 +345,7 @@ static struct target_type delay_target = {
 	.presuspend  = delay_presuspend,
 	.resume	     = delay_resume,
 	.status	     = delay_status,
+	.iterate_devices = delay_iterate_devices,
 };
 
 static int __init dm_delay_init(void)
@@ -363,11 +382,7 @@ bad_queue:
 
 static void __exit dm_delay_exit(void)
 {
-	int r = dm_unregister_target(&delay_target);
-
-	if (r < 0)
-		DMERR("unregister failed %d", r);
-
+	dm_unregister_target(&delay_target);
 	kmem_cache_destroy(delayed_cache);
 	destroy_workqueue(kdelayd_wq);
 }

@@ -40,7 +40,7 @@
 #define SYS_GETSOCKOPT	15		/* sys_getsockopt(2)		*/
 #define SYS_SENDMSG	16		/* sys_sendmsg(2)		*/
 #define SYS_RECVMSG	17		/* sys_recvmsg(2)		*/
-#define SYS_PACCEPT	18		/* sys_paccept(2)		*/
+#define SYS_ACCEPT4	18		/* sys_accept4(2)		*/
 
 typedef enum {
 	SS_FREE = 0,			/* not allocated		*/
@@ -57,6 +57,7 @@ typedef enum {
 #include <linux/random.h>
 #include <linux/wait.h>
 #include <linux/fcntl.h>	/* For O_CLOEXEC and O_NONBLOCK */
+#include <linux/kmemcheck.h>
 
 struct poll_table_struct;
 struct pipe_inode_info;
@@ -100,7 +101,7 @@ enum sock_type {
  * remaining bits are used as flags. */
 #define SOCK_TYPE_MASK 0xf
 
-/* Flags for socket, socketpair, paccept */
+/* Flags for socket, socketpair, accept4 */
 #define SOCK_CLOEXEC	O_CLOEXEC
 #ifndef SOCK_NONBLOCK
 #define SOCK_NONBLOCK	O_NONBLOCK
@@ -127,13 +128,21 @@ enum sock_shutdown_cmd {
  */
 struct socket {
 	socket_state		state;
+
+	kmemcheck_bitfield_begin(type);
 	short			type;
+	kmemcheck_bitfield_end(type);
+
 	unsigned long		flags;
-	const struct proto_ops	*ops;
+	/*
+	 * Please keep fasync_list & wait fields in the same cache line
+	 */
 	struct fasync_struct	*fasync_list;
+	wait_queue_head_t	wait;
+
 	struct file		*file;
 	struct sock		*sk;
-	wait_queue_head_t	wait;
+	const struct proto_ops	*ops;
 };
 
 struct vm_area_struct;
@@ -169,11 +178,11 @@ struct proto_ops {
 	int		(*listen)    (struct socket *sock, int len);
 	int		(*shutdown)  (struct socket *sock, int flags);
 	int		(*setsockopt)(struct socket *sock, int level,
-				      int optname, char __user *optval, int optlen);
+				      int optname, char __user *optval, unsigned int optlen);
 	int		(*getsockopt)(struct socket *sock, int level,
 				      int optname, char __user *optval, int __user *optlen);
 	int		(*compat_setsockopt)(struct socket *sock, int level,
-				      int optname, char __user *optval, int optlen);
+				      int optname, char __user *optval, unsigned int optlen);
 	int		(*compat_getsockopt)(struct socket *sock, int level,
 				      int optname, char __user *optval, int __user *optlen);
 	int		(*sendmsg)   (struct kiocb *iocb, struct socket *sock,
@@ -223,8 +232,6 @@ extern int 	     sock_map_fd(struct socket *sock, int flags);
 extern struct socket *sockfd_lookup(int fd, int *err);
 #define		     sockfd_put(sock) fput(sock->file)
 extern int	     net_ratelimit(void);
-extern long	     do_accept(int fd, struct sockaddr __user *upeer_sockaddr,
-			       int __user *upeer_addrlen, int flags);
 
 #define net_random()		random32()
 #define net_srandom(seed)	srandom32((__force u32)seed)
@@ -249,7 +256,7 @@ extern int kernel_getpeername(struct socket *sock, struct sockaddr *addr,
 extern int kernel_getsockopt(struct socket *sock, int level, int optname,
 			     char *optval, int *optlen);
 extern int kernel_setsockopt(struct socket *sock, int level, int optname,
-			     char *optval, int optlen);
+			     char *optval, unsigned int optlen);
 extern int kernel_sendpage(struct socket *sock, struct page *page, int offset,
 			   size_t size, int flags);
 extern int kernel_sock_ioctl(struct socket *sock, int cmd, unsigned long arg);
@@ -306,7 +313,7 @@ SOCKCALL_WRAP(name, compat_ioctl, (struct socket *sock, unsigned int cmd, \
 SOCKCALL_WRAP(name, listen, (struct socket *sock, int len), (sock, len)) \
 SOCKCALL_WRAP(name, shutdown, (struct socket *sock, int flags), (sock, flags)) \
 SOCKCALL_WRAP(name, setsockopt, (struct socket *sock, int level, int optname, \
-			 char __user *optval, int optlen), (sock, level, optname, optval, optlen)) \
+			 char __user *optval, unsigned int optlen), (sock, level, optname, optval, optlen)) \
 SOCKCALL_WRAP(name, getsockopt, (struct socket *sock, int level, int optname, \
 			 char __user *optval, int __user *optlen), (sock, level, optname, optval, optlen)) \
 SOCKCALL_WRAP(name, sendmsg, (struct kiocb *iocb, struct socket *sock, struct msghdr *m, size_t len), \

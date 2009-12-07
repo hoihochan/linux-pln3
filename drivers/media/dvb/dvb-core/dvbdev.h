@@ -27,11 +27,14 @@
 #include <linux/poll.h>
 #include <linux/fs.h>
 #include <linux/list.h>
-#include <linux/smp_lock.h>
 
 #define DVB_MAJOR 212
 
-#define DVB_MAX_ADAPTERS 8
+#if defined(CONFIG_DVB_MAX_ADAPTERS) && CONFIG_DVB_MAX_ADAPTERS > 0
+  #define DVB_MAX_ADAPTERS CONFIG_DVB_MAX_ADAPTERS
+#else
+  #define DVB_MAX_ADAPTERS 8
+#endif
 
 #define DVB_UNSET (-1)
 
@@ -62,14 +65,19 @@ struct dvb_adapter {
 	struct device *device;
 
 	struct module *module;
+
+	int mfe_shared;			/* indicates mutually exclusive frontends */
+	struct dvb_device *mfe_dvbdev;	/* frontend device in use */
+	struct mutex mfe_lock;		/* access lock for thread creation */
 };
 
 
 struct dvb_device {
 	struct list_head list_head;
-	struct file_operations *fops;
+	const struct file_operations *fops;
 	struct dvb_adapter *adapter;
 	int type;
+	int minor;
 	u32 id;
 
 	/* in theory, 'users' can vanish now,

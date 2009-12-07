@@ -266,12 +266,18 @@ static const struct file_operations tower_fops = {
 	.llseek =	tower_llseek,
 };
 
+static char *legousbtower_devnode(struct device *dev, mode_t *mode)
+{
+	return kasprintf(GFP_KERNEL, "usb/%s", dev_name(dev));
+}
+
 /*
  * usb class driver info in order to get a minor number from the usb core,
  * and to have the device registered with the driver core
  */
 static struct usb_class_driver tower_class = {
 	.name =		"legousbtower%d",
+	.devnode = 	legousbtower_devnode,
 	.fops =		&tower_fops,
 	.minor_base =	LEGO_USB_TOWER_MINOR_BASE,
 };
@@ -545,6 +551,9 @@ static unsigned int tower_poll (struct file *file, poll_table *wait)
 	dbg(2, "%s: enter", __func__);
 
 	dev = file->private_data;
+
+	if (!dev->udev)
+		return POLLERR | POLLHUP;
 
 	poll_wait(file, &dev->read_wait, wait);
 	poll_wait(file, &dev->write_wait, wait);
@@ -851,9 +860,8 @@ static int tower_probe (struct usb_interface *interface, const struct usb_device
 
 	dbg(2, "%s: enter", __func__);
 
-	if (udev == NULL) {
-		info ("udev is NULL.");
-	}
+	if (udev == NULL)
+		dev_info(&interface->dev, "udev is NULL.\n");
 
 	/* allocate memory for our device state and initialize it */
 
@@ -954,7 +962,9 @@ static int tower_probe (struct usb_interface *interface, const struct usb_device
 	dev->minor = interface->minor;
 
 	/* let the user know what node this device is now attached to */
-	info ("LEGO USB Tower #%d now attached to major %d minor %d", (dev->minor - LEGO_USB_TOWER_MINOR_BASE), USB_MAJOR, dev->minor);
+	dev_info(&interface->dev, "LEGO USB Tower #%d now attached to major "
+		 "%d minor %d\n", (dev->minor - LEGO_USB_TOWER_MINOR_BASE),
+		 USB_MAJOR, dev->minor);
 
 	/* get the firmware version and log it */
 	result = usb_control_msg (udev,
@@ -971,10 +981,10 @@ static int tower_probe (struct usb_interface *interface, const struct usb_device
 		retval = result;
 		goto error;
 	}
-	info("LEGO USB Tower firmware version is %d.%d build %d",
-	     get_version_reply.major,
-	     get_version_reply.minor,
-	     le16_to_cpu(get_version_reply.build_no));
+	dev_info(&interface->dev, "LEGO USB Tower firmware version is %d.%d "
+		 "build %d\n", get_version_reply.major,
+		 get_version_reply.minor,
+		 le16_to_cpu(get_version_reply.build_no));
 
 
 exit:
@@ -1018,10 +1028,14 @@ static void tower_disconnect (struct usb_interface *interface)
 		tower_delete (dev);
 	} else {
 		dev->udev = NULL;
+		/* wake up pollers */
+		wake_up_interruptible_all(&dev->read_wait);
+		wake_up_interruptible_all(&dev->write_wait);
 		mutex_unlock(&dev->lock);
 	}
 
-	info("LEGO USB Tower #%d now disconnected", (minor - LEGO_USB_TOWER_MINOR_BASE));
+	dev_info(&interface->dev, "LEGO USB Tower #%d now disconnected\n",
+		 (minor - LEGO_USB_TOWER_MINOR_BASE));
 
 	dbg(2, "%s: leave", __func__);
 }
@@ -1046,7 +1060,8 @@ static int __init lego_usb_tower_init(void)
 		goto exit;
 	}
 
-	info(DRIVER_DESC " " DRIVER_VERSION);
+	printk(KERN_INFO KBUILD_MODNAME ": " DRIVER_VERSION ":"
+	       DRIVER_DESC "\n");
 
 exit:
 	dbg(2, "%s: leave, return value %d", __func__, retval);

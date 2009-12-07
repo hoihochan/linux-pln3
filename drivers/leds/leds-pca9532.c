@@ -1,7 +1,7 @@
 /*
  * pca9532.c - 16-bit Led dimmer
  *
- * Copyright (C) 2008 Riku Voipio <riku.voipio@movial.fi>
+ * Copyright (C) 2008 Riku Voipio
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -16,10 +16,8 @@
 #include <linux/leds.h>
 #include <linux/input.h>
 #include <linux/mutex.h>
+#include <linux/workqueue.h>
 #include <linux/leds-pca9532.h>
-
-static const unsigned short normal_i2c[] = { /*0x60,*/ I2C_CLIENT_END};
-I2C_CLIENT_INSMOD_1(pca9532);
 
 #define PCA9532_REG_PSC(i) (0x2+(i)*2)
 #define PCA9532_REG_PWM(i) (0x3+(i)*2)
@@ -33,7 +31,8 @@ struct pca9532_data {
 	struct i2c_client *client;
 	struct pca9532_led leds[16];
 	struct mutex update_lock;
-	struct input_dev    *idev;
+	struct input_dev *idev;
+	struct work_struct work;
 	u8 pwm[2];
 	u8 psc[2];
 };
@@ -51,9 +50,9 @@ MODULE_DEVICE_TABLE(i2c, pca9532_id);
 
 static struct i2c_driver pca9532_driver = {
 	.driver = {
-		.name   = "pca9532",
+		.name = "pca9532",
 	},
-	.probe  = pca9532_probe,
+	.probe = pca9532_probe,
 	.remove = pca9532_remove,
 	.id_table = pca9532_id,
 };
@@ -63,7 +62,7 @@ static struct i2c_driver pca9532_driver = {
  * as a compromise we average one pwm to the values requested by all
  * leds that are not ON/OFF.
  * */
-static int pca9532_setpwm(struct i2c_client *client, int pwm, int blink,
+static int pca9532_calcpwm(struct i2c_client *client, int pwm, int blink,
 	enum led_brightness value)
 {
 	int a = 0, b = 0, i = 0;
@@ -84,11 +83,17 @@ static int pca9532_setpwm(struct i2c_client *client, int pwm, int blink,
 	b = b/a;
 	if (b > 0xFF)
 		return -EINVAL;
-	mutex_lock(&data->update_lock);
 	data->pwm[pwm] = b;
+	data->psc[pwm] = blink;
+	return 0;
+}
+
+static int pca9532_setpwm(struct i2c_client *client, int pwm)
+{
+	struct pca9532_data *data = i2c_get_clientdata(client);
+	mutex_lock(&data->update_lock);
 	i2c_smbus_write_byte_data(client, PCA9532_REG_PWM(pwm),
 		data->pwm[pwm]);
-	data->psc[pwm] = blink;
 	i2c_smbus_write_byte_data(client, PCA9532_REG_PSC(pwm),
 		data->psc[pwm]);
 	mutex_unlock(&data->update_lock);
@@ -124,11 +129,11 @@ static void pca9532_set_brightness(struct led_classdev *led_cdev,
 		led->state = PCA9532_ON;
 	else {
 		led->state = PCA9532_PWM0; /* Thecus: hardcode one pwm */
-		err = pca9532_setpwm(led->client, 0, 0, value);
+		err = pca9532_calcpwm(led->client, 0, 0, value);
 		if (err)
 			return; /* XXX: led api doesn't allow error code? */
 	}
-	pca9532_setled(led);
+	schedule_work(&led->work);
 }
 
 static int pca9532_set_blink(struct led_classdev *led_cdev,
@@ -137,10 +142,11 @@ static int pca9532_set_blink(struct led_classdev *led_cdev,
 	struct pca9532_led *led = ldev_to_led(led_cdev);
 	struct i2c_client *client = led->client;
 	int psc;
+	int err = 0;
 
 	if (*delay_on == 0 && *delay_off == 0) {
 	/* led subsystem ask us for a blink rate */
-		*delay_on  = 1000;
+		*delay_on = 1000;
 		*delay_off = 1000;
 	}
 	if (*delay_on != *delay_off || *delay_on > 1690 || *delay_on < 6)
@@ -148,15 +154,19 @@ static int pca9532_set_blink(struct led_classdev *led_cdev,
 
 	/* Thecus specific: only use PSC/PWM 0 */
 	psc = (*delay_on * 152-1)/1000;
-	return pca9532_setpwm(client, 0, psc, led_cdev->brightness);
+	err = pca9532_calcpwm(client, 0, psc, led_cdev->brightness);
+	if (err)
+		return err;
+	schedule_work(&led->work);
+	return 0;
 }
 
-int pca9532_event(struct input_dev *dev, unsigned int type, unsigned int code,
-	int value)
+static int pca9532_event(struct input_dev *dev, unsigned int type,
+	unsigned int code, int value)
 {
 	struct pca9532_data *data = input_get_drvdata(dev);
 
-	if (type != EV_SND && (code != SND_BELL || code != SND_TONE))
+	if (!(type == EV_SND && (code == SND_BELL || code == SND_TONE)))
 		return -1;
 
 	/* XXX: allow different kind of beeps with psc/pwm modifications */
@@ -165,13 +175,28 @@ int pca9532_event(struct input_dev *dev, unsigned int type, unsigned int code,
 	else
 		data->pwm[1] = 0;
 
-	dev_info(&dev->dev, "setting beep to %d \n", data->pwm[1]);
+	schedule_work(&data->work);
+
+	return 0;
+}
+
+static void pca9532_input_work(struct work_struct *work)
+{
+	struct pca9532_data *data;
+	data = container_of(work, struct pca9532_data, work);
 	mutex_lock(&data->update_lock);
 	i2c_smbus_write_byte_data(data->client, PCA9532_REG_PWM(1),
 		data->pwm[1]);
 	mutex_unlock(&data->update_lock);
+}
 
-	return 0;
+static void pca9532_led_work(struct work_struct *work)
+{
+	struct pca9532_led *led;
+	led = container_of(work, struct pca9532_led, work);
+	if (led->state == PCA9532_PWM0)
+		pca9532_setpwm(led->client, 0);
+	pca9532_setled(led);
 }
 
 static int pca9532_configure(struct i2c_client *client,
@@ -199,13 +224,14 @@ static int pca9532_configure(struct i2c_client *client,
 			break;
 		case PCA9532_TYPE_LED:
 			led->state = pled->state;
-			led->name =  pled->name;
+			led->name = pled->name;
 			led->ldev.name = led->name;
 			led->ldev.brightness = LED_OFF;
 			led->ldev.brightness_set = pca9532_set_brightness;
 			led->ldev.blink_set = pca9532_set_blink;
-			if (led_classdev_register(&client->dev,
-				&led->ldev) < 0)	{
+			INIT_WORK(&led->work, pca9532_led_work);
+			err = led_classdev_register(&client->dev, &led->ldev);
+			if (err < 0) {
 				dev_err(&client->dev,
 					"couldn't register LED %s\n",
 					led->name);
@@ -225,7 +251,7 @@ static int pca9532_configure(struct i2c_client *client,
 			data->idev->name = pled->name;
 			data->idev->phys = "i2c/pca9532";
 			data->idev->id.bustype = BUS_HOST;
-			data->idev->id.vendor  = 0x001f;
+			data->idev->id.vendor = 0x001f;
 			data->idev->id.product = 0x0001;
 			data->idev->id.version = 0x0100;
 			data->idev->evbit[0] = BIT_MASK(EV_SND);
@@ -233,9 +259,11 @@ static int pca9532_configure(struct i2c_client *client,
 						BIT_MASK(SND_TONE);
 			data->idev->event = pca9532_event;
 			input_set_drvdata(data->idev, data);
+			INIT_WORK(&data->work, pca9532_input_work);
 			err = input_register_device(data->idev);
 			if (err) {
 				input_free_device(data->idev);
+				cancel_work_sync(&data->work);
 				data->idev = NULL;
 				goto exit;
 			}
@@ -252,18 +280,19 @@ exit:
 				break;
 			case PCA9532_TYPE_LED:
 				led_classdev_unregister(&data->leds[i].ldev);
+				cancel_work_sync(&data->leds[i].work);
 				break;
 			case PCA9532_TYPE_N2100_BEEP:
 				if (data->idev != NULL) {
 					input_unregister_device(data->idev);
 					input_free_device(data->idev);
+					cancel_work_sync(&data->work);
 					data->idev = NULL;
 				}
 				break;
 			}
 
 	return err;
-
 }
 
 static int pca9532_probe(struct i2c_client *client,
@@ -271,12 +300,16 @@ static int pca9532_probe(struct i2c_client *client,
 {
 	struct pca9532_data *data = i2c_get_clientdata(client);
 	struct pca9532_platform_data *pca9532_pdata = client->dev.platform_data;
+	int err;
+
+	if (!pca9532_pdata)
+		return -EIO;
 
 	if (!i2c_check_functionality(client->adapter,
 		I2C_FUNC_SMBUS_BYTE_DATA))
 		return -EIO;
 
-	data = kzalloc(sizeof(struct pca9532_data), GFP_KERNEL);
+	data = kzalloc(sizeof(*data), GFP_KERNEL);
 	if (!data)
 		return -ENOMEM;
 
@@ -285,12 +318,13 @@ static int pca9532_probe(struct i2c_client *client,
 	data->client = client;
 	mutex_init(&data->update_lock);
 
-	if (pca9532_pdata == NULL)
-		return -EIO;
+	err = pca9532_configure(client, data, pca9532_pdata);
+	if (err) {
+		kfree(data);
+		i2c_set_clientdata(client, NULL);
+	}
 
-	pca9532_configure(client, data, pca9532_pdata);
-	return 0;
-
+	return err;
 }
 
 static int pca9532_remove(struct i2c_client *client)
@@ -303,11 +337,13 @@ static int pca9532_remove(struct i2c_client *client)
 			break;
 		case PCA9532_TYPE_LED:
 			led_classdev_unregister(&data->leds[i].ldev);
+			cancel_work_sync(&data->leds[i].work);
 			break;
 		case PCA9532_TYPE_N2100_BEEP:
 			if (data->idev != NULL) {
 				input_unregister_device(data->idev);
 				input_free_device(data->idev);
+				cancel_work_sync(&data->work);
 				data->idev = NULL;
 			}
 			break;
@@ -328,7 +364,7 @@ static void __exit pca9532_exit(void)
 	i2c_del_driver(&pca9532_driver);
 }
 
-MODULE_AUTHOR("Riku Voipio <riku.voipio@movial.fi>");
+MODULE_AUTHOR("Riku Voipio");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("PCA 9532 LED dimmer");
 

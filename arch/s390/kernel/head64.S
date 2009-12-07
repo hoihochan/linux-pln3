@@ -10,29 +10,6 @@
  *
  */
 
-#
-# startup-code at 0x10000, running in absolute addressing mode
-# this is called either by the ipl loader or directly by PSW restart
-# or linload or SALIPL
-#
-	.org	0x10000
-startup:basr	%r13,0			# get base
-.LPG0:	l	%r13,0f-.LPG0(%r13)
-	b	0(%r13)
-0:	.long	startup_continue
-
-#
-# params at 10400 (setup.h)
-#
-	.org	PARMAREA
-	.quad	0			# IPL_DEVICE
-	.quad	0			# INITRD_START
-	.quad	0			# INITRD_SIZE
-
-	.org	COMMAND_LINE
-	.byte	"root=/dev/ram0 ro"
-	.byte	0
-
 	.org	0x11000
 
 startup_continue:
@@ -85,9 +62,9 @@ startup_continue:
 	clr	%r11,%r12
 	je	5f			# no more space in prefix array
 4:
-	ahi	%r8,1				# next cpu (r8 += 1)
-	cl	%r8,.Llast_cpu-.LPG1(%r13)	# is last possible cpu ?
-	jl	1b				# jump if not last cpu
+	ahi	%r8,1			# next cpu (r8 += 1)
+	chi	%r8,MAX_CPU_ADDRESS	# is last possible cpu ?
+	jle	1b			# jump if not last cpu
 5:
 	lhi	%r1,2			# mode 2 = esame (dump)
 	j	6f
@@ -109,17 +86,18 @@ startup_continue:
 	lctlg	%c0,%c15,.Lctl-.LPG1(%r13)	# load control registers
 	lg	%r12,.Lparmaddr-.LPG1(%r13)	# pointer to parameter area
 					# move IPL device to lowcore
-	mvc	__LC_IPLDEV(4),IPL_DEVICE+4-PARMAREA(%r12)
+	lghi	%r0,__LC_PASTE
+	stg	%r0,__LC_VDSO_PER_CPU
 #
 # Setup stack
 #
 	larl	%r15,init_thread_union
+	stg	%r15,__LC_THREAD_INFO	# cache thread info in lowcore
 	lg	%r14,__TI_task(%r15)	# cache current in lowcore
 	stg	%r14,__LC_CURRENT
 	aghi	%r15,1<<(PAGE_SHIFT+THREAD_ORDER) # init_task_union + THREAD_SIZE
 	stg	%r15,__LC_KERNEL_STACK	# set end of kernel stack
 	aghi	%r15,-160
-	xc	__SF_BACKCHAIN(4,%r15),__SF_BACKCHAIN(%r15) # clear backchain
 #
 # Save ipl parameters, clear bss memory, initialize storage key for kernel pages,
 # and create a kernel NSS if the SAVESYS= parm is defined
@@ -152,8 +130,6 @@ startup_continue:
 #ifdef CONFIG_ZFCPDUMP
 .Lcurrent_cpu:
 	.long 0x0
-.Llast_cpu:
-	.long 0x0000ffff
 .Lpref_arr_ptr:
 	.long zfcpdump_prefix_array
 #endif /* CONFIG_ZFCPDUMP */

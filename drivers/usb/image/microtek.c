@@ -350,17 +350,16 @@ static int mts_scsi_abort(struct scsi_cmnd *srb)
 static int mts_scsi_host_reset(struct scsi_cmnd *srb)
 {
 	struct mts_desc* desc = (struct mts_desc*)(srb->device->host->hostdata[0]);
-	int result, rc;
+	int result;
 
 	MTS_DEBUG_GOT_HERE();
 	mts_debug_dump(desc);
 
-	rc = usb_lock_device_for_reset(desc->usb_dev, desc->usb_intf);
-	if (rc < 0)
-		return FAILED;
-	result = usb_reset_device(desc->usb_dev);
-	if (rc)
+	result = usb_lock_device_for_reset(desc->usb_dev, desc->usb_intf);
+	if (result == 0) {
+		result = usb_reset_device(desc->usb_dev);
 		usb_unlock_device(desc->usb_dev);
+	}
 	return result ? FAILED : SUCCESS;
 }
 
@@ -654,33 +653,6 @@ static struct scsi_host_template mts_scsi_host_template = {
 	.max_sectors=		256, /* 128 K */
 };
 
-struct vendor_product
-{
-	char* name;
-	enum
-	{
-		mts_sup_unknown=0,
-		mts_sup_alpha,
-		mts_sup_full
-	}
-	support_status;
-} ;
-
-
-/* These are taken from the msmUSB.inf file on the Windows driver CD */
-static const struct vendor_product mts_supported_products[] =
-{
-	{ "Phantom 336CX",	mts_sup_unknown},
-	{ "Phantom 336CX",	mts_sup_unknown},
-	{ "Scanmaker X6",	mts_sup_alpha},
-	{ "Phantom C6",		mts_sup_unknown},
-	{ "Phantom 336CX",	mts_sup_unknown},
-	{ "ScanMaker V6USL",	mts_sup_unknown},
-	{ "ScanMaker V6USL",	mts_sup_unknown},
-	{ "Scanmaker V6UL",	mts_sup_unknown},
-	{ "Scanmaker V6UPL",	mts_sup_alpha},
-};
-
 /* The entries of microtek_table must correspond, line-by-line to
    the entries of mts_supported_products[]. */
 
@@ -712,7 +684,6 @@ static int mts_usb_probe(struct usb_interface *intf,
 	int err_retval = -ENOMEM;
 
 	struct mts_desc * new_desc;
-	struct vendor_product const* p;
 	struct usb_device *dev = interface_to_usbdev (intf);
 
 	/* the current altsetting on the interface we're probing */
@@ -726,15 +697,6 @@ static int mts_usb_probe(struct usb_interface *intf,
 		   le16_to_cpu(dev->descriptor.idVendor) );
 
 	MTS_DEBUG_GOT_HERE();
-
-	p = &mts_supported_products[id - mts_usb_ids];
-
-	MTS_DEBUG_GOT_HERE();
-
-	MTS_DEBUG( "found model %s\n", p->name );
-	if ( p->support_status != mts_sup_full )
-		MTS_MESSAGE( "model %s is not known to be fully supported, reports welcome!\n",
-			     p->name );
 
 	/* the current altsetting on the interface we're probing */
 	altsetting = intf->cur_altsetting;

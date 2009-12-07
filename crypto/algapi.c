@@ -21,15 +21,15 @@
 
 #include "internal.h"
 
+static void crypto_remove_final(struct list_head *list);
+
 static LIST_HEAD(crypto_template_list);
 
 void crypto_larval_error(const char *name, u32 type, u32 mask)
 {
 	struct crypto_alg *alg;
 
-	down_read(&crypto_alg_sem);
-	alg = __crypto_alg_lookup(name, type, mask);
-	up_read(&crypto_alg_sem);
+	alg = crypto_alg_lookup(name, type, mask);
 
 	if (alg) {
 		if (crypto_is_larval(alg)) {
@@ -81,15 +81,34 @@ static void crypto_destroy_instance(struct crypto_alg *alg)
 	crypto_tmpl_put(tmpl);
 }
 
+static struct list_head *crypto_more_spawns(struct crypto_alg *alg,
+					    struct list_head *stack,
+					    struct list_head *top,
+					    struct list_head *secondary_spawns)
+{
+	struct crypto_spawn *spawn, *n;
+
+	if (list_empty(stack))
+		return NULL;
+
+	spawn = list_first_entry(stack, struct crypto_spawn, list);
+	n = list_entry(spawn->list.next, struct crypto_spawn, list);
+
+	if (spawn->alg && &n->list != stack && !n->alg)
+		n->alg = (n->list.next == stack) ? alg :
+			 &list_entry(n->list.next, struct crypto_spawn,
+				     list)->inst->alg;
+
+	list_move(&spawn->list, secondary_spawns);
+
+	return &n->list == stack ? top : &n->inst->alg.cra_users;
+}
+
 static void crypto_remove_spawn(struct crypto_spawn *spawn,
-				struct list_head *list,
-				struct list_head *secondary_spawns)
+				struct list_head *list)
 {
 	struct crypto_instance *inst = spawn->inst;
 	struct crypto_template *tmpl = inst->tmpl;
-
-	list_del_init(&spawn->list);
-	spawn->alg = NULL;
 
 	if (crypto_is_dead(&inst->alg))
 		return;
@@ -106,45 +125,153 @@ static void crypto_remove_spawn(struct crypto_spawn *spawn,
 	hlist_del(&inst->list);
 	inst->alg.cra_destroy = crypto_destroy_instance;
 
-	list_splice(&inst->alg.cra_users, secondary_spawns);
+	BUG_ON(!list_empty(&inst->alg.cra_users));
 }
 
-static void crypto_remove_spawns(struct list_head *spawns,
-				 struct list_head *list, u32 new_type)
+static void crypto_remove_spawns(struct crypto_alg *alg,
+				 struct list_head *list,
+				 struct crypto_alg *nalg)
 {
+	u32 new_type = (nalg ?: alg)->cra_flags;
 	struct crypto_spawn *spawn, *n;
 	LIST_HEAD(secondary_spawns);
+	struct list_head *spawns;
+	LIST_HEAD(stack);
+	LIST_HEAD(top);
 
+	spawns = &alg->cra_users;
 	list_for_each_entry_safe(spawn, n, spawns, list) {
 		if ((spawn->alg->cra_flags ^ new_type) & spawn->mask)
 			continue;
 
-		crypto_remove_spawn(spawn, list, &secondary_spawns);
+		list_move(&spawn->list, &top);
 	}
 
-	while (!list_empty(&secondary_spawns)) {
-		list_for_each_entry_safe(spawn, n, &secondary_spawns, list)
-			crypto_remove_spawn(spawn, list, &secondary_spawns);
+	spawns = &top;
+	do {
+		while (!list_empty(spawns)) {
+			struct crypto_instance *inst;
+
+			spawn = list_first_entry(spawns, struct crypto_spawn,
+						 list);
+			inst = spawn->inst;
+
+			BUG_ON(&inst->alg == alg);
+
+			list_move(&spawn->list, &stack);
+
+			if (&inst->alg == nalg)
+				break;
+
+			spawn->alg = NULL;
+			spawns = &inst->alg.cra_users;
+		}
+	} while ((spawns = crypto_more_spawns(alg, &stack, &top,
+					      &secondary_spawns)));
+
+	list_for_each_entry_safe(spawn, n, &secondary_spawns, list) {
+		if (spawn->alg)
+			list_move(&spawn->list, &spawn->alg->cra_users);
+		else
+			crypto_remove_spawn(spawn, list);
 	}
 }
 
-static int __crypto_register_alg(struct crypto_alg *alg,
-				 struct list_head *list)
+static struct crypto_larval *__crypto_register_alg(struct crypto_alg *alg)
 {
 	struct crypto_alg *q;
+	struct crypto_larval *larval;
 	int ret = -EAGAIN;
 
 	if (crypto_is_dead(alg))
-		goto out;
+		goto err;
 
 	INIT_LIST_HEAD(&alg->cra_users);
+
+	/* No cheating! */
+	alg->cra_flags &= ~CRYPTO_ALG_TESTED;
 
 	ret = -EEXIST;
 
 	atomic_set(&alg->cra_refcnt, 1);
 	list_for_each_entry(q, &crypto_alg_list, cra_list) {
 		if (q == alg)
-			goto out;
+			goto err;
+
+		if (crypto_is_moribund(q))
+			continue;
+
+		if (crypto_is_larval(q)) {
+			if (!strcmp(alg->cra_driver_name, q->cra_driver_name))
+				goto err;
+			continue;
+		}
+
+		if (!strcmp(q->cra_driver_name, alg->cra_name) ||
+		    !strcmp(q->cra_name, alg->cra_driver_name))
+			goto err;
+	}
+
+	larval = crypto_larval_alloc(alg->cra_name,
+				     alg->cra_flags | CRYPTO_ALG_TESTED, 0);
+	if (IS_ERR(larval))
+		goto out;
+
+	ret = -ENOENT;
+	larval->adult = crypto_mod_get(alg);
+	if (!larval->adult)
+		goto free_larval;
+
+	atomic_set(&larval->alg.cra_refcnt, 1);
+	memcpy(larval->alg.cra_driver_name, alg->cra_driver_name,
+	       CRYPTO_MAX_ALG_NAME);
+	larval->alg.cra_priority = alg->cra_priority;
+
+	list_add(&alg->cra_list, &crypto_alg_list);
+	list_add(&larval->alg.cra_list, &crypto_alg_list);
+
+out:	
+	return larval;
+
+free_larval:
+	kfree(larval);
+err:
+	larval = ERR_PTR(ret);
+	goto out;
+}
+
+void crypto_alg_tested(const char *name, int err)
+{
+	struct crypto_larval *test;
+	struct crypto_alg *alg;
+	struct crypto_alg *q;
+	LIST_HEAD(list);
+
+	down_write(&crypto_alg_sem);
+	list_for_each_entry(q, &crypto_alg_list, cra_list) {
+		if (crypto_is_moribund(q) || !crypto_is_larval(q))
+			continue;
+
+		test = (struct crypto_larval *)q;
+
+		if (!strcmp(q->cra_driver_name, name))
+			goto found;
+	}
+
+	printk(KERN_ERR "alg: Unexpected test result for %s: %d\n", name, err);
+	goto unlock;
+
+found:
+	q->cra_flags |= CRYPTO_ALG_DEAD;
+	alg = test->adult;
+	if (err || list_empty(&alg->cra_list))
+		goto complete;
+
+	alg->cra_flags |= CRYPTO_ALG_TESTED;
+
+	list_for_each_entry(q, &crypto_alg_list, cra_list) {
+		if (q == alg)
+			continue;
 
 		if (crypto_is_moribund(q))
 			continue;
@@ -180,17 +307,18 @@ static int __crypto_register_alg(struct crypto_alg *alg,
 		    q->cra_priority > alg->cra_priority)
 			continue;
 
-		crypto_remove_spawns(&q->cra_users, list, alg->cra_flags);
+		crypto_remove_spawns(q, &list, alg);
 	}
-	
-	list_add(&alg->cra_list, &crypto_alg_list);
 
-	crypto_notify(CRYPTO_MSG_ALG_REGISTER, alg);
-	ret = 0;
+complete:
+	complete_all(&test->completion);
 
-out:	
-	return ret;
+unlock:
+	up_write(&crypto_alg_sem);
+
+	crypto_remove_final(&list);
 }
+EXPORT_SYMBOL_GPL(crypto_alg_tested);
 
 static void crypto_remove_final(struct list_head *list)
 {
@@ -203,9 +331,27 @@ static void crypto_remove_final(struct list_head *list)
 	}
 }
 
+static void crypto_wait_for_test(struct crypto_larval *larval)
+{
+	int err;
+
+	err = crypto_probing_notify(CRYPTO_MSG_ALG_REGISTER, larval->adult);
+	if (err != NOTIFY_STOP) {
+		if (WARN_ON(err != NOTIFY_DONE))
+			goto out;
+		crypto_alg_tested(larval->alg.cra_driver_name, 0);
+	}
+
+	err = wait_for_completion_interruptible(&larval->completion);
+	WARN_ON(err);
+
+out:
+	crypto_larval_kill(&larval->alg);
+}
+
 int crypto_register_alg(struct crypto_alg *alg)
 {
-	LIST_HEAD(list);
+	struct crypto_larval *larval;
 	int err;
 
 	err = crypto_check_alg(alg);
@@ -213,11 +359,14 @@ int crypto_register_alg(struct crypto_alg *alg)
 		return err;
 
 	down_write(&crypto_alg_sem);
-	err = __crypto_register_alg(alg, &list);
+	larval = __crypto_register_alg(alg);
 	up_write(&crypto_alg_sem);
 
-	crypto_remove_final(&list);
-	return err;
+	if (IS_ERR(larval))
+		return PTR_ERR(larval);
+
+	crypto_wait_for_test(larval);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(crypto_register_alg);
 
@@ -230,7 +379,7 @@ static int crypto_remove_alg(struct crypto_alg *alg, struct list_head *list)
 
 	crypto_notify(CRYPTO_MSG_ALG_UNREGISTER, alg);
 	list_del_init(&alg->cra_list);
-	crypto_remove_spawns(&alg->cra_users, list, alg->cra_flags);
+	crypto_remove_spawns(alg, list, NULL);
 
 	return 0;
 }
@@ -335,8 +484,8 @@ EXPORT_SYMBOL_GPL(crypto_lookup_template);
 int crypto_register_instance(struct crypto_template *tmpl,
 			     struct crypto_instance *inst)
 {
-	LIST_HEAD(list);
-	int err = -EINVAL;
+	struct crypto_larval *larval;
+	int err;
 
 	err = crypto_check_alg(&inst->alg);
 	if (err)
@@ -346,8 +495,8 @@ int crypto_register_instance(struct crypto_template *tmpl,
 
 	down_write(&crypto_alg_sem);
 
-	err = __crypto_register_alg(&inst->alg, &list);
-	if (err)
+	larval = __crypto_register_alg(&inst->alg);
+	if (IS_ERR(larval))
 		goto unlock;
 
 	hlist_add_head(&inst->list, &tmpl->instances);
@@ -356,7 +505,12 @@ int crypto_register_instance(struct crypto_template *tmpl,
 unlock:
 	up_write(&crypto_alg_sem);
 
-	crypto_remove_final(&list);
+	err = PTR_ERR(larval);
+	if (IS_ERR(larval))
+		goto err;
+
+	crypto_wait_for_test(larval);
+	err = 0;
 
 err:
 	return err;
@@ -383,20 +537,38 @@ int crypto_init_spawn(struct crypto_spawn *spawn, struct crypto_alg *alg,
 }
 EXPORT_SYMBOL_GPL(crypto_init_spawn);
 
+int crypto_init_spawn2(struct crypto_spawn *spawn, struct crypto_alg *alg,
+		       struct crypto_instance *inst,
+		       const struct crypto_type *frontend)
+{
+	int err = -EINVAL;
+
+	if (frontend && (alg->cra_flags ^ frontend->type) & frontend->maskset)
+		goto out;
+
+	spawn->frontend = frontend;
+	err = crypto_init_spawn(spawn, alg, inst, frontend->maskset);
+
+out:
+	return err;
+}
+EXPORT_SYMBOL_GPL(crypto_init_spawn2);
+
 void crypto_drop_spawn(struct crypto_spawn *spawn)
 {
+	if (!spawn->alg)
+		return;
+
 	down_write(&crypto_alg_sem);
 	list_del(&spawn->list);
 	up_write(&crypto_alg_sem);
 }
 EXPORT_SYMBOL_GPL(crypto_drop_spawn);
 
-struct crypto_tfm *crypto_spawn_tfm(struct crypto_spawn *spawn, u32 type,
-				    u32 mask)
+static struct crypto_alg *crypto_spawn_alg(struct crypto_spawn *spawn)
 {
 	struct crypto_alg *alg;
 	struct crypto_alg *alg2;
-	struct crypto_tfm *tfm;
 
 	down_read(&crypto_alg_sem);
 	alg = spawn->alg;
@@ -410,6 +582,19 @@ struct crypto_tfm *crypto_spawn_tfm(struct crypto_spawn *spawn, u32 type,
 			crypto_shoot_alg(alg);
 		return ERR_PTR(-EAGAIN);
 	}
+
+	return alg;
+}
+
+struct crypto_tfm *crypto_spawn_tfm(struct crypto_spawn *spawn, u32 type,
+				    u32 mask)
+{
+	struct crypto_alg *alg;
+	struct crypto_tfm *tfm;
+
+	alg = crypto_spawn_alg(spawn);
+	if (IS_ERR(alg))
+		return ERR_CAST(alg);
 
 	tfm = ERR_PTR(-EINVAL);
 	if (unlikely((alg->cra_flags ^ type) & mask))
@@ -426,6 +611,27 @@ out_put_alg:
 	return tfm;
 }
 EXPORT_SYMBOL_GPL(crypto_spawn_tfm);
+
+void *crypto_spawn_tfm2(struct crypto_spawn *spawn)
+{
+	struct crypto_alg *alg;
+	struct crypto_tfm *tfm;
+
+	alg = crypto_spawn_alg(spawn);
+	if (IS_ERR(alg))
+		return ERR_CAST(alg);
+
+	tfm = crypto_create_tfm(alg, spawn->frontend);
+	if (IS_ERR(tfm))
+		goto out_put_alg;
+
+	return tfm;
+
+out_put_alg:
+	crypto_mod_put(alg);
+	return tfm;
+}
+EXPORT_SYMBOL_GPL(crypto_spawn_tfm2);
 
 int crypto_register_notifier(struct notifier_block *nb)
 {
@@ -490,7 +696,9 @@ const char *crypto_attr_alg_name(struct rtattr *rta)
 }
 EXPORT_SYMBOL_GPL(crypto_attr_alg_name);
 
-struct crypto_alg *crypto_attr_alg(struct rtattr *rta, u32 type, u32 mask)
+struct crypto_alg *crypto_attr_alg2(struct rtattr *rta,
+				    const struct crypto_type *frontend,
+				    u32 type, u32 mask)
 {
 	const char *name;
 	int err;
@@ -500,9 +708,9 @@ struct crypto_alg *crypto_attr_alg(struct rtattr *rta, u32 type, u32 mask)
 	if (IS_ERR(name))
 		return ERR_PTR(err);
 
-	return crypto_alg_mod_lookup(name, type, mask);
+	return crypto_find_alg(name, frontend, type, mask);
 }
-EXPORT_SYMBOL_GPL(crypto_attr_alg);
+EXPORT_SYMBOL_GPL(crypto_attr_alg2);
 
 int crypto_attr_u32(struct rtattr *rta, u32 *num)
 {
@@ -522,16 +730,19 @@ int crypto_attr_u32(struct rtattr *rta, u32 *num)
 }
 EXPORT_SYMBOL_GPL(crypto_attr_u32);
 
-struct crypto_instance *crypto_alloc_instance(const char *name,
-					      struct crypto_alg *alg)
+void *crypto_alloc_instance2(const char *name, struct crypto_alg *alg,
+			     unsigned int head)
 {
 	struct crypto_instance *inst;
-	struct crypto_spawn *spawn;
+	char *p;
 	int err;
 
-	inst = kzalloc(sizeof(*inst) + sizeof(*spawn), GFP_KERNEL);
-	if (!inst)
+	p = kzalloc(head + sizeof(*inst) + sizeof(struct crypto_spawn),
+		    GFP_KERNEL);
+	if (!p)
 		return ERR_PTR(-ENOMEM);
+
+	inst = (void *)(p + head);
 
 	err = -ENAMETOOLONG;
 	if (snprintf(inst->alg.cra_name, CRYPTO_MAX_ALG_NAME, "%s(%s)", name,
@@ -541,6 +752,25 @@ struct crypto_instance *crypto_alloc_instance(const char *name,
 	if (snprintf(inst->alg.cra_driver_name, CRYPTO_MAX_ALG_NAME, "%s(%s)",
 		     name, alg->cra_driver_name) >= CRYPTO_MAX_ALG_NAME)
 		goto err_free_inst;
+
+	return p;
+
+err_free_inst:
+	kfree(p);
+	return ERR_PTR(err);
+}
+EXPORT_SYMBOL_GPL(crypto_alloc_instance2);
+
+struct crypto_instance *crypto_alloc_instance(const char *name,
+					      struct crypto_alg *alg)
+{
+	struct crypto_instance *inst;
+	struct crypto_spawn *spawn;
+	int err;
+
+	inst = crypto_alloc_instance2(name, alg, 0);
+	if (IS_ERR(inst))
+		goto out;
 
 	spawn = crypto_instance_ctx(inst);
 	err = crypto_init_spawn(spawn, alg, inst,
@@ -553,7 +783,10 @@ struct crypto_instance *crypto_alloc_instance(const char *name,
 
 err_free_inst:
 	kfree(inst);
-	return ERR_PTR(err);
+	inst = ERR_PTR(err);
+
+out:
+	return inst;
 }
 EXPORT_SYMBOL_GPL(crypto_alloc_instance);
 
@@ -587,7 +820,7 @@ out:
 }
 EXPORT_SYMBOL_GPL(crypto_enqueue_request);
 
-struct crypto_async_request *crypto_dequeue_request(struct crypto_queue *queue)
+void *__crypto_dequeue_request(struct crypto_queue *queue, unsigned int offset)
 {
 	struct list_head *request;
 
@@ -602,7 +835,14 @@ struct crypto_async_request *crypto_dequeue_request(struct crypto_queue *queue)
 	request = queue->list.next;
 	list_del(request);
 
-	return list_entry(request, struct crypto_async_request, list);
+	return (char *)list_entry(request, struct crypto_async_request, list) -
+	       offset;
+}
+EXPORT_SYMBOL_GPL(__crypto_dequeue_request);
+
+struct crypto_async_request *crypto_dequeue_request(struct crypto_queue *queue)
+{
+	return __crypto_dequeue_request(queue, 0);
 }
 EXPORT_SYMBOL_GPL(crypto_dequeue_request);
 

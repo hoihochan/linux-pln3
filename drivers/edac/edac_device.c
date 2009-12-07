@@ -333,7 +333,7 @@ static int add_edac_dev_to_global_list(struct edac_device_ctl_info *edac_dev)
 fail0:
 	edac_printk(KERN_WARNING, EDAC_MC,
 			"%s (%s) %s %s already assigned %d\n",
-			rover->dev->bus_id, edac_dev_name(rover),
+			dev_name(rover->dev), edac_dev_name(rover),
 			rover->mod_name, rover->ctl_name, rover->dev_idx);
 	return 1;
 
@@ -356,7 +356,6 @@ static void complete_edac_device_list_del(struct rcu_head *head)
 
 	edac_dev = container_of(head, struct edac_device_ctl_info, rcu);
 	INIT_LIST_HEAD(&edac_dev->link);
-	complete(&edac_dev->removal_complete);
 }
 
 /*
@@ -369,10 +368,8 @@ static void del_edac_device_from_global_list(struct edac_device_ctl_info
 						*edac_device)
 {
 	list_del_rcu(&edac_device->link);
-
-	init_completion(&edac_device->removal_complete);
 	call_rcu(&edac_device->rcu, complete_edac_device_list_del);
-	wait_for_completion(&edac_device->removal_complete);
+	rcu_barrier();
 }
 
 /*
@@ -389,10 +386,16 @@ static void del_edac_device_from_global_list(struct edac_device_ctl_info
  */
 static void edac_device_workq_function(struct work_struct *work_req)
 {
-	struct delayed_work *d_work = (struct delayed_work *)work_req;
+	struct delayed_work *d_work = to_delayed_work(work_req);
 	struct edac_device_ctl_info *edac_dev = to_edac_device_ctl_work(d_work);
 
 	mutex_lock(&device_ctls_mutex);
+
+	/* If we are being removed, bail out immediately */
+	if (edac_dev->op_state == OP_OFFLINE) {
+		mutex_unlock(&device_ctls_mutex);
+		return;
+	}
 
 	/* Only poll controllers that are running polled and have a check */
 	if ((edac_dev->op_state == OP_RUNNING_POLL) &&
@@ -483,6 +486,20 @@ void edac_device_reset_delay_period(struct edac_device_ctl_info *edac_dev,
 
 	mutex_unlock(&device_ctls_mutex);
 }
+
+/*
+ * edac_device_alloc_index: Allocate a unique device index number
+ *
+ * Return:
+ *	allocated index number
+ */
+int edac_device_alloc_index(void)
+{
+	static atomic_t device_indexes = ATOMIC_INIT(0);
+
+	return atomic_inc_return(&device_indexes) - 1;
+}
+EXPORT_SYMBOL_GPL(edac_device_alloc_index);
 
 /**
  * edac_device_add_device: Insert the 'edac_dev' structure into the
@@ -585,13 +602,13 @@ struct edac_device_ctl_info *edac_device_del_device(struct device *dev)
 	/* mark this instance as OFFLINE */
 	edac_dev->op_state = OP_OFFLINE;
 
-	/* clear workq processing on this instance */
-	edac_device_workq_teardown(edac_dev);
-
 	/* deregister from global list */
 	del_edac_device_from_global_list(edac_dev);
 
 	mutex_unlock(&device_ctls_mutex);
+
+	/* clear workq processing on this instance */
+	edac_device_workq_teardown(edac_dev);
 
 	/* Tear down the sysfs entries for this instance */
 	edac_device_remove_sysfs(edac_dev);

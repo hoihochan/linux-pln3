@@ -1,5 +1,6 @@
 #include <linux/linkage.h>
 #include <linux/sched.h>
+#include <linux/smp.h>
 
 #include <asm/pmon.h>
 #include <asm/titan_dep.h>
@@ -96,11 +97,11 @@ static void yos_send_ipi_single(int cpu, unsigned int action)
 	}
 }
 
-static void yos_send_ipi_mask(cpumask_t mask, unsigned int action)
+static void yos_send_ipi_mask(const struct cpumask *mask, unsigned int action)
 {
 	unsigned int i;
 
-	for_each_cpu_mask(i, mask)
+	for_each_cpu(i, mask)
 		yos_send_ipi_single(i, action);
 }
 
@@ -141,7 +142,7 @@ static void __cpuinit yos_boot_secondary(int cpu, struct task_struct *idle)
 }
 
 /*
- * Detect available CPUs, populate phys_cpu_present_map before smp_init
+ * Detect available CPUs, populate cpu_possible_map before smp_init
  *
  * We don't want to start the secondary CPU yet nor do we have a nice probing
  * feature in PMON so we just assume presence of the secondary core.
@@ -150,10 +151,10 @@ static void __init yos_smp_setup(void)
 {
 	int i;
 
-	cpus_clear(phys_cpu_present_map);
+	cpus_clear(cpu_possible_map);
 
 	for (i = 0; i < 2; i++) {
-		cpu_set(i, phys_cpu_present_map);
+		cpu_set(i, cpu_possible_map);
 		__cpu_number_map[i]	= i;
 		__cpu_logical_map[i]	= i;
 	}

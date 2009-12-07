@@ -111,6 +111,9 @@ do {									\
 #define E1000_MIN_RXD                       80
 #define E1000_MAX_82544_RXD               4096
 
+#define E1000_MIN_ITR_USECS		10 /* 100000 irq/sec */
+#define E1000_MAX_ITR_USECS		10000 /* 100    irq/sec */
+
 /* this is the size past which hardware will drop packets when setting LPE=0 */
 #define MAXIMUM_ETHERNET_VLAN_SIZE 1522
 
@@ -137,7 +140,7 @@ do {									\
 #define E1000_FC_HIGH_DIFF 0x1638  /* High: 5688 bytes below Rx FIFO size */
 #define E1000_FC_LOW_DIFF 0x1640   /* Low:  5696 bytes below Rx FIFO size */
 
-#define E1000_FC_PAUSE_TIME 0x0680 /* 858 usec */
+#define E1000_FC_PAUSE_TIME 0xFFFF /* pause for the max or until send xon */
 
 /* How many Tx Descriptors do we need to call netif_wake_queue ? */
 #define E1000_TX_QUEUE_WAKE	16
@@ -146,7 +149,6 @@ do {									\
 
 #define AUTO_ALL_MODES            0
 #define E1000_EEPROM_82544_APM    0x0004
-#define E1000_EEPROM_ICH8_APME    0x0004
 #define E1000_EEPROM_APME         0x0400
 
 #ifndef E1000_MASTER_SLAVE
@@ -155,25 +157,16 @@ do {									\
 #endif
 
 #define E1000_MNG_VLAN_NONE (-1)
-/* Number of packet split data buffers (not including the header buffer) */
-#define PS_PAGE_BUFFERS (MAX_PS_BUFFERS - 1)
 
 /* wrapper around a pointer to a socket buffer,
  * so a DMA handle can be stored along with the buffer */
 struct e1000_buffer {
 	struct sk_buff *skb;
 	dma_addr_t dma;
+	struct page *page;
 	unsigned long time_stamp;
 	u16 length;
 	u16 next_to_watch;
-};
-
-struct e1000_ps_page {
-	struct page *ps_page[PS_PAGE_BUFFERS];
-};
-
-struct e1000_ps_page_dma {
-	u64 ps_page_dma[PS_PAGE_BUFFERS];
 };
 
 struct e1000_tx_ring {
@@ -192,7 +185,6 @@ struct e1000_tx_ring {
 	/* array of buffer information structs */
 	struct e1000_buffer *buffer_info;
 
-	spinlock_t tx_lock;
 	u16 tdh;
 	u16 tdt;
 	bool last_tx_tso;
@@ -213,9 +205,7 @@ struct e1000_rx_ring {
 	unsigned int next_to_clean;
 	/* array of buffer information structs */
 	struct e1000_buffer *buffer_info;
-	/* arrays of page information for packet split */
-	struct e1000_ps_page *ps_page;
-	struct e1000_ps_page_dma *ps_page_dma;
+	struct sk_buff *rx_skb_top;
 
 	/* cpu for rx queue */
 	int cpu;
@@ -228,8 +218,6 @@ struct e1000_rx_ring {
 	((((R)->next_to_clean > (R)->next_to_use)			\
 	  ? 0 : (R)->count) + (R)->next_to_clean - (R)->next_to_use - 1)
 
-#define E1000_RX_DESC_PS(R, i)						\
-	(&(((union e1000_rx_desc_packet_split *)((R).desc))[i]))
 #define E1000_RX_DESC_EXT(R, i)						\
 	(&(((union e1000_rx_desc_extended *)((R).desc))[i]))
 #define E1000_GET_DESC(R, i, type)	(&(((struct type *)((R).desc))[i]))
@@ -253,7 +241,6 @@ struct e1000_adapter {
 	u16 link_speed;
 	u16 link_duplex;
 	spinlock_t stats_lock;
-	spinlock_t tx_queue_lock;
 	unsigned int total_tx_bytes;
 	unsigned int total_tx_packets;
 	unsigned int total_rx_bytes;
@@ -299,22 +286,18 @@ struct e1000_adapter {
 			     int cleaned_count);
 	struct e1000_rx_ring *rx_ring;      /* One per active queue */
 	struct napi_struct napi;
-	struct net_device *polling_netdev;  /* One per active queue */
 
 	int num_tx_queues;
 	int num_rx_queues;
 
 	u64 hw_csum_err;
 	u64 hw_csum_good;
-	u64 rx_hdr_split;
 	u32 alloc_rx_buff_failed;
 	u32 rx_int_delay;
 	u32 rx_abs_int_delay;
 	bool rx_csum;
-	unsigned int rx_ps_pages;
 	u32 gorcl;
 	u64 gorcl_old;
-	u16 rx_ps_bsize0;
 
 	/* OS defined structs */
 	struct net_device *netdev;
@@ -332,7 +315,6 @@ struct e1000_adapter {
 	struct e1000_rx_ring test_rx_ring;
 
 	int msg_enable;
-	bool have_msi;
 
 	/* to not mess up cache alignment, always add to the bottom */
 	bool tso_force;

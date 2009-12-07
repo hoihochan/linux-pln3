@@ -75,6 +75,7 @@ static struct console bios_console = {
 #endif
 
 static struct uart_port scif_port = {
+	.type		= PORT_SCIF,
 	.mapbase	= CONFIG_EARLY_SCIF_CONSOLE_PORT,
 	.membase	= (char __iomem *)CONFIG_EARLY_SCIF_CONSOLE_PORT,
 };
@@ -84,9 +85,9 @@ static void scif_sercon_putc(int c)
 	while (((sci_in(&scif_port, SCFDR) & EPK_FIFO_BITS) >= EPK_FIFO_SIZE))
 		;
 
-	sci_out(&scif_port, SCxTDR, c);
 	sci_in(&scif_port, SCxSR);
 	sci_out(&scif_port, SCxSR, 0xf3 & ~(0x20 | 0x40));
+	sci_out(&scif_port, SCxTDR, c);
 
 	while ((sci_in(&scif_port, SCxSR) & 0x40) == 0)
 		;
@@ -133,7 +134,7 @@ static void scif_sercon_init(char *s)
 	sci_out(&scif_port, SCFCR, 0x0030);	/* TTRG=b'11 */
 	sci_out(&scif_port, SCSCR, 0x0030);	/* TE, RE */
 }
-#elif defined(CONFIG_CPU_SH4)
+#elif defined(CONFIG_CPU_SH4) || defined(CONFIG_CPU_SH3)
 #define DEFAULT_BAUD 115200
 /*
  * Simple SCIF init, primarily aimed at SH7750 and other similar SH-4
@@ -219,8 +220,7 @@ static int __init setup_early_printk(char *buf)
 		early_console = &scif_console;
 
 #if !defined(CONFIG_SH_STANDARD_BIOS)
-#if defined(CONFIG_CPU_SH4) || defined(CONFIG_CPU_SUBTYPE_SH7720) || \
-    defined(CONFIG_CPU_SUBTYPE_SH7721)
+#if defined(CONFIG_CPU_SH4) || defined(CONFIG_CPU_SH3)
 		scif_sercon_init(buf + 6);
 #endif
 #endif

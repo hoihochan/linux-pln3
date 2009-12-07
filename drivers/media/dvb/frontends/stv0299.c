@@ -559,6 +559,8 @@ static int stv0299_set_frontend(struct dvb_frontend* fe, struct dvb_frontend_par
 	int invval = 0;
 
 	dprintk ("%s : FE_SET_FRONTEND\n", __func__);
+	if (state->config->set_ts_params)
+		state->config->set_ts_params(fe, 0);
 
 	// set the inversion
 	if (p->inversion == INVERSION_OFF) invval = 0;
@@ -665,7 +667,7 @@ struct dvb_frontend* stv0299_attach(const struct stv0299_config* config,
 	int id;
 
 	/* allocate memory for the internal state */
-	state = kmalloc(sizeof(struct stv0299_state), GFP_KERNEL);
+	state = kzalloc(sizeof(struct stv0299_state), GFP_KERNEL);
 	if (state == NULL) goto error;
 
 	/* setup the state */

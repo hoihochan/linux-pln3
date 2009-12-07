@@ -14,18 +14,6 @@
 
 #define AT_VECTOR_SIZE_ARCH 5 /* entries in ARCH_DLINFO */
 
-#if defined(CONFIG_CPU_SH4A) || defined(CONFIG_CPU_SH5)
-#define __icbi()			\
-{					\
-	unsigned long __addr;		\
-	__addr = 0xa8000000;		\
-	__asm__ __volatile__(		\
-		"icbi   %0\n\t"		\
-		: /* no output */	\
-		: "m" (__m(__addr)));	\
-}
-#endif
-
 /*
  * A brief note on ctrl_barrier(), the control register write barrier.
  *
@@ -44,7 +32,7 @@
 #define mb()		__asm__ __volatile__ ("synco": : :"memory")
 #define rmb()		mb()
 #define wmb()		__asm__ __volatile__ ("synco": : :"memory")
-#define ctrl_barrier()	__icbi()
+#define ctrl_barrier()	__icbi(0xa8000000)
 #define read_barrier_depends()	do { } while(0)
 #else
 #define mb()		__asm__ __volatile__ ("": : :"memory")
@@ -70,6 +58,8 @@
 
 #ifdef CONFIG_GUSA_RB
 #include <asm/cmpxchg-grb.h>
+#elif defined(CONFIG_CPU_SH4A)
+#include <asm/cmpxchg-llsc.h>
 #else
 #include <asm/cmpxchg-irq.h>
 #endif
@@ -125,6 +115,8 @@ static inline unsigned long __cmpxchg(volatile void * ptr, unsigned long old,
   })
 
 extern void die(const char *str, struct pt_regs *regs, long err) __attribute__ ((noreturn));
+void free_initmem(void);
+void free_initrd_mem(unsigned long start, unsigned long end);
 
 extern void *set_exception_table_vec(unsigned int vec, void *handler);
 
@@ -149,6 +141,8 @@ extern unsigned long cached_to_uncached;
 extern struct dentry *sh_debugfs_root;
 
 void per_cpu_trap_init(void);
+void default_idle(void);
+void cpu_idle_wait(void);
 
 asmlinkage void break_point_trap(void);
 
@@ -171,14 +165,21 @@ asmlinkage void name##_trap_handler(unsigned int vec, struct pt_regs *regs)
 BUILD_TRAP_HANDLER(address_error);
 BUILD_TRAP_HANDLER(debug);
 BUILD_TRAP_HANDLER(bug);
+BUILD_TRAP_HANDLER(breakpoint);
+BUILD_TRAP_HANDLER(singlestep);
 BUILD_TRAP_HANDLER(fpu_error);
 BUILD_TRAP_HANDLER(fpu_state_restore);
+BUILD_TRAP_HANDLER(nmi);
+
+#ifdef CONFIG_BUG
+extern void handle_BUG(struct pt_regs *);
+#endif
 
 #define arch_align_stack(x) (x)
 
 struct mem_access {
-	unsigned long (*from)(void *dst, const void *src, unsigned long cnt);
-	unsigned long (*to)(void *dst, const void *src, unsigned long cnt);
+	unsigned long (*from)(void *dst, const void __user *src, unsigned long cnt);
+	unsigned long (*to)(void __user *dst, const void *src, unsigned long cnt);
 };
 
 #ifdef CONFIG_SUPERH32

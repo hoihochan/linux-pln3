@@ -132,7 +132,7 @@ static int slave_configure(struct scsi_device *sdev)
 
 		if (us->fflags & US_FL_MAX_SECTORS_MIN)
 			max_sectors = PAGE_CACHE_SIZE >> 9;
-		if (sdev->request_queue->max_sectors > max_sectors)
+		if (queue_max_sectors(sdev->request_queue) > max_sectors)
 			blk_queue_max_sectors(sdev->request_queue,
 					      max_sectors);
 	} else if (sdev->type == TYPE_TAPE) {
@@ -142,6 +142,14 @@ static int slave_configure(struct scsi_device *sdev)
 		 */
 		blk_queue_max_sectors(sdev->request_queue, 0x7FFFFF);
 	}
+
+	/* Some USB host controllers can't do DMA; they have to use PIO.
+	 * They indicate this by setting their dma_mask to NULL.  For
+	 * such controllers we need to make sure the block layer sets
+	 * up bounce buffers in addressable memory.
+	 */
+	if (!us->pusb_dev->bus->controller->dma_mask)
+		blk_queue_bounce_limit(sdev->request_queue, BLK_BOUNCE_HIGH);
 
 	/* We can't put these settings in slave_alloc() because that gets
 	 * called before the device type is known.  Consequently these
@@ -200,6 +208,10 @@ static int slave_configure(struct scsi_device *sdev)
 		 * The sd driver has to guess which is the case. */
 		if (us->fflags & US_FL_CAPACITY_HEURISTICS)
 			sdev->guess_capacity = 1;
+
+		/* assume SPC3 or latter devices support sense size > 18 */
+		if (sdev->scsi_level > SCSI_SPC_2)
+			us->fflags |= US_FL_SANE_SENSE;
 
 		/* Some devices report a SCSI revision level above 2 but are
 		 * unable to handle the REPORT LUNS command (for which
@@ -471,7 +483,7 @@ static ssize_t show_max_sectors(struct device *dev, struct device_attribute *att
 {
 	struct scsi_device *sdev = to_scsi_device(dev);
 
-	return sprintf(buf, "%u\n", sdev->request_queue->max_sectors);
+	return sprintf(buf, "%u\n", queue_max_sectors(sdev->request_queue));
 }
 
 /* Input routine for the sysfs max_sectors file */
@@ -557,4 +569,4 @@ unsigned char usb_stor_sense_invalidCDB[18] = {
 	[7]	= 0x0a,			    /* additional length */
 	[12]	= 0x24			    /* Invalid Field in CDB */
 };
-
+EXPORT_SYMBOL_GPL(usb_stor_sense_invalidCDB);

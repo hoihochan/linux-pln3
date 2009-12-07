@@ -294,6 +294,16 @@ out:
 	return ERR_PTR(err);
 }
 
+static const struct net_device_ops lance_netdev_ops = {
+	.ndo_open		= lance_open,
+	.ndo_stop		= lance_close,
+	.ndo_start_xmit		= lance_start_xmit,
+	.ndo_set_multicast_list	= set_multicast_list,
+	.ndo_set_mac_address	= NULL,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_validate_addr	= eth_validate_addr,
+};
+
 static int __init lance_probe( struct net_device *dev)
 {
 	unsigned long ioaddr;
@@ -303,7 +313,6 @@ static int __init lance_probe( struct net_device *dev)
 	static int 		did_version;
 	volatile unsigned short *ioaddr_probe;
 	unsigned short tmp1, tmp2;
-	DECLARE_MAC_BUF(mac);
 
 #ifdef CONFIG_SUN3
 	ioaddr = (unsigned long)ioremap(LANCE_OBIO, PAGE_SIZE);
@@ -379,7 +388,7 @@ static int __init lance_probe( struct net_device *dev)
 	MEM->init.hwaddr[4] = dev->dev_addr[5];
 	MEM->init.hwaddr[5] = dev->dev_addr[4];
 
-	printk("%s\n", print_mac(mac, dev->dev_addr));
+	printk("%pM\n", dev->dev_addr);
 
 	MEM->init.mode = 0x0000;
 	MEM->init.filter[0] = 0x00000000;
@@ -398,12 +407,7 @@ static int __init lance_probe( struct net_device *dev)
 	if (did_version++ == 0)
 		printk( version );
 
-	/* The LANCE-specific entries in the device structure. */
-	dev->open = &lance_open;
-	dev->hard_start_xmit = &lance_start_xmit;
-	dev->stop = &lance_close;
-	dev->set_multicast_list = &set_multicast_list;
-	dev->set_mac_address = NULL;
+	dev->netdev_ops = &lance_netdev_ops;
 //	KLUDGE -- REMOVE ME
 	set_bit(__LINK_STATE_PRESENT, &dev->state);
 
@@ -429,7 +433,7 @@ static int lance_open( struct net_device *dev )
 	while (--i > 0)
 		if (DREG & CSR0_IDON)
 			break;
-	if (i < 0 || (DREG & CSR0_ERR)) {
+	if (i <= 0 || (DREG & CSR0_ERR)) {
 		DPRINTK( 2, ( "lance_open(): opening %s failed, i=%d, csr0=%04x\n",
 					  dev->name, i, DREG ));
 		DREG = CSR0_STOP;
@@ -522,7 +526,7 @@ static int lance_start_xmit( struct sk_buff *skb, struct net_device *dev )
 	if (netif_queue_stopped(dev)) {
 		int tickssofar = jiffies - dev->trans_start;
 		if (tickssofar < 20)
-			return( 1 );
+			return NETDEV_TX_BUSY;
 
 		DPRINTK( 1, ( "%s: transmit timed out, status %04x, resetting.\n",
 					  dev->name, DREG ));
@@ -558,7 +562,7 @@ static int lance_start_xmit( struct sk_buff *skb, struct net_device *dev )
 		netif_start_queue(dev);
 		dev->trans_start = jiffies;
 
-		return 0;
+		return NETDEV_TX_OK;
 	}
 
 
@@ -573,7 +577,7 @@ static int lance_start_xmit( struct sk_buff *skb, struct net_device *dev )
 	if (test_and_set_bit( 0, (void*)&lp->lock ) != 0) {
 		printk( "%s: tx queue lock!.\n", dev->name);
 		/* don't clear dev->tbusy flag. */
-		return 1;
+		return NETDEV_TX_BUSY;
 	}
 
 	AREG = CSR0;
@@ -644,7 +648,7 @@ static int lance_start_xmit( struct sk_buff *skb, struct net_device *dev )
 
 	local_irq_restore(flags);
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /* The LANCE interrupt handler. */
@@ -824,12 +828,10 @@ static int lance_rx( struct net_device *dev )
 #if 0
 				if (lance_debug >= 3) {
 					u_char *data = PKTBUF_ADDR(head);
-					DECLARE_MAC_BUF(mac);
-					DECLARE_MAC_BUF(mac2)
 					printk("%s: RX pkt %d type 0x%04x"
-					       " from %s to %s",
+					       " from %pM to %pM",
 					       dev->name, lp->new_tx, ((u_short *)data)[6],
-					       print_mac(mac, &data[6]), print_mac(mac2, data));
+					       &data[6], data);
 
 					printk(" data %02x %02x %02x %02x %02x %02x %02x %02x "
 					       "len %d at %08x\n",
@@ -852,7 +854,6 @@ static int lance_rx( struct net_device *dev )
 
 				skb->protocol = eth_type_trans( skb, dev );
 				netif_rx( skb );
-				dev->last_rx = jiffies;
 				dev->stats.rx_packets++;
 				dev->stats.rx_bytes += pkt_len;
 			}

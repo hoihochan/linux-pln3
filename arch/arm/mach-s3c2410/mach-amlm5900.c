@@ -32,10 +32,12 @@
 #include <linux/list.h>
 #include <linux/timer.h>
 #include <linux/init.h>
+#include <linux/gpio.h>
 #include <linux/device.h>
 #include <linux/platform_device.h>
 #include <linux/proc_fs.h>
 #include <linux/serial_core.h>
+#include <linux/io.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
@@ -43,17 +45,17 @@
 #include <asm/mach/flash.h>
 
 #include <mach/hardware.h>
-#include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/mach-types.h>
 #include <mach/fb.h>
 
-#include <asm/plat-s3c/regs-serial.h>
+#include <plat/regs-serial.h>
 #include <mach/regs-lcd.h>
 #include <mach/regs-gpio.h>
 
-#include <asm/plat-s3c24xx/devs.h>
-#include <asm/plat-s3c24xx/cpu.h>
+#include <plat/iic.h>
+#include <plat/devs.h>
+#include <plat/cpu.h>
 
 #ifdef CONFIG_MTD_PARTITIONS
 
@@ -150,7 +152,7 @@ static struct platform_device *amlm5900_devices[] __initdata = {
 #endif
 	&s3c_device_adc,
 	&s3c_device_wdt,
-	&s3c_device_i2c,
+	&s3c_device_i2c0,
 	&s3c_device_usb,
  	&s3c_device_rtc,
 	&s3c_device_usbgadget,
@@ -223,8 +225,8 @@ static void amlm5900_init_pm(void)
 	} else {
 		enable_irq_wake(IRQ_EINT9);
 		/* configure the suspend/resume status pin */
-		s3c2410_gpio_cfgpin(S3C2410_GPF2, S3C2410_GPF2_OUTP);
-		s3c2410_gpio_pullup(S3C2410_GPF2, 0);
+		s3c2410_gpio_cfgpin(S3C2410_GPF(2), S3C2410_GPIO_OUTPUT);
+		s3c2410_gpio_pullup(S3C2410_GPF(2), 0);
 	}
 }
 static void __init amlm5900_init(void)
@@ -233,6 +235,7 @@ static void __init amlm5900_init(void)
 #ifdef CONFIG_FB_S3C2410
 	s3c24xx_fb_set_platdata(&amlm5900_fb_info);
 #endif
+	s3c_i2c0_set_platdata(NULL);
 	platform_add_devices(amlm5900_devices, ARRAY_SIZE(amlm5900_devices));
 }
 

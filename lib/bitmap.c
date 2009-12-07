@@ -179,14 +179,16 @@ void __bitmap_shift_left(unsigned long *dst,
 }
 EXPORT_SYMBOL(__bitmap_shift_left);
 
-void __bitmap_and(unsigned long *dst, const unsigned long *bitmap1,
+int __bitmap_and(unsigned long *dst, const unsigned long *bitmap1,
 				const unsigned long *bitmap2, int bits)
 {
 	int k;
 	int nr = BITS_TO_LONGS(bits);
+	unsigned long result = 0;
 
 	for (k = 0; k < nr; k++)
-		dst[k] = bitmap1[k] & bitmap2[k];
+		result |= (dst[k] = bitmap1[k] & bitmap2[k]);
+	return result != 0;
 }
 EXPORT_SYMBOL(__bitmap_and);
 
@@ -212,14 +214,16 @@ void __bitmap_xor(unsigned long *dst, const unsigned long *bitmap1,
 }
 EXPORT_SYMBOL(__bitmap_xor);
 
-void __bitmap_andnot(unsigned long *dst, const unsigned long *bitmap1,
+int __bitmap_andnot(unsigned long *dst, const unsigned long *bitmap1,
 				const unsigned long *bitmap2, int bits)
 {
 	int k;
 	int nr = BITS_TO_LONGS(bits);
+	unsigned long result = 0;
 
 	for (k = 0; k < nr; k++)
-		dst[k] = bitmap1[k] & ~bitmap2[k];
+		result |= (dst[k] = bitmap1[k] & ~bitmap2[k]);
+	return result != 0;
 }
 EXPORT_SYMBOL(__bitmap_andnot);
 
@@ -314,17 +318,6 @@ int bitmap_scnprintf(char *buf, unsigned int buflen,
 	return len;
 }
 EXPORT_SYMBOL(bitmap_scnprintf);
-
-/**
- * bitmap_scnprintf_len - return buffer length needed to convert
- * bitmap to an ASCII hex string
- * @nr_bits: number of bits to be converted
- */
-int bitmap_scnprintf_len(unsigned int nr_bits)
-{
-	unsigned int nr_nibbles = ALIGN(nr_bits, 4) / 4;
-	return nr_nibbles + ALIGN(nr_nibbles, CHUNKSZ / 4) / (CHUNKSZ / 4) - 1;
-}
 
 /**
  * __bitmap_parse - convert an ASCII hex string into a bitmap.
@@ -959,15 +952,15 @@ done:
  */
 int bitmap_find_free_region(unsigned long *bitmap, int bits, int order)
 {
-	int pos;		/* scans bitmap by regions of size order */
+	int pos, end;		/* scans bitmap by regions of size order */
 
-	for (pos = 0; pos < bits; pos += (1 << order))
-		if (__reg_op(bitmap, pos, order, REG_OP_ISFREE))
-			break;
-	if (pos == bits)
-		return -ENOMEM;
-	__reg_op(bitmap, pos, order, REG_OP_ALLOC);
-	return pos;
+	for (pos = 0 ; (end = pos + (1 << order)) <= bits; pos = end) {
+		if (!__reg_op(bitmap, pos, order, REG_OP_ISFREE))
+			continue;
+		__reg_op(bitmap, pos, order, REG_OP_ALLOC);
+		return pos;
+	}
+	return -ENOMEM;
 }
 EXPORT_SYMBOL(bitmap_find_free_region);
 
@@ -1007,3 +1000,25 @@ int bitmap_allocate_region(unsigned long *bitmap, int pos, int order)
 	return 0;
 }
 EXPORT_SYMBOL(bitmap_allocate_region);
+
+/**
+ * bitmap_copy_le - copy a bitmap, putting the bits into little-endian order.
+ * @dst:   destination buffer
+ * @src:   bitmap to copy
+ * @nbits: number of bits in the bitmap
+ *
+ * Require nbits % BITS_PER_LONG == 0.
+ */
+void bitmap_copy_le(void *dst, const unsigned long *src, int nbits)
+{
+	unsigned long *d = dst;
+	int i;
+
+	for (i = 0; i < nbits/BITS_PER_LONG; i++) {
+		if (BITS_PER_LONG == 64)
+			d[i] = cpu_to_le64(src[i]);
+		else
+			d[i] = cpu_to_le32(src[i]);
+	}
+}
+EXPORT_SYMBOL(bitmap_copy_le);

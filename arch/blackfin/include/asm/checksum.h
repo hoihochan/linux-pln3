@@ -1,9 +1,14 @@
+/*
+ * Copyright 2004-2009 Analog Devices Inc.
+ *                     akbar.hussain@lineo.com
+ *
+ * Licensed under the GPL-2 or later.
+ */
+
 #ifndef _BFIN_CHECKSUM_H
 #define _BFIN_CHECKSUM_H
 
 /*
- * MODIFIED FOR BFIN April 30, 2001 akbar.hussain@lineo.com
- *
  * computes the checksum of a memory block at buff, length len,
  * and adds in "sum" (32-bit)
  *
@@ -63,22 +68,23 @@ static inline __wsum
 csum_tcpudp_nofold(__be32 saddr, __be32 daddr, unsigned short len,
 		   unsigned short proto, __wsum sum)
 {
+	unsigned int carry;
 
-	__asm__ ("%0 = %0 + %1;\n\t"
-		 "CC = AC0;\n\t"
-		 "if !CC jump 4;\n\t"
-		 "%0 = %0 + %4;\n\t"
-		 "%0 = %0 + %2;\n\t"
-		 "CC = AC0;\n\t"
-                 "if !CC jump 4;\n\t"
-                 "%0 = %0 + %4;\n\t"
- 		 "%0 = %0 + %3;\n\t"
-		 "CC = AC0;\n\t"
-                 "if !CC jump 4;\n\t"
-                 "%0 = %0 + %4;\n\t"
-                 "NOP;\n\t"
- 		 : "=d" (sum)
-		 : "d" (daddr), "d" (saddr), "d" ((ntohs(len)<<16)+proto*256), "d" (1), "0"(sum));
+	__asm__ ("%0 = %0 + %2;\n\t"
+		"CC = AC0;\n\t"
+		"%1 = CC;\n\t"
+		"%0 = %0 + %1;\n\t"
+		"%0 = %0 + %3;\n\t"
+		"CC = AC0;\n\t"
+		"%1 = CC;\n\t"
+		"%0 = %0 + %1;\n\t"
+		"%0 = %0 + %4;\n\t"
+		"CC = AC0;\n\t"
+		"%1 = CC;\n\t"
+		"%0 = %0 + %1;\n\t"
+		: "=d" (sum), "=&d" (carry)
+		: "d" (daddr), "d" (saddr), "d" ((len + proto) << 8), "0"(sum)
+		: "CC");
 
 	return (sum);
 }

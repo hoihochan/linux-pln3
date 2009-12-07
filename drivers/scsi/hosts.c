@@ -40,7 +40,7 @@
 #include "scsi_logging.h"
 
 
-static int scsi_host_next_hn;		/* host_no for next new host */
+static atomic_t scsi_host_next_hn;	/* host_no for next new host */
 
 
 static void scsi_host_cls_release(struct device *dev)
@@ -164,8 +164,8 @@ void scsi_remove_host(struct Scsi_Host *shost)
 			return;
 		}
 	spin_unlock_irqrestore(shost->host_lock, flags);
-	mutex_unlock(&shost->scan_mutex);
 	scsi_forget_host(shost);
+	mutex_unlock(&shost->scan_mutex);
 	scsi_proc_host_rm(shost);
 
 	spin_lock_irqsave(shost->host_lock, flags);
@@ -176,7 +176,6 @@ void scsi_remove_host(struct Scsi_Host *shost)
 	transport_unregister_device(&shost->shost_gendev);
 	device_unregister(&shost->shost_dev);
 	device_del(&shost->shost_gendev);
-	scsi_proc_hostdir_rm(shost->hostt);
 }
 EXPORT_SYMBOL(scsi_remove_host);
 
@@ -270,6 +269,8 @@ static void scsi_host_dev_release(struct device *dev)
 	struct Scsi_Host *shost = dev_to_shost(dev);
 	struct device *parent = dev->parent;
 
+	scsi_proc_hostdir_rm(shost->hostt);
+
 	if (shost->ehandler)
 		kthread_stop(shost->ehandler);
 	if (shost->work_q)
@@ -332,7 +333,11 @@ struct Scsi_Host *scsi_host_alloc(struct scsi_host_template *sht, int privsize)
 
 	mutex_init(&shost->scan_mutex);
 
-	shost->host_no = scsi_host_next_hn++; /* XXX(hch): still racy */
+	/*
+	 * subtract one because we increment first then return, but we need to
+	 * know what the next host number was before increment
+	 */
+	shost->host_no = atomic_inc_return(&scsi_host_next_hn) - 1;
 	shost->dma_channel = 0xff;
 
 	/* These three are default values which can be overridden */
@@ -388,8 +393,7 @@ struct Scsi_Host *scsi_host_alloc(struct scsi_host_template *sht, int privsize)
 		shost->dma_boundary = 0xffffffff;
 
 	device_initialize(&shost->shost_gendev);
-	snprintf(shost->shost_gendev.bus_id, BUS_ID_SIZE, "host%d",
-		shost->host_no);
+	dev_set_name(&shost->shost_gendev, "host%d", shost->host_no);
 #ifndef CONFIG_SYSFS_DEPRECATED
 	shost->shost_gendev.bus = &scsi_bus_type;
 #endif
@@ -398,8 +402,7 @@ struct Scsi_Host *scsi_host_alloc(struct scsi_host_template *sht, int privsize)
 	device_initialize(&shost->shost_dev);
 	shost->shost_dev.parent = &shost->shost_gendev;
 	shost->shost_dev.class = &shost_class;
-	snprintf(shost->shost_dev.bus_id, BUS_ID_SIZE, "host%d",
-		 shost->host_no);
+	dev_set_name(&shost->shost_dev, "host%d", shost->host_no);
 	shost->shost_dev.groups = scsi_sysfs_shost_attr_groups;
 
 	shost->ehandler = kthread_run(scsi_error_handler, shost,
@@ -464,7 +467,7 @@ static int __scsi_host_match(struct device *dev, void *data)
 struct Scsi_Host *scsi_host_lookup(unsigned short hostnum)
 {
 	struct device *cdev;
-	struct Scsi_Host *shost = ERR_PTR(-ENXIO);
+	struct Scsi_Host *shost = NULL;
 
 	cdev = class_find_device(&shost_class, NULL, &hostnum,
 				 __scsi_host_match);

@@ -1,8 +1,8 @@
 /*
  * drivers/pci/slot.c
  * Copyright (C) 2006 Matthew Wilcox <matthew@wil.cx>
- * Copyright (C) 2006-2008 Hewlett-Packard Development Company, L.P.
- * 	Alex Chiang <achiang@hp.com>
+ * Copyright (C) 2006-2009 Hewlett-Packard Development Company, L.P.
+ *	Alex Chiang <achiang@hp.com>
  */
 
 #include <linux/kobject.h>
@@ -49,10 +49,15 @@ static ssize_t address_read_file(struct pci_slot *slot, char *buf)
 
 static void pci_slot_release(struct kobject *kobj)
 {
+	struct pci_dev *dev;
 	struct pci_slot *slot = to_pci_slot(kobj);
 
-	pr_debug("%s: releasing pci_slot on %x:%d\n", __func__,
-		 slot->bus->number, slot->number);
+	dev_dbg(&slot->bus->dev, "dev %02x, released physical slot %s\n",
+		slot->number, pci_slot_name(slot));
+
+	list_for_each_entry(dev, &slot->bus->devices, bus_list)
+		if (PCI_SLOT(dev->devfn) == slot->number)
+			dev->slot = NULL;
 
 	list_del(&slot->list);
 
@@ -182,11 +187,11 @@ static struct pci_slot *get_slot(struct pci_bus *parent, int slot_nr)
  * %struct pci_bus and bb is the bus number. In other words, the devfn of
  * the 'placeholder' slot will not be displayed.
  */
-
 struct pci_slot *pci_create_slot(struct pci_bus *parent, int slot_nr,
 				 const char *name,
 				 struct hotplug_slot *hotplug)
 {
+	struct pci_dev *dev;
 	struct pci_slot *slot;
 	int err = 0;
 	char *slot_name = NULL;
@@ -224,6 +229,7 @@ placeholder:
 	slot->number = slot_nr;
 
 	slot->kobj.kset = pci_slots_kset;
+
 	slot_name = make_slot_name(name);
 	if (!slot_name) {
 		err = -ENOMEM;
@@ -238,9 +244,12 @@ placeholder:
 	INIT_LIST_HEAD(&slot->list);
 	list_add(&slot->list, &parent->slots);
 
-	/* Don't care if debug printk has a -1 for slot_nr */
-	pr_debug("%s: created pci_slot on %04x:%02x:%02x\n",
-		 __func__, pci_domain_nr(parent), parent->number, slot_nr);
+	list_for_each_entry(dev, &parent->devices, bus_list)
+		if (PCI_SLOT(dev->devfn) == slot_nr)
+			dev->slot = slot;
+
+	dev_dbg(&parent->dev, "dev %02x, created physical slot %s\n",
+		slot_nr, pci_slot_name(slot));
 
 out:
 	kfree(slot_name);
@@ -254,35 +263,30 @@ err:
 EXPORT_SYMBOL_GPL(pci_create_slot);
 
 /**
- * pci_update_slot_number - update %struct pci_slot -> number
- * @slot - %struct pci_slot to update
- * @slot_nr - new number for slot
+ * pci_renumber_slot - update %struct pci_slot -> number
+ * @slot: &struct pci_slot to update
+ * @slot_nr: new number for slot
  *
  * The primary purpose of this interface is to allow callers who earlier
  * created a placeholder slot in pci_create_slot() by passing a -1 as
  * slot_nr, to update their %struct pci_slot with the correct @slot_nr.
  */
-
-void pci_update_slot_number(struct pci_slot *slot, int slot_nr)
+void pci_renumber_slot(struct pci_slot *slot, int slot_nr)
 {
-	int name_count = 0;
 	struct pci_slot *tmp;
 
 	down_write(&pci_bus_sem);
 
 	list_for_each_entry(tmp, &slot->bus->slots, list) {
 		WARN_ON(tmp->number == slot_nr);
-		if (!strcmp(kobject_name(&tmp->kobj), kobject_name(&slot->kobj)))
-			name_count++;
+		goto out;
 	}
 
-	if (name_count > 1)
-		printk(KERN_WARNING "pci_update_slot_number found %d slots with the same name: %s\n", name_count, kobject_name(&slot->kobj));
-
 	slot->number = slot_nr;
+out:
 	up_write(&pci_bus_sem);
 }
-EXPORT_SYMBOL_GPL(pci_update_slot_number);
+EXPORT_SYMBOL_GPL(pci_renumber_slot);
 
 /**
  * pci_destroy_slot - decrement refcount for physical PCI slot
@@ -294,15 +298,53 @@ EXPORT_SYMBOL_GPL(pci_update_slot_number);
  */
 void pci_destroy_slot(struct pci_slot *slot)
 {
-	pr_debug("%s: dec refcount to %d on %04x:%02x:%02x\n", __func__,
-		 atomic_read(&slot->kobj.kref.refcount) - 1,
-		 pci_domain_nr(slot->bus), slot->bus->number, slot->number);
+	dev_dbg(&slot->bus->dev, "dev %02x, dec refcount to %d\n",
+		slot->number, atomic_read(&slot->kobj.kref.refcount) - 1);
 
 	down_write(&pci_bus_sem);
 	kobject_put(&slot->kobj);
 	up_write(&pci_bus_sem);
 }
 EXPORT_SYMBOL_GPL(pci_destroy_slot);
+
+#if defined(CONFIG_HOTPLUG_PCI) || defined(CONFIG_HOTPLUG_PCI_MODULE)
+#include <linux/pci_hotplug.h>
+/**
+ * pci_hp_create_link - create symbolic link to the hotplug driver module.
+ * @pci_slot: struct pci_slot
+ *
+ * Helper function for pci_hotplug_core.c to create symbolic link to
+ * the hotplug driver module.
+ */
+void pci_hp_create_module_link(struct pci_slot *pci_slot)
+{
+	struct hotplug_slot *slot = pci_slot->hotplug;
+	struct kobject *kobj = NULL;
+	int no_warn;
+
+	if (!slot || !slot->ops)
+		return;
+	kobj = kset_find_obj(module_kset, slot->ops->mod_name);
+	if (!kobj)
+		return;
+	no_warn = sysfs_create_link(&pci_slot->kobj, kobj, "module");
+	kobject_put(kobj);
+}
+EXPORT_SYMBOL_GPL(pci_hp_create_module_link);
+
+/**
+ * pci_hp_remove_link - remove symbolic link to the hotplug driver module.
+ * @pci_slot: struct pci_slot
+ *
+ * Helper function for pci_hotplug_core.c to remove symbolic link to
+ * the hotplug driver module.
+ */
+void pci_hp_remove_module_link(struct pci_slot *pci_slot)
+{
+	sysfs_remove_link(&pci_slot->kobj, "module");
+}
+EXPORT_SYMBOL_GPL(pci_hp_remove_module_link);
+#endif
 
 static int pci_slot_init(void)
 {

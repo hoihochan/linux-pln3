@@ -59,7 +59,7 @@ static int rio_open (struct net_device *dev);
 static void rio_timer (unsigned long data);
 static void rio_tx_timeout (struct net_device *dev);
 static void alloc_list (struct net_device *dev);
-static int start_xmit (struct sk_buff *skb, struct net_device *dev);
+static netdev_tx_t start_xmit (struct sk_buff *skb, struct net_device *dev);
 static irqreturn_t rio_interrupt (int irq, void *dev_instance);
 static void rio_free_tx (struct net_device *dev, int irq);
 static void tx_error (struct net_device *dev, int tx_status);
@@ -85,6 +85,19 @@ static int mii_write (struct net_device *dev, int phy_addr, int reg_num,
 
 static const struct ethtool_ops ethtool_ops;
 
+static const struct net_device_ops netdev_ops = {
+	.ndo_open		= rio_open,
+	.ndo_start_xmit	= start_xmit,
+	.ndo_stop		= rio_close,
+	.ndo_get_stats		= get_stats,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_set_multicast_list = set_multicast,
+	.ndo_do_ioctl		= rio_ioctl,
+	.ndo_tx_timeout		= rio_tx_timeout,
+	.ndo_change_mtu		= change_mtu,
+};
+
 static int __devinit
 rio_probe1 (struct pci_dev *pdev, const struct pci_device_id *ent)
 {
@@ -97,7 +110,6 @@ rio_probe1 (struct pci_dev *pdev, const struct pci_device_id *ent)
 	static int version_printed;
 	void *ring_space;
 	dma_addr_t ring_dma;
-	DECLARE_MAC_BUF(mac);
 
 	if (!version_printed++)
 		printk ("%s", version);
@@ -198,15 +210,8 @@ rio_probe1 (struct pci_dev *pdev, const struct pci_device_id *ent)
 		else if (tx_coalesce > TX_RING_SIZE-1)
 			tx_coalesce = TX_RING_SIZE - 1;
 	}
-	dev->open = &rio_open;
-	dev->hard_start_xmit = &start_xmit;
-	dev->stop = &rio_close;
-	dev->get_stats = &get_stats;
-	dev->set_multicast_list = &set_multicast;
-	dev->do_ioctl = &rio_ioctl;
-	dev->tx_timeout = &rio_tx_timeout;
+	dev->netdev_ops = &netdev_ops;
 	dev->watchdog_timeo = TX_TIMEOUT;
-	dev->change_mtu = &change_mtu;
 	SET_ETHTOOL_OPS(dev, &ethtool_ops);
 #if 0
 	dev->features = NETIF_F_IP_CSUM;
@@ -257,14 +262,15 @@ rio_probe1 (struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	card_idx++;
 
-	printk (KERN_INFO "%s: %s, %s, IRQ %d\n",
-		dev->name, np->name, print_mac(mac, dev->dev_addr), irq);
+	printk (KERN_INFO "%s: %s, %pM, IRQ %d\n",
+		dev->name, np->name, dev->dev_addr, irq);
 	if (tx_coalesce > 1)
 		printk(KERN_INFO "tx_coalesce:\t%d packets\n",
 				tx_coalesce);
 	if (np->coalesce)
-		printk(KERN_INFO "rx_coalesce:\t%d packets\n"
-		       KERN_INFO "rx_timeout: \t%d ns\n",
+		printk(KERN_INFO
+		       "rx_coalesce:\t%d packets\n"
+		       "rx_timeout: \t%d ns\n",
 				np->rx_coalesce, np->rx_timeout*640);
 	if (np->vlan)
 		printk(KERN_INFO "vlan(id):\t%d\n", np->vlan);
@@ -534,7 +540,7 @@ rio_tx_timeout (struct net_device *dev)
 		dev->name, readl (ioaddr + TxStatus));
 	rio_free_tx(dev, 0);
 	dev->if_port = 0;
-	dev->trans_start = jiffies;
+	dev->trans_start = jiffies; /* prevent tx timeout */
 }
 
  /* allocate and initialize Tx and Rx descriptors */
@@ -594,7 +600,7 @@ alloc_list (struct net_device *dev)
 	return;
 }
 
-static int
+static netdev_tx_t
 start_xmit (struct sk_buff *skb, struct net_device *dev)
 {
 	struct netdev_private *np = netdev_priv(dev);
@@ -605,7 +611,7 @@ start_xmit (struct sk_buff *skb, struct net_device *dev)
 
 	if (np->link_status == 0) {	/* Link Down */
 		dev_kfree_skb(skb);
-		return 0;
+		return NETDEV_TX_OK;
 	}
 	ioaddr = dev->base_addr;
 	entry = np->cur_tx % TX_RING_SIZE;
@@ -660,9 +666,7 @@ start_xmit (struct sk_buff *skb, struct net_device *dev)
 		writel (0, dev->base_addr + TFDListPtr1);
 	}
 
-	/* NETDEV WATCHDOG timer */
-	dev->trans_start = jiffies;
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 static irqreturn_t
@@ -709,7 +713,7 @@ rio_interrupt (int irq, void *dev_instance)
 
 static inline dma_addr_t desc_to_dma(struct netdev_desc *desc)
 {
-	return le64_to_cpu(desc->fraginfo) & DMA_48BIT_MASK;
+	return le64_to_cpu(desc->fraginfo) & DMA_BIT_MASK(48);
 }
 
 static void
@@ -892,7 +896,6 @@ receive_packet (struct net_device *dev)
 			}
 #endif
 			netif_rx (skb);
-			dev->last_rx = jiffies;
 		}
 		entry = (entry + 1) % RX_RING_SIZE;
 	}
@@ -1520,9 +1523,9 @@ mii_get_media (struct net_device *dev)
 			printk (KERN_INFO "Operating at 10 Mbps, ");
 		}
 		if (bmcr & MII_BMCR_DUPLEX_MODE) {
-			printk ("Full duplex\n");
+			printk (KERN_CONT "Full duplex\n");
 		} else {
-			printk ("Half duplex\n");
+			printk (KERN_CONT "Half duplex\n");
 		}
 	}
 	if (np->tx_flow)
@@ -1612,9 +1615,9 @@ mii_set_media (struct net_device *dev)
 		}
 		if (np->full_duplex) {
 			bmcr |= MII_BMCR_DUPLEX_MODE;
-			printk ("Full duplex\n");
+			printk (KERN_CONT "Full duplex\n");
 		} else {
-			printk ("Half duplex\n");
+			printk (KERN_CONT "Half duplex\n");
 		}
 #if 0
 		/* Set 1000BaseT Master/Slave setting */
@@ -1667,9 +1670,9 @@ mii_get_media_pcs (struct net_device *dev)
 		__u16 bmcr = mii_read (dev, phy_addr, PCS_BMCR);
 		printk (KERN_INFO "Operating at 1000 Mbps, ");
 		if (bmcr & MII_BMCR_DUPLEX_MODE) {
-			printk ("Full duplex\n");
+			printk (KERN_CONT "Full duplex\n");
 		} else {
-			printk ("Half duplex\n");
+			printk (KERN_CONT "Half duplex\n");
 		}
 	}
 	if (np->tx_flow)

@@ -10,7 +10,7 @@
  * The device is based on the FTDI FT8U100AX chip. It has a DB25 on one side,
  * USB on the other.
  *
- * Thanx to FTDI (http://www.ftdi.co.uk) for so kindly providing details
+ * Thanx to FTDI (http://www.ftdichip.com) for so kindly providing details
  * of the protocol required to talk to the device and ongoing assistence
  * during development.
  *
@@ -28,17 +28,24 @@
 #define FTDI_8U232AM_ALT_PID 0x6006 /* FTDI's alternate PID for above */
 #define FTDI_8U2232C_PID 0x6010 /* Dual channel device */
 #define FTDI_232RL_PID  0xFBFA  /* Product ID for FT232RL */
+#define FTDI_4232H_PID 0x6011 /* Quad channel hi-speed device */
 #define FTDI_RELAIS_PID	0xFA10  /* Relais device from Rudolf Gugler */
 #define FTDI_NF_RIC_VID	0x0DCD	/* Vendor Id */
 #define FTDI_NF_RIC_PID	0x0001	/* Product Id */
 #define FTDI_USBX_707_PID 0xF857	/* ADSTech IR Blaster USBX-707 */
 
+/* Larsen and Brusgaard AltiTrack/USBtrack  */
+#define LARSENBRUSGAARD_VID		0x0FD8
+#define LB_ALTITRACK_PID		0x0001
 
 /* www.canusb.com Lawicel CANUSB device */
 #define FTDI_CANUSB_PID 0xFFA8 /* Product Id */
 
 /* AlphaMicro Components AMC-232USB01 device */
 #define FTDI_AMC232_PID 0xFF00 /* Product Id */
+
+/* www.candapter.com Ewert Energy Systems CANdapter device */
+#define FTDI_CANDAPTER_PID 0x9F80 /* Product Id */
 
 /* SCS HF Radio Modems PID's (http://www.scs-ptc.com) */
 /* the VID is the standard ftdi vid (FTDI_VID) */
@@ -74,6 +81,12 @@
 
 /* OpenDCC (www.opendcc.de) product id */
 #define FTDI_OPENDCC_PID	0xBFD8
+#define FTDI_OPENDCC_SNIFFER_PID	0xBFD9
+#define FTDI_OPENDCC_THROTTLE_PID	0xBFDA
+#define FTDI_OPENDCC_GATEWAY_PID	0xBFDB
+
+/* Sprog II (Andrew Crosland's SprogII DCC interface) */
+#define FTDI_SPROG_II		0xF0C8
 
 /* www.crystalfontz.com devices - thanx for providing free devices for evaluation ! */
 /* they use the ftdi chipset for the USB interface and the vendor id is the same */
@@ -496,6 +509,7 @@
  *
  * Armin Laeuger originally sent the PID for the UM 100 module.
  */
+#define FTDI_R2000KU_TRUE_RNG	0xFB80  /* R2000KU TRUE RNG */
 #define FTDI_ELV_UR100_PID	0xFB58	/* USB-RS232-Umsetzer (UR 100) */
 #define FTDI_ELV_UM100_PID	0xFB5A	/* USB-Modul UM 100 */
 #define FTDI_ELV_UO100_PID	0xFB5B	/* USB-Modul UO 100 */
@@ -604,6 +618,9 @@
 #define FTDI_CCSICDU20_0_PID    0xF9D0
 #define FTDI_CCSICDU40_1_PID    0xF9D1
 #define FTDI_CCSMACHX_2_PID     0xF9D2
+#define FTDI_CCSLOAD_N_GO_3_PID 0xF9D3
+#define FTDI_CCSICDU64_4_PID    0xF9D4
+#define FTDI_CCSPRIME8_5_PID    0xF9D5
 
 /* Inside Accesso contactless reader (http://www.insidefr.com) */
 #define INSIDE_ACCESSO		0xFAD0
@@ -626,6 +643,11 @@
  * SUUNTO product ids
  */
 #define FTDI_SUUNTO_SPORTS_PID	0xF680	/* Suunto Sports instrument */
+
+/*
+ * Oceanic product ids
+ */
+#define FTDI_OCEANIC_PID	0xF460  /* Oceanic dive instrument */
 
 /*
  * TTi (Thurlby Thandar Instruments)
@@ -719,6 +741,15 @@
 
 /* Pyramid Computer GmbH */
 #define FTDI_PYRAMID_PID	0xE6C8	/* Pyramid Appliance Display */
+
+/*
+ * NDI (www.ndigital.com) product ids
+ */
+#define FTDI_NDI_HUC_PID		0xDA70	/* NDI Host USB Converter */
+#define FTDI_NDI_SPECTRA_SCU_PID	0xDA71	/* NDI Spectra SCU */
+#define FTDI_NDI_FUTURE_2_PID		0xDA72	/* NDI future device #2 */
+#define FTDI_NDI_FUTURE_3_PID		0xDA73	/* NDI future device #3 */
+#define FTDI_NDI_AURORA_SCU_PID		0xDA74	/* NDI Aurora SCU */
 
 /*
  * Posiflex inc retail equipment (http://www.posiflex.com.tw)
@@ -843,6 +874,10 @@
 #define FTDI_DOMINTELL_DGQG_PID	0xEF50	/* Master */
 #define FTDI_DOMINTELL_DUSB_PID	0xEF51	/* DUSB01 module */
 
+/* Alti-2 products  http://www.alti-2.com */
+#define ALTI2_VID	0x1BC9
+#define ALTI2_N3_PID	0x6001	/* Neptune 3 */
+
 /* Commands */
 #define FTDI_SIO_RESET 		0 /* Reset the port */
 #define FTDI_SIO_MODEM_CTRL 	1 /* Set the modem control register */
@@ -855,6 +890,11 @@
 #define FTDI_SIO_SET_LATENCY_TIMER	9 /* Set the latency timer */
 #define FTDI_SIO_GET_LATENCY_TIMER	10 /* Get the latency timer */
 
+/* Interface indicies for FT2232, FT2232H and FT4232H devices*/
+#define INTERFACE_A		1
+#define INTERFACE_B		2
+#define INTERFACE_C		3
+#define INTERFACE_D		4
 
 /*
  * FIC / OpenMoko, Inc. http://wiki.openmoko.org/wiki/Neo1973_Debug_Board_v3
@@ -868,6 +908,11 @@
  */
 #define RATOC_VENDOR_ID		0x0584
 #define RATOC_PRODUCT_ID_USB60F	0xb020
+
+/*
+ * DIEBOLD BCS SE923
+ */
+#define DIEBOLD_BCS_SE923_PID	0xfb99
 
 /*
  * Atmel STK541
@@ -888,6 +933,7 @@
  */
 #define ADI_VID 		0x0456
 #define ADI_GNICE_PID 		0xF000
+#define ADI_GNICEPLUS_PID 	0xF001
 
 /*
  * JETI SPECTROMETER SPECBOS 1201
@@ -895,6 +941,21 @@
  */
 #define JETI_VID		0x0c6c
 #define JETI_SPC1201_PID	0x04b2
+
+/*
+ * Marvell SheevaPlug
+ */
+#define MARVELL_VID		0x9e88
+#define MARVELL_SHEEVAPLUG_PID	0x9e8f
+
+#define FTDI_TURTELIZER_PID	0xBDC8 /* JTAG/RS-232 adapter by egnite GmBH */
+
+/*
+ * GN Otometrics (http://www.otometrics.com)
+ * Submitted by Ville Sundberg.
+ */
+#define GN_OTOMETRICS_VID	0x0c33	/* Vendor ID */
+#define AURICAL_USB_PID		0x0010	/* Aurical USB Audiometer */
 
 /*
  * Bayer Ascensia Contour blood glucose meter USB-converter cable.
@@ -909,6 +970,12 @@
  * OpenRD Base, Client use VID 0x0403
  */
 #define MARVELL_OPENRD_PID	0x9e90
+
+/*
+ * Hameg HO820 and HO870 interface (using VID 0x0403)
+ */
+#define        HAMEG_HO820_PID         0xed74
+#define        HAMEG_HO870_PID         0xed71
 
 /*
  *   BmRequestType:  1100 0000b
@@ -1021,6 +1088,8 @@ typedef enum {
 	FT232BM = 3,
 	FT2232C = 4,
 	FT232RL = 5,
+	FT2232H = 6,
+	FT4232H = 7
 } ftdi_chip_type_t;
 
 typedef enum {

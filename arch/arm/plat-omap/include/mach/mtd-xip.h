@@ -3,7 +3,7 @@
  *
  * Do not include this file directly. It's included from linux/mtd/xip.h
  *
- * Author: Vladimir Barinov <vbarinov@ru.mvista.com>
+ * Author: Vladimir Barinov <vbarinov@embeddedalley.com>
  *
  * (c) 2005 MontaVista Software, Inc.  This file is licensed under the
  * terms of the GNU General Public License version 2.  This program is
@@ -25,7 +25,7 @@ typedef struct {
 } xip_omap_mpu_timer_regs_t;
 
 #define xip_omap_mpu_timer_base(n)					\
-((volatile xip_omap_mpu_timer_regs_t*)IO_ADDRESS(OMAP_MPU_TIMER_BASE +	\
+((volatile xip_omap_mpu_timer_regs_t*)OMAP1_IO_ADDRESS(OMAP_MPU_TIMER_BASE +	\
 	(n)*OMAP_MPU_TIMER_OFFSET))
 
 static inline unsigned long xip_omap_mpu_timer_read(int nr)

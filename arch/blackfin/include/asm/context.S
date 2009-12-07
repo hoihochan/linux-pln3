@@ -1,30 +1,7 @@
 /*
- * File:         arch/blackfin/kernel/context.S
- * Based on:
- * Author:
+ * Copyright 2007-2009 Analog Devices Inc.
  *
- * Created:
- * Description:
- *
- * Modified:
- *               Copyright 2004-2007 Analog Devices Inc.
- *
- * Bugs:         Enter bugs at http://blackfin.uclinux.org/
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see the file COPYING, or write
- * to the Free Software Foundation, Inc.,
- * 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ * Licensed under the GPL-2 or later.
  */
 
 /*
@@ -223,9 +200,10 @@
 	[--sp] = RETN;
 	[--sp] = RETE;
 	[--sp] = SEQSTAT;
-#ifdef CONFIG_KGDB
-	r1.l = lo(IPEND);
-	r1.h = hi(IPEND);
+#ifdef CONFIG_DEBUG_KERNEL
+	p1.l = lo(IPEND);
+	p1.h = hi(IPEND);
+	r1 = [p1];
 	[--sp] = r1;
 #else
 	[--sp] = r0;	/* Skip IPEND as well. */
@@ -303,9 +281,14 @@
 	RETI = [sp++];
 	RETS = [sp++];
 
-	p0.h = _irq_flags;
-	p0.l = _irq_flags;
+#ifdef CONFIG_SMP
+	GET_PDA(p0, r0);
+	r0 = [p0 + PDA_IRQFLAGS];
+#else
+	p0.h = _bfin_irq_flags;
+	p0.l = _bfin_irq_flags;
 	r0 = [p0];
+#endif
 	sti r0;
 
 	sp += 4;	/* Skip Reserved */
@@ -353,3 +336,41 @@
 	csync;
 .endm
 
+.macro save_context_cplb
+	[--sp] = (R7:0, P5:0);
+	[--sp] = fp;
+
+	[--sp] = a0.x;
+	[--sp] = a0.w;
+	[--sp] = a1.x;
+	[--sp] = a1.w;
+
+	[--sp] = LC0;
+	[--sp] = LC1;
+	[--sp] = LT0;
+	[--sp] = LT1;
+	[--sp] = LB0;
+	[--sp] = LB1;
+
+	[--sp] = RETS;
+.endm
+
+.macro restore_context_cplb
+	RETS = [sp++];
+
+	LB1 = [sp++];
+	LB0 = [sp++];
+	LT1 = [sp++];
+	LT0 = [sp++];
+	LC1 = [sp++];
+	LC0 = [sp++];
+
+	a1.w = [sp++];
+	a1.x = [sp++];
+	a0.w = [sp++];
+	a0.x = [sp++];
+
+	fp = [sp++];
+
+	(R7:0, P5:0) = [SP++];
+.endm

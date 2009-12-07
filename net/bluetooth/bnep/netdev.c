@@ -41,11 +41,6 @@
 
 #include "bnep.h"
 
-#ifndef CONFIG_BT_BNEP_DEBUG
-#undef  BT_DBG
-#define BT_DBG( A... )
-#endif
-
 #define BNEP_TX_QUEUE_LEN 20
 
 static int bnep_net_open(struct net_device *dev)
@@ -60,16 +55,10 @@ static int bnep_net_close(struct net_device *dev)
 	return 0;
 }
 
-static struct net_device_stats *bnep_net_get_stats(struct net_device *dev)
-{
-	struct bnep_session *s = dev->priv;
-	return &s->stats;
-}
-
 static void bnep_net_set_mc_list(struct net_device *dev)
 {
 #ifdef CONFIG_BT_BNEP_MC_FILTER
-	struct bnep_session *s = dev->priv;
+	struct bnep_session *s = netdev_priv(dev);
 	struct sock *sk = s->sock->sk;
 	struct bnep_set_filter_req *r;
 	struct sk_buff *skb;
@@ -133,11 +122,6 @@ static void bnep_net_timeout(struct net_device *dev)
 	netif_wake_queue(dev);
 }
 
-static int bnep_net_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
-{
-	return -EINVAL;
-}
-
 #ifdef CONFIG_BT_BNEP_MC_FILTER
 static inline int bnep_net_mc_filter(struct sk_buff *skb, struct bnep_session *s)
 {
@@ -181,9 +165,10 @@ static inline int bnep_net_proto_filter(struct sk_buff *skb, struct bnep_session
 }
 #endif
 
-static int bnep_net_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t bnep_net_xmit(struct sk_buff *skb,
+				 struct net_device *dev)
 {
-	struct bnep_session *s = dev->priv;
+	struct bnep_session *s = netdev_priv(dev);
 	struct sock *sk = s->sock->sk;
 
 	BT_DBG("skb %p, dev %p", skb, dev);
@@ -191,14 +176,14 @@ static int bnep_net_xmit(struct sk_buff *skb, struct net_device *dev)
 #ifdef CONFIG_BT_BNEP_MC_FILTER
 	if (bnep_net_mc_filter(skb, s)) {
 		kfree_skb(skb);
-		return 0;
+		return NETDEV_TX_OK;
 	}
 #endif
 
 #ifdef CONFIG_BT_BNEP_PROTO_FILTER
 	if (bnep_net_proto_filter(skb, s)) {
 		kfree_skb(skb);
-		return 0;
+		return NETDEV_TX_OK;
 	}
 #endif
 
@@ -219,8 +204,20 @@ static int bnep_net_xmit(struct sk_buff *skb, struct net_device *dev)
 		netif_stop_queue(dev);
 	}
 
-	return 0;
+	return NETDEV_TX_OK;
 }
+
+static const struct net_device_ops bnep_netdev_ops = {
+	.ndo_open            = bnep_net_open,
+	.ndo_stop            = bnep_net_close,
+	.ndo_start_xmit	     = bnep_net_xmit,
+	.ndo_validate_addr   = eth_validate_addr,
+	.ndo_set_multicast_list = bnep_net_set_mc_list,
+	.ndo_set_mac_address = bnep_net_set_mac_addr,
+	.ndo_tx_timeout      = bnep_net_timeout,
+	.ndo_change_mtu	     = eth_change_mtu,
+
+};
 
 void bnep_net_setup(struct net_device *dev)
 {
@@ -229,15 +226,7 @@ void bnep_net_setup(struct net_device *dev)
 	dev->addr_len = ETH_ALEN;
 
 	ether_setup(dev);
-
-	dev->open            = bnep_net_open;
-	dev->stop            = bnep_net_close;
-	dev->hard_start_xmit = bnep_net_xmit;
-	dev->get_stats       = bnep_net_get_stats;
-	dev->do_ioctl        = bnep_net_ioctl;
-	dev->set_mac_address = bnep_net_set_mac_addr;
-	dev->set_multicast_list = bnep_net_set_mc_list;
+	dev->netdev_ops = &bnep_netdev_ops;
 
 	dev->watchdog_timeo  = HZ * 2;
-	dev->tx_timeout      = bnep_net_timeout;
 }

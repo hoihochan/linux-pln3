@@ -18,6 +18,7 @@
 #include <linux/clockchips.h>
 #include <linux/interrupt.h>
 #include <linux/percpu.h>
+#include <linux/smp.h>
 
 #include <asm/addrspace.h>
 #include <asm/io.h>
@@ -126,7 +127,7 @@ void __cpuinit sb1480_clockevent_init(void)
 	cd->min_delta_ns	= clockevent_delta2ns(2, cd);
 	cd->rating		= 200;
 	cd->irq			= irq;
-	cd->cpumask		= cpumask_of_cpu(cpu);
+	cd->cpumask		= cpumask_of(cpu);
 	cd->set_next_event	= sibyte_next_event;
 	cd->set_mode		= sibyte_set_mode;
 	clockevents_register_device(cd);
@@ -143,11 +144,10 @@ void __cpuinit sb1480_clockevent_init(void)
 	bcm1480_unmask_irq(cpu, irq);
 
 	action->handler	= sibyte_counter_handler;
-	action->flags	= IRQF_DISABLED | IRQF_PERCPU;
-	action->mask	= cpumask_of_cpu(cpu);
+	action->flags	= IRQF_DISABLED | IRQF_PERCPU | IRQF_TIMER;
 	action->name	= name;
 	action->dev_id	= cd;
 
-	irq_set_affinity(irq, cpumask_of_cpu(cpu));
+	irq_set_affinity(irq, cpumask_of(cpu));
 	setup_irq(irq, action);
 }

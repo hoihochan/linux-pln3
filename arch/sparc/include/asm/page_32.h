@@ -8,11 +8,8 @@
 #ifndef _SPARC_PAGE_H
 #define _SPARC_PAGE_H
 
-#ifdef CONFIG_SUN4
-#define PAGE_SHIFT   13
-#else
 #define PAGE_SHIFT   12
-#endif
+
 #ifndef __ASSEMBLY__
 /* I have my suspicions... -DaveM */
 #define PAGE_SIZE    (1UL << PAGE_SHIFT)
@@ -155,6 +152,6 @@ extern unsigned long pfn_base;
 				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
 
 #include <asm-generic/memory_model.h>
-#include <asm-generic/page.h>
+#include <asm-generic/getorder.h>
 
 #endif /* _SPARC_PAGE_H */

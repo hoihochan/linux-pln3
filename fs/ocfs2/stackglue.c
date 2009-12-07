@@ -6,7 +6,7 @@
  * Code which implements an OCFS2 specific interface to underlying
  * cluster stacks.
  *
- * Copyright (C) 2007 Oracle.  All rights reserved.
+ * Copyright (C) 2007, 2009 Oracle.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -271,11 +271,12 @@ int ocfs2_dlm_lock_status(union ocfs2_dlm_lksb *lksb)
 }
 EXPORT_SYMBOL_GPL(ocfs2_dlm_lock_status);
 
-/*
- * Why don't we cast to ocfs2_meta_lvb?  The "clean" answer is that we
- * don't cast at the glue level.  The real answer is that the header
- * ordering is nigh impossible.
- */
+int ocfs2_dlm_lvb_valid(union ocfs2_dlm_lksb *lksb)
+{
+	return active_stack->sp_ops->lvb_valid(lksb);
+}
+EXPORT_SYMBOL_GPL(ocfs2_dlm_lvb_valid);
+
 void *ocfs2_dlm_lvb(union ocfs2_dlm_lksb *lksb)
 {
 	return active_stack->sp_ops->lock_lvb(lksb);
@@ -287,6 +288,26 @@ void ocfs2_dlm_dump_lksb(union ocfs2_dlm_lksb *lksb)
 	active_stack->sp_ops->dump_lksb(lksb);
 }
 EXPORT_SYMBOL_GPL(ocfs2_dlm_dump_lksb);
+
+int ocfs2_stack_supports_plocks(void)
+{
+	return active_stack && active_stack->sp_ops->plock;
+}
+EXPORT_SYMBOL_GPL(ocfs2_stack_supports_plocks);
+
+/*
+ * ocfs2_plock() can only be safely called if
+ * ocfs2_stack_supports_plocks() returned true
+ */
+int ocfs2_plock(struct ocfs2_cluster_connection *conn, u64 ino,
+		struct file *file, int cmd, struct file_lock *fl)
+{
+	WARN_ON_ONCE(active_stack->sp_ops->plock == NULL);
+	if (active_stack->sp_ops->plock)
+		return active_stack->sp_ops->plock(conn, ino, file, cmd, fl);
+	return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL_GPL(ocfs2_plock);
 
 int ocfs2_cluster_connect(const char *stack_name,
 			  const char *group,

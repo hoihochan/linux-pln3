@@ -6,6 +6,7 @@
 
 #ifndef __NETNS_IPV6_H__
 #define __NETNS_IPV6_H__
+#include <net/dst_ops.h>
 
 struct ctl_table_header;
 
@@ -42,7 +43,7 @@ struct netns_ipv6 {
 	struct timer_list       ip6_fib_timer;
 	struct hlist_head       *fib_table_hash;
 	struct fib6_table       *fib6_main_tbl;
-	struct dst_ops		*ip6_dst_ops;
+	struct dst_ops		ip6_dst_ops;
 	unsigned int		 ip6_rt_gc_expire;
 	unsigned long		 ip6_rt_last_gc;
 #ifdef CONFIG_IPV6_MULTIPLE_TABLES
@@ -55,5 +56,17 @@ struct netns_ipv6 {
 	struct sock             *ndisc_sk;
 	struct sock             *tcp_sk;
 	struct sock             *igmp_sk;
+#ifdef CONFIG_IPV6_MROUTE
+	struct sock		*mroute6_sk;
+	struct mfc6_cache	**mfc6_cache_array;
+	struct mif_device	*vif6_table;
+	int			maxvif;
+	atomic_t		cache_resolve_queue_len;
+	int			mroute_do_assert;
+	int			mroute_do_pim;
+#ifdef CONFIG_IPV6_PIMSM_V2
+	int			mroute_reg_vif_num;
+#endif
+#endif
 };
 #endif

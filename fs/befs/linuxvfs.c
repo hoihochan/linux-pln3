@@ -378,7 +378,8 @@ static struct inode *befs_iget(struct super_block *sb, unsigned long ino)
 		inode->i_size = 0;
 		inode->i_blocks = befs_sb->block_size / VFS_BLOCK_SIZE;
 		strncpy(befs_ino->i_data.symlink, raw_inode->data.symlink,
-			BEFS_SYMLINK_LEN);
+			BEFS_SYMLINK_LEN - 1);
+		befs_ino->i_data.symlink[BEFS_SYMLINK_LEN - 1] = '\0';
 	} else {
 		int num_blks;
 
@@ -477,6 +478,8 @@ befs_follow_link(struct dentry *dentry, struct nameidata *nd)
 			kfree(link);
 			befs_error(sb, "Failed to read entire long symlink");
 			link = ERR_PTR(-EIO);
+		} else {
+			link[len - 1] = '\0';
 		}
 	} else {
 		link = befs_ino->i_data.symlink;
@@ -510,7 +513,7 @@ befs_utf2nls(struct super_block *sb, const char *in,
 {
 	struct nls_table *nls = BEFS_SB(sb)->nls;
 	int i, o;
-	wchar_t uni;
+	unicode_t uni;
 	int unilen, utflen;
 	char *result;
 	/* The utf8->nls conversion won't make the final nls string bigger
@@ -536,16 +539,16 @@ befs_utf2nls(struct super_block *sb, const char *in,
 	for (i = o = 0; i < in_len; i += utflen, o += unilen) {
 
 		/* convert from UTF-8 to Unicode */
-		utflen = utf8_mbtowc(&uni, &in[i], in_len - i);
-		if (utflen < 0) {
+		utflen = utf8_to_utf32(&in[i], in_len - i, &uni);
+		if (utflen < 0)
 			goto conv_err;
-		}
 
 		/* convert from Unicode to nls */
-		unilen = nls->uni2char(uni, &result[o], in_len - o);
-		if (unilen < 0) {
+		if (uni > MAX_WCHAR_T)
 			goto conv_err;
-		}
+		unilen = nls->uni2char(uni, &result[o], in_len - o);
+		if (unilen < 0)
+			goto conv_err;
 	}
 	result[o] = '\0';
 	*out_len = o;
@@ -616,15 +619,13 @@ befs_nls2utf(struct super_block *sb, const char *in,
 
 		/* convert from nls to unicode */
 		unilen = nls->char2uni(&in[i], in_len - i, &uni);
-		if (unilen < 0) {
+		if (unilen < 0)
 			goto conv_err;
-		}
 
 		/* convert from unicode to UTF-8 */
-		utflen = utf8_wctomb(&result[o], uni, 3);
-		if (utflen <= 0) {
+		utflen = utf32_to_utf8(uni, &result[o], 3);
+		if (utflen <= 0)
 			goto conv_err;
-		}
 	}
 
 	result[o] = '\0';
@@ -650,7 +651,7 @@ enum {
 	Opt_uid, Opt_gid, Opt_charset, Opt_debug, Opt_err,
 };
 
-static match_table_t befs_tokens = {
+static const match_table_t befs_tokens = {
 	{Opt_uid, "uid=%d"},
 	{Opt_gid, "gid=%d"},
 	{Opt_charset, "iocharset=%s"},
@@ -736,15 +737,9 @@ befs_put_super(struct super_block *sb)
 {
 	kfree(BEFS_SB(sb)->mount_opts.iocharset);
 	BEFS_SB(sb)->mount_opts.iocharset = NULL;
-
-	if (BEFS_SB(sb)->nls) {
-		unload_nls(BEFS_SB(sb)->nls);
-		BEFS_SB(sb)->nls = NULL;
-	}
-
+	unload_nls(BEFS_SB(sb)->nls);
 	kfree(sb->s_fs_info);
 	sb->s_fs_info = NULL;
-	return;
 }
 
 /* Allocate private field of the superblock, fill it.
@@ -809,8 +804,8 @@ befs_fill_super(struct super_block *sb, void *data, int silent)
 
 	/* account for offset of super block on x86 */
 	disk_sb = (befs_super_block *) bh->b_data;
-	if ((le32_to_cpu(disk_sb->magic1) == BEFS_SUPER_MAGIC1) ||
-	    (be32_to_cpu(disk_sb->magic1) == BEFS_SUPER_MAGIC1)) {
+	if ((disk_sb->magic1 == BEFS_SUPER_MAGIC1_LE) ||
+	    (disk_sb->magic1 == BEFS_SUPER_MAGIC1_BE)) {
 		befs_debug(sb, "Using PPC superblock location");
 	} else {
 		befs_debug(sb, "Using x86 superblock location");
@@ -842,7 +837,7 @@ befs_fill_super(struct super_block *sb, void *data, int silent)
 	sb->s_magic = BEFS_SUPER_MAGIC;
 	/* Set real blocksize of fs */
 	sb_set_blocksize(sb, (ulong) befs_sb->block_size);
-	sb->s_op = (struct super_operations *) &befs_sops;
+	sb->s_op = &befs_sops;
 	root = befs_iget(sb, iaddr2blockno(sb, &(befs_sb->root_dir)));
 	if (IS_ERR(root)) {
 		ret = PTR_ERR(root);
@@ -897,6 +892,7 @@ static int
 befs_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
 	struct super_block *sb = dentry->d_sb;
+	u64 id = huge_encode_dev(sb->s_bdev->bd_dev);
 
 	befs_debug(sb, "---> befs_statfs()");
 
@@ -907,6 +903,8 @@ befs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	buf->f_bavail = buf->f_bfree;
 	buf->f_files = 0;	/* UNKNOWN */
 	buf->f_ffree = 0;	/* UNKNOWN */
+	buf->f_fsid.val[0] = (u32)id;
+	buf->f_fsid.val[1] = (u32)(id >> 32);
 	buf->f_namelen = BEFS_NAME_LEN;
 
 	befs_debug(sb, "<--- befs_statfs()");

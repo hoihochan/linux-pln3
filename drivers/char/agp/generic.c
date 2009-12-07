@@ -95,13 +95,13 @@ EXPORT_SYMBOL(agp_flush_chipset);
 
 void agp_alloc_page_array(size_t size, struct agp_memory *mem)
 {
-	mem->memory = NULL;
+	mem->pages = NULL;
 	mem->vmalloc_flag = false;
 
 	if (size <= 2*PAGE_SIZE)
-		mem->memory = kmalloc(size, GFP_KERNEL | __GFP_NORETRY);
-	if (mem->memory == NULL) {
-		mem->memory = vmalloc(size);
+		mem->pages = kmalloc(size, GFP_KERNEL | __GFP_NORETRY);
+	if (mem->pages == NULL) {
+		mem->pages = vmalloc(size);
 		mem->vmalloc_flag = true;
 	}
 }
@@ -110,9 +110,9 @@ EXPORT_SYMBOL(agp_alloc_page_array);
 void agp_free_page_array(struct agp_memory *mem)
 {
 	if (mem->vmalloc_flag) {
-		vfree(mem->memory);
+		vfree(mem->pages);
 	} else {
-		kfree(mem->memory);
+		kfree(mem->pages);
 	}
 }
 EXPORT_SYMBOL(agp_free_page_array);
@@ -136,7 +136,7 @@ static struct agp_memory *agp_create_user_memory(unsigned long num_agp_pages)
 
 	agp_alloc_page_array(alloc_size, new);
 
-	if (new->memory == NULL) {
+	if (new->pages == NULL) {
 		agp_free_key(new->key);
 		kfree(new);
 		return NULL;
@@ -162,7 +162,7 @@ struct agp_memory *agp_create_memory(int scratch_pages)
 
 	agp_alloc_page_array(PAGE_SIZE * scratch_pages, new);
 
-	if (new->memory == NULL) {
+	if (new->pages == NULL) {
 		agp_free_key(new->key);
 		kfree(new);
 		return NULL;
@@ -201,14 +201,20 @@ void agp_free_memory(struct agp_memory *curr)
 		return;
 	}
 	if (curr->page_count != 0) {
-		for (i = 0; i < curr->page_count; i++) {
-			curr->memory[i] = (unsigned long)gart_to_virt(curr->memory[i]);
-			curr->bridge->driver->agp_destroy_page((void *)curr->memory[i],
-							       AGP_PAGE_DESTROY_UNMAP);
-		}
-		for (i = 0; i < curr->page_count; i++) {
-			curr->bridge->driver->agp_destroy_page((void *)curr->memory[i],
-							       AGP_PAGE_DESTROY_FREE);
+		if (curr->bridge->driver->agp_destroy_pages) {
+			curr->bridge->driver->agp_destroy_pages(curr);
+		} else {
+
+			for (i = 0; i < curr->page_count; i++) {
+				curr->bridge->driver->agp_destroy_page(
+					curr->pages[i],
+					AGP_PAGE_DESTROY_UNMAP);
+			}
+			for (i = 0; i < curr->page_count; i++) {
+				curr->bridge->driver->agp_destroy_page(
+					curr->pages[i],
+					AGP_PAGE_DESTROY_FREE);
+			}
 		}
 	}
 	agp_free_key(curr->key);
@@ -264,14 +270,23 @@ struct agp_memory *agp_allocate_memory(struct agp_bridge_data *bridge,
 	if (new == NULL)
 		return NULL;
 
-	for (i = 0; i < page_count; i++) {
-		void *addr = bridge->driver->agp_alloc_page(bridge);
-
-		if (addr == NULL) {
+	if (bridge->driver->agp_alloc_pages) {
+		if (bridge->driver->agp_alloc_pages(bridge, new, page_count)) {
 			agp_free_memory(new);
 			return NULL;
 		}
-		new->memory[i] = virt_to_gart(addr);
+		new->bridge = bridge;
+		return new;
+	}
+
+	for (i = 0; i < page_count; i++) {
+		struct page *page = bridge->driver->agp_alloc_page(bridge);
+
+		if (page == NULL) {
+			agp_free_memory(new);
+			return NULL;
+		}
+		new->pages[i] = page;
 		new->page_count++;
 	}
 	new->bridge = bridge;
@@ -422,6 +437,12 @@ int agp_bind_memory(struct agp_memory *curr, off_t pg_start)
 		curr->bridge->driver->cache_flush();
 		curr->is_flushed = true;
 	}
+
+	if (curr->bridge->driver->agp_map_memory) {
+		ret_val = curr->bridge->driver->agp_map_memory(curr);
+		if (ret_val)
+			return ret_val;
+	}
 	ret_val = curr->bridge->driver->insert_memory(curr, pg_start, curr->type);
 
 	if (ret_val != 0)
@@ -462,6 +483,9 @@ int agp_unbind_memory(struct agp_memory *curr)
 
 	if (ret_val != 0)
 		return ret_val;
+
+	if (curr->bridge->driver->agp_unmap_memory)
+		curr->bridge->driver->agp_unmap_memory(curr);
 
 	curr->is_bound = false;
 	curr->pg_start = 0;
@@ -964,7 +988,7 @@ int agp_generic_create_gatt_table(struct agp_bridge_data *bridge)
 	set_memory_uc((unsigned long)table, 1 << page_order);
 	bridge->gatt_table = (void *)table;
 #else
-	bridge->gatt_table = ioremap_nocache(virt_to_gart(table),
+	bridge->gatt_table = ioremap_nocache(virt_to_phys(table),
 					(PAGE_SIZE * (1 << page_order)));
 	bridge->driver->cache_flush();
 #endif
@@ -977,7 +1001,7 @@ int agp_generic_create_gatt_table(struct agp_bridge_data *bridge)
 
 		return -ENOMEM;
 	}
-	bridge->gatt_bus_addr = virt_to_gart(bridge->gatt_table_real);
+	bridge->gatt_bus_addr = virt_to_phys(bridge->gatt_table_real);
 
 	/* AK: bogus, should encode addresses > 4GB */
 	for (i = 0; i < num_entries; i++) {
@@ -1117,7 +1141,9 @@ int agp_generic_insert_memory(struct agp_memory * mem, off_t pg_start, int type)
 	}
 
 	for (i = 0, j = pg_start; i < mem->page_count; i++, j++) {
-		writel(bridge->driver->mask_memory(bridge, mem->memory[i], mask_type),
+		writel(bridge->driver->mask_memory(bridge,
+						   page_to_phys(mem->pages[i]),
+						   mask_type),
 		       bridge->gatt_table+j);
 	}
 	readl(bridge->gatt_table+j-1);	/* PCI Posting. */
@@ -1187,7 +1213,7 @@ struct agp_memory *agp_generic_alloc_user(size_t page_count, int type)
 		return NULL;
 
 	for (i = 0; i < page_count; i++)
-		new->memory[i] = 0;
+		new->pages[i] = 0;
 	new->page_count = 0;
 	new->type = type;
 	new->num_scratch_pages = pages;
@@ -1203,7 +1229,37 @@ EXPORT_SYMBOL(agp_generic_alloc_user);
  * against a maximum value.
  */
 
-void *agp_generic_alloc_page(struct agp_bridge_data *bridge)
+int agp_generic_alloc_pages(struct agp_bridge_data *bridge, struct agp_memory *mem, size_t num_pages)
+{
+	struct page * page;
+	int i, ret = -ENOMEM;
+
+	for (i = 0; i < num_pages; i++) {
+		page = alloc_page(GFP_KERNEL | GFP_DMA32 | __GFP_ZERO);
+		/* agp_free_memory() needs gart address */
+		if (page == NULL)
+			goto out;
+
+#ifndef CONFIG_X86
+		map_page_into_agp(page);
+#endif
+		get_page(page);
+		atomic_inc(&agp_bridge->current_memory_agp);
+
+		mem->pages[i] = page;
+		mem->page_count++;
+	}
+
+#ifdef CONFIG_X86
+	set_pages_array_uc(mem->pages, num_pages);
+#endif
+	ret = 0;
+out:
+	return ret;
+}
+EXPORT_SYMBOL(agp_generic_alloc_pages);
+
+struct page *agp_generic_alloc_page(struct agp_bridge_data *bridge)
 {
 	struct page * page;
 
@@ -1215,25 +1271,47 @@ void *agp_generic_alloc_page(struct agp_bridge_data *bridge)
 
 	get_page(page);
 	atomic_inc(&agp_bridge->current_memory_agp);
-	return page_address(page);
+	return page;
 }
 EXPORT_SYMBOL(agp_generic_alloc_page);
 
-
-void agp_generic_destroy_page(void *addr, int flags)
+void agp_generic_destroy_pages(struct agp_memory *mem)
 {
+	int i;
 	struct page *page;
 
-	if (addr == NULL)
+	if (!mem)
 		return;
 
-	page = virt_to_page(addr);
+#ifdef CONFIG_X86
+	set_pages_array_wb(mem->pages, mem->page_count);
+#endif
+
+	for (i = 0; i < mem->page_count; i++) {
+		page = mem->pages[i];
+
+#ifndef CONFIG_X86
+		unmap_page_from_agp(page);
+#endif
+		put_page(page);
+		__free_page(page);
+		atomic_dec(&agp_bridge->current_memory_agp);
+		mem->pages[i] = NULL;
+	}
+}
+EXPORT_SYMBOL(agp_generic_destroy_pages);
+
+void agp_generic_destroy_page(struct page *page, int flags)
+{
+	if (page == NULL)
+		return;
+
 	if (flags & AGP_PAGE_DESTROY_UNMAP)
 		unmap_page_from_agp(page);
 
 	if (flags & AGP_PAGE_DESTROY_FREE) {
 		put_page(page);
-		free_page((unsigned long)addr);
+		__free_page(page);
 		atomic_dec(&agp_bridge->current_memory_agp);
 	}
 }
@@ -1280,7 +1358,7 @@ void global_cache_flush(void)
 EXPORT_SYMBOL(global_cache_flush);
 
 unsigned long agp_generic_mask_memory(struct agp_bridge_data *bridge,
-	unsigned long addr, int type)
+				      dma_addr_t addr, int type)
 {
 	/* memory type is ignored in the generic routine */
 	if (bridge->driver->masks)

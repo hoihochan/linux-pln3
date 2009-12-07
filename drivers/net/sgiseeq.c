@@ -377,7 +377,6 @@ memory_squeeze:
 					skb_put(skb, len);
 					skb->protocol = eth_type_trans(skb, dev);
 					netif_rx(skb);
-					dev->last_rx = jiffies;
 					dev->stats.rx_packets++;
 					dev->stats.rx_bytes += len;
 				} else {
@@ -595,7 +594,7 @@ static int sgiseeq_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	len = skb->len;
 	if (len < ETH_ZLEN) {
 		if (skb_padto(skb, ETH_ZLEN))
-			return 0;
+			return NETDEV_TX_OK;
 		len = ETH_ZLEN;
 	}
 
@@ -643,7 +642,7 @@ static int sgiseeq_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		netif_stop_queue(dev);
 	spin_unlock_irqrestore(&sp->tx_lock, flags);
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 static void timeout(struct net_device *dev)
@@ -657,7 +656,7 @@ static void timeout(struct net_device *dev)
 
 static void sgiseeq_set_multicast(struct net_device *dev)
 {
-	struct sgiseeq_private *sp = (struct sgiseeq_private *) dev->priv;
+	struct sgiseeq_private *sp = netdev_priv(dev);
 	unsigned char oldmode = sp->mode;
 
 	if(dev->flags & IFF_PROMISC)
@@ -710,7 +709,18 @@ static inline void setup_rx_ring(struct net_device *dev,
 	dma_sync_desc_dev(dev, &buf[i]);
 }
 
-static int __init sgiseeq_probe(struct platform_device *pdev)
+static const struct net_device_ops sgiseeq_netdev_ops = {
+	.ndo_open		= sgiseeq_open,
+	.ndo_stop		= sgiseeq_close,
+	.ndo_start_xmit		= sgiseeq_start_xmit,
+	.ndo_tx_timeout		= timeout,
+	.ndo_set_multicast_list	= sgiseeq_set_multicast,
+	.ndo_set_mac_address	= sgiseeq_set_mac_address,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_validate_addr	= eth_validate_addr,
+};
+
+static int __devinit sgiseeq_probe(struct platform_device *pdev)
 {
 	struct sgiseeq_platform_data *pd = pdev->dev.platform_data;
 	struct hpc3_regs *hpcregs = pd->hpc;
@@ -719,7 +729,6 @@ static int __init sgiseeq_probe(struct platform_device *pdev)
 	struct sgiseeq_private *sp;
 	struct net_device *dev;
 	int err;
-	DECLARE_MAC_BUF(mac);
 
 	dev = alloc_etherdev(sizeof (struct sgiseeq_private));
 	if (!dev) {
@@ -777,13 +786,8 @@ static int __init sgiseeq_probe(struct platform_device *pdev)
 			      SEEQ_CTRL_SFLAG | SEEQ_CTRL_ESHORT |
 			      SEEQ_CTRL_ENCARR;
 
-	dev->open		= sgiseeq_open;
-	dev->stop		= sgiseeq_close;
-	dev->hard_start_xmit	= sgiseeq_start_xmit;
-	dev->tx_timeout		= timeout;
+	dev->netdev_ops		= &sgiseeq_netdev_ops;
 	dev->watchdog_timeo	= (200 * HZ) / 1000;
-	dev->set_multicast_list	= sgiseeq_set_multicast;
-	dev->set_mac_address	= sgiseeq_set_mac_address;
 	dev->irq		= irq;
 
 	if (register_netdev(dev)) {
@@ -793,8 +797,7 @@ static int __init sgiseeq_probe(struct platform_device *pdev)
 		goto err_out_free_page;
 	}
 
-	printk(KERN_INFO "%s: %s %s\n",
-	       dev->name, sgiseeqstr, print_mac(mac, dev->dev_addr));
+	printk(KERN_INFO "%s: %s %pM\n", dev->name, sgiseeqstr, dev->dev_addr);
 
 	return 0;
 
@@ -823,7 +826,7 @@ static int __exit sgiseeq_remove(struct platform_device *pdev)
 
 static struct platform_driver sgiseeq_driver = {
 	.probe	= sgiseeq_probe,
-	.remove	= __devexit_p(sgiseeq_remove),
+	.remove	= __exit_p(sgiseeq_remove),
 	.driver = {
 		.name	= "sgiseeq",
 		.owner	= THIS_MODULE,

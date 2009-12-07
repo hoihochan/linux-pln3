@@ -20,6 +20,7 @@
  */
 #define TARGET_DDR		0
 #define TARGET_DEV_BUS		1
+#define TARGET_SRAM		3
 #define TARGET_PCIE		4
 #define ATTR_DEV_SPI_ROM	0x1e
 #define ATTR_DEV_BOOT		0x1d
@@ -30,6 +31,7 @@
 #define ATTR_DEV_CS0		0x3e
 #define ATTR_PCIE_IO		0xe0
 #define ATTR_PCIE_MEM		0xe8
+#define ATTR_SRAM		0x01
 
 /*
  * Helpers to get DDR bank info
@@ -103,13 +105,19 @@ void __init kirkwood_setup_cpu_mbus(void)
 	setup_cpu_win(0, KIRKWOOD_PCIE_IO_PHYS_BASE, KIRKWOOD_PCIE_IO_SIZE,
 		      TARGET_PCIE, ATTR_PCIE_IO, KIRKWOOD_PCIE_IO_BUS_BASE);
 	setup_cpu_win(1, KIRKWOOD_PCIE_MEM_PHYS_BASE, KIRKWOOD_PCIE_MEM_SIZE,
-		      TARGET_PCIE, ATTR_PCIE_MEM, -1);
+		      TARGET_PCIE, ATTR_PCIE_MEM, KIRKWOOD_PCIE_MEM_BUS_BASE);
 
 	/*
 	 * Setup window for NAND controller.
 	 */
 	setup_cpu_win(2, KIRKWOOD_NAND_MEM_PHYS_BASE, KIRKWOOD_NAND_MEM_SIZE,
 		      TARGET_DEV_BUS, ATTR_DEV_NAND, -1);
+
+	/*
+	 * Setup window for SRAM.
+	 */
+	setup_cpu_win(3, KIRKWOOD_SRAM_PHYS_BASE, KIRKWOOD_SRAM_SIZE,
+		      TARGET_SRAM, ATTR_SRAM, -1);
 
 	/*
 	 * Setup MBUS dram target info.

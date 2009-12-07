@@ -10,6 +10,7 @@
 #define WACOM_WAC_H
 
 #define STYLUS_DEVICE_ID	0x02
+#define TOUCH_DEVICE_ID		0x03
 #define CURSOR_DEVICE_ID	0x06
 #define ERASER_DEVICE_ID	0x0A
 #define PAD_DEVICE_ID		0x0F
@@ -24,9 +25,13 @@ enum {
 	INTUOS3S,
 	INTUOS3,
 	INTUOS3L,
+	INTUOS4S,
+	INTUOS4,
+	INTUOS4L,
 	CINTIQ,
 	WACOM_BEE,
 	WACOM_MO,
+	TABLETPC,
 	MAX_TYPE
 };
 
@@ -38,6 +43,8 @@ struct wacom_features {
 	int pressure_max;
 	int distance_max;
 	int type;
+	int touch_x_max;
+	int touch_y_max;
 };
 
 struct wacom_wac {

@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2006 - 2008 NetEffect, Inc. All rights reserved.
+* Copyright (c) 2006 - 2009 Intel-NE, Inc.  All rights reserved.
 *
 * This software is available to you under a choice of one of two
 * licenses.  You may choose to be licensed under the terms of the GNU
@@ -35,11 +35,14 @@
 
 #include <linux/inet_lro.h>
 
+#define NES_PHY_TYPE_CX4       1
 #define NES_PHY_TYPE_1G        2
 #define NES_PHY_TYPE_IRIS      3
 #define NES_PHY_TYPE_ARGUS     4
 #define NES_PHY_TYPE_PUMA_1G   5
 #define NES_PHY_TYPE_PUMA_10G  6
+#define NES_PHY_TYPE_GLADIUS   7
+#define NES_PHY_TYPE_SFP_D     8
 
 #define NES_MULTICAST_PF_MAX 8
 
@@ -60,6 +63,7 @@ enum pci_regs {
 	NES_CQ_ACK = 0x0034,
 	NES_WQE_ALLOC = 0x0040,
 	NES_CQE_ALLOC = 0x0044,
+	NES_AEQ_ALLOC = 0x0048
 };
 
 enum indexed_regs {
@@ -156,6 +160,7 @@ enum indexed_regs {
 	NES_IDX_ENDNODE0_NSTAT_TX_OCTETS_HI = 0x7004,
 	NES_IDX_ENDNODE0_NSTAT_TX_FRAMES_LO = 0x7008,
 	NES_IDX_ENDNODE0_NSTAT_TX_FRAMES_HI = 0x700c,
+	NES_IDX_WQM_CONFIG1 = 0x5004,
 	NES_IDX_CM_CONFIG = 0x5100,
 	NES_IDX_NIC_LOGPORT_TO_PHYPORT = 0x6000,
 	NES_IDX_NIC_PHYPORT_TO_USW = 0x6008,
@@ -236,6 +241,7 @@ enum nes_cqp_stag_wqeword_idx {
 };
 
 #define NES_CQP_OP_IWARP_STATE_SHIFT 28
+#define NES_CQP_OP_TERMLEN_SHIFT     28
 
 enum nes_cqp_qp_bits {
 	NES_CQP_QP_ARP_VALID = (1<<8),
@@ -260,12 +266,16 @@ enum nes_cqp_qp_bits {
 	NES_CQP_QP_IWARP_STATE_TERMINATE = (5<<NES_CQP_OP_IWARP_STATE_SHIFT),
 	NES_CQP_QP_IWARP_STATE_ERROR = (6<<NES_CQP_OP_IWARP_STATE_SHIFT),
 	NES_CQP_QP_IWARP_STATE_MASK = (7<<NES_CQP_OP_IWARP_STATE_SHIFT),
+	NES_CQP_QP_TERM_DONT_SEND_FIN = (1<<24),
+	NES_CQP_QP_TERM_DONT_SEND_TERM_MSG = (1<<25),
 	NES_CQP_QP_RESET = (1<<31),
 };
 
 enum nes_cqp_qp_wqe_word_idx {
 	NES_CQP_QP_WQE_CONTEXT_LOW_IDX = 6,
 	NES_CQP_QP_WQE_CONTEXT_HIGH_IDX = 7,
+	NES_CQP_QP_WQE_FLUSH_SQ_CODE = 8,
+	NES_CQP_QP_WQE_FLUSH_RQ_CODE = 9,
 	NES_CQP_QP_WQE_NEW_MSS_IDX = 15,
 };
 
@@ -356,6 +366,7 @@ enum nes_cqp_arp_bits {
 enum nes_cqp_flush_bits {
 	NES_CQP_FLUSH_SQ = (1<<30),
 	NES_CQP_FLUSH_RQ = (1<<31),
+	NES_CQP_FLUSH_MAJ_MIN = (1<<28),
 };
 
 enum nes_cqe_opcode_bits {
@@ -628,11 +639,14 @@ enum nes_aeqe_bits {
 	NES_AEQE_INBOUND_RDMA = (1<<19),
 	NES_AEQE_IWARP_STATE_MASK = (7<<20),
 	NES_AEQE_TCP_STATE_MASK = (0xf<<24),
+	NES_AEQE_Q2_DATA_WRITTEN = (0x3<<28),
 	NES_AEQE_VALID = (1<<31),
 };
 
 #define NES_AEQE_IWARP_STATE_SHIFT	20
 #define NES_AEQE_TCP_STATE_SHIFT	24
+#define NES_AEQE_Q2_DATA_ETHERNET       (1<<28)
+#define NES_AEQE_Q2_DATA_MPA            (1<<29)
 
 enum nes_aeqe_iwarp_state {
 	NES_AEQE_IWARP_STATE_NON_EXISTANT = 0,
@@ -744,6 +758,15 @@ enum nes_iwarp_sq_wqe_bits {
 	NES_IWARP_SQ_OP_LOCINV = 10,
 	NES_IWARP_SQ_OP_RDMAR_LOCINV = 11,
 	NES_IWARP_SQ_OP_NOP = 12,
+};
+
+enum nes_iwarp_cqe_major_code {
+	NES_IWARP_CQE_MAJOR_FLUSH = 1,
+	NES_IWARP_CQE_MAJOR_DRV = 0x8000
+};
+
+enum nes_iwarp_cqe_minor_code {
+	NES_IWARP_CQE_MINOR_FLUSH = 1
 };
 
 #define NES_EEPROM_READ_REQUEST (1<<16)
@@ -873,7 +896,6 @@ struct nes_hw_nic {
 	u8 replenishing_rq;
 	u8 reserved;
 
-	spinlock_t sq_lock;
 	spinlock_t rq_lock;
 };
 
@@ -967,6 +989,7 @@ struct nes_arp_entry {
 #define DEFAULT_JUMBO_NES_QL_TARGET 40
 #define DEFAULT_JUMBO_NES_QL_HIGH   128
 #define NES_NIC_CQ_DOWNWARD_TREND   16
+#define NES_PFT_SIZE		    48
 
 struct nes_hw_tune_timer {
     /* u16 cq_count; */
@@ -1079,6 +1102,7 @@ struct nes_adapter {
 	u32 et_rx_max_coalesced_frames_high;
 	u32 et_rate_sample_interval;
 	u32 timer_int_limit;
+	u32 wqm_quanta;
 
 	/* Adapter base MAC address */
 	u32 mac_addr_low;
@@ -1094,12 +1118,14 @@ struct nes_adapter {
 	u16 pd_config_base[4];
 
 	u16 link_interrupt_count[4];
+	u8 crit_error_count[32];
 
 	/* the phy index for each port */
 	u8  phy_index[4];
 	u8  mac_sw_state[4];
 	u8  mac_link_down[4];
 	u8  phy_type[4];
+	u8  log_port;
 
 	/* PCI information */
 	unsigned int  devfn;
@@ -1111,8 +1137,10 @@ struct nes_adapter {
 	u8            netdev_max;	/* from host nic address count in EEPROM */
 	u8            port_count;
 	u8            virtwq;
+	u8            send_term_ok;
 	u8            et_use_adaptive_rx_coalesce;
 	u8            adapter_fcn_count;
+	u8 pft_mcast_map[NES_PFT_SIZE];
 };
 
 struct nes_pbl {
@@ -1140,7 +1168,6 @@ struct nes_ib_device;
 struct nes_vnic {
 	struct nes_ib_device *nesibdev;
 	u64 sq_full;
-	u64 sq_locked;
 	u64 tso_requests;
 	u64 segmented_tso_requests;
 	u64 linearized_skbs;
@@ -1208,6 +1235,90 @@ struct nes_ib_device {
 	u32 num_cq;
 	u32 num_pd;
 };
+
+enum nes_hdrct_flags {
+	DDP_LEN_FLAG                    = 0x80,
+	DDP_HDR_FLAG                    = 0x40,
+	RDMA_HDR_FLAG                   = 0x20
+};
+
+enum nes_term_layers {
+	LAYER_RDMA			= 0,
+	LAYER_DDP			= 1,
+	LAYER_MPA			= 2
+};
+
+enum nes_term_error_types {
+	RDMAP_CATASTROPHIC		= 0,
+	RDMAP_REMOTE_PROT		= 1,
+	RDMAP_REMOTE_OP			= 2,
+	DDP_CATASTROPHIC		= 0,
+	DDP_TAGGED_BUFFER		= 1,
+	DDP_UNTAGGED_BUFFER		= 2,
+	DDP_LLP				= 3
+};
+
+enum nes_term_rdma_errors {
+	RDMAP_INV_STAG			= 0x00,
+	RDMAP_INV_BOUNDS		= 0x01,
+	RDMAP_ACCESS			= 0x02,
+	RDMAP_UNASSOC_STAG		= 0x03,
+	RDMAP_TO_WRAP			= 0x04,
+	RDMAP_INV_RDMAP_VER		= 0x05,
+	RDMAP_UNEXPECTED_OP		= 0x06,
+	RDMAP_CATASTROPHIC_LOCAL	= 0x07,
+	RDMAP_CATASTROPHIC_GLOBAL	= 0x08,
+	RDMAP_CANT_INV_STAG		= 0x09,
+	RDMAP_UNSPECIFIED		= 0xff
+};
+
+enum nes_term_ddp_errors {
+	DDP_CATASTROPHIC_LOCAL		= 0x00,
+	DDP_TAGGED_INV_STAG		= 0x00,
+	DDP_TAGGED_BOUNDS		= 0x01,
+	DDP_TAGGED_UNASSOC_STAG		= 0x02,
+	DDP_TAGGED_TO_WRAP		= 0x03,
+	DDP_TAGGED_INV_DDP_VER		= 0x04,
+	DDP_UNTAGGED_INV_QN		= 0x01,
+	DDP_UNTAGGED_INV_MSN_NO_BUF	= 0x02,
+	DDP_UNTAGGED_INV_MSN_RANGE	= 0x03,
+	DDP_UNTAGGED_INV_MO		= 0x04,
+	DDP_UNTAGGED_INV_TOO_LONG	= 0x05,
+	DDP_UNTAGGED_INV_DDP_VER	= 0x06
+};
+
+enum nes_term_mpa_errors {
+	MPA_CLOSED			= 0x01,
+	MPA_CRC				= 0x02,
+	MPA_MARKER			= 0x03,
+	MPA_REQ_RSP			= 0x04,
+};
+
+struct nes_terminate_hdr {
+	u8 layer_etype;
+	u8 error_code;
+	u8 hdrct;
+	u8 rsvd;
+};
+
+/* Used to determine how to fill in terminate error codes */
+#define IWARP_OPCODE_WRITE		0
+#define IWARP_OPCODE_READREQ		1
+#define IWARP_OPCODE_READRSP		2
+#define IWARP_OPCODE_SEND		3
+#define IWARP_OPCODE_SEND_INV		4
+#define IWARP_OPCODE_SEND_SE		5
+#define IWARP_OPCODE_SEND_SE_INV	6
+#define IWARP_OPCODE_TERM		7
+
+/* These values are used only during terminate processing */
+#define TERM_DDP_LEN_TAGGED	14
+#define TERM_DDP_LEN_UNTAGGED	18
+#define TERM_RDMA_LEN		28
+#define RDMA_OPCODE_MASK	0x0f
+#define RDMA_READ_REQ_OPCODE	1
+#define BAD_FRAME_OFFSET	64
+#define CQE_MAJOR_DRV		0x8000
 
 #define nes_vlan_rx vlan_hwaccel_receive_skb
 #define nes_netif_rx netif_receive_skb

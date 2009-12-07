@@ -59,7 +59,8 @@
 #define B43legacy_MMIO_XMITSTAT_1		0x174
 #define B43legacy_MMIO_REV3PLUS_TSF_LOW	0x180 /* core rev >= 3 only */
 #define B43legacy_MMIO_REV3PLUS_TSF_HIGH	0x184 /* core rev >= 3 only */
-
+#define B43legacy_MMIO_TSF_CFP_REP	0x188
+#define B43legacy_MMIO_TSF_CFP_START	0x18C
 /* 32-bit DMA */
 #define B43legacy_MMIO_DMA32_BASE0	0x200
 #define B43legacy_MMIO_DMA32_BASE1	0x220
@@ -145,6 +146,10 @@
 #define B43legacy_SHM_SH_PRMAXTIME	0x0074 /* Probe Response max time */
 #define B43legacy_SHM_SH_PRPHYCTL	0x0188 /* Probe Resp PHY TX control */
 /* SHM_SHARED rate tables */
+#define B43legacy_SHM_SH_OFDMDIRECT	0x0480 /* Pointer to OFDM direct map */
+#define B43legacy_SHM_SH_OFDMBASIC	0x04A0 /* Pointer to OFDM basic rate map */
+#define B43legacy_SHM_SH_CCKDIRECT	0x04C0 /* Pointer to CCK direct map */
+#define B43legacy_SHM_SH_CCKBASIC	0x04E0 /* Pointer to CCK basic rate map */
 /* SHM_SHARED microcode soft registers */
 #define B43legacy_SHM_SH_UCODEREV	0x0000 /* Microcode revision */
 #define B43legacy_SHM_SH_UCODEPATCH	0x0002 /* Microcode patchlevel */
@@ -254,7 +259,6 @@
 
 #define B43legacy_IRQ_ALL		0xFFFFFFFF
 #define B43legacy_IRQ_MASKTEMPLATE	(B43legacy_IRQ_MAC_SUSPENDED |	\
-					 B43legacy_IRQ_BEACON |		\
 					 B43legacy_IRQ_TBTT_INDI |	\
 					 B43legacy_IRQ_ATIM_END |	\
 					 B43legacy_IRQ_PMQ |		\
@@ -592,24 +596,26 @@ struct b43legacy_wl {
 	/* Stats about the wireless interface */
 	struct ieee80211_low_level_stats ieee_stats;
 
+#ifdef CONFIG_B43LEGACY_HWRNG
 	struct hwrng rng;
 	u8 rng_initialized;
 	char rng_name[30 + 1];
-
-	/* The RF-kill button */
-	struct b43legacy_rfkill rfkill;
+#endif
 
 	/* List of all wireless devices on this chip */
 	struct list_head devlist;
 	u8 nr_devs;
 
 	bool radiotap_enabled;
+	bool radio_enabled;
 
 	/* The beacon we are currently using (AP or IBSS mode).
 	 * This beacon stuff is protected by the irq_lock. */
 	struct sk_buff *current_beacon;
 	bool beacon0_uploaded;
 	bool beacon1_uploaded;
+	bool beacon_templates_virgin; /* Never wrote the templates? */
+	struct work_struct beacon_update_trigger;
 };
 
 /* Pointers to the firmware data and meta information about it. */
@@ -663,7 +669,6 @@ struct b43legacy_wldev {
 	bool bad_frames_preempt;/* Use "Bad Frames Preemption". */
 	bool dfq_valid;		/* Directed frame queue valid (IBSS PS mode, ATIM). */
 	bool short_preamble;	/* TRUE if using short preamble. */
-	bool short_slot;	/* TRUE if using short slot timing. */
 	bool radio_hw_enable;	/* State of radio hardware enable bit. */
 
 	/* PHY/Radio device. */
@@ -687,8 +692,8 @@ struct b43legacy_wldev {
 	/* Reason code of the last interrupt. */
 	u32 irq_reason;
 	u32 dma_reason[6];
-	/* saved irq enable/disable state bitfield. */
-	u32 irq_savedstate;
+	/* The currently active generic-interrupt mask. */
+	u32 irq_mask;
 	/* Link Quality calculation context. */
 	struct b43legacy_noise_calculation noisecalc;
 	/* if > 0 MAC is suspended. if == 0 MAC is enabled. */

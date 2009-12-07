@@ -194,7 +194,7 @@ int htab_bolt_mapping(unsigned long vstart, unsigned long vend,
 		unsigned long tprot = prot;
 
 		/* Make kernel text executable */
-		if (in_kernel_text(vaddr))
+		if (overlaps_kernel_text(vaddr, vaddr + step))
 			tprot &= ~HPTE_R_N;
 
 		hash = hpt_hash(va, shift, ssize);
@@ -348,6 +348,7 @@ static int __init htab_dt_scan_page_sizes(unsigned long node,
 	return 0;
 }
 
+#ifdef CONFIG_HUGETLB_PAGE
 /* Scan for 16G memory blocks that have been set aside for huge pages
  * and reserve those blocks for 16G huge pages.
  */
@@ -387,6 +388,7 @@ static int __init htab_dt_scan_hugepage_blocks(unsigned long node,
 	}
 	return 0;
 }
+#endif /* CONFIG_HUGETLB_PAGE */
 
 static void __init htab_init_page_sizes(void)
 {
@@ -514,7 +516,7 @@ static int __init htab_dt_scan_pftsize(unsigned long node,
 
 static unsigned long __init htab_get_table_size(void)
 {
-	unsigned long mem_size, rnd_mem_size, pteg_count;
+	unsigned long mem_size, rnd_mem_size, pteg_count, psize;
 
 	/* If hash size isn't already provided by the platform, we try to
 	 * retrieve it from the device-tree. If it's not there neither, we
@@ -532,7 +534,8 @@ static unsigned long __init htab_get_table_size(void)
 		rnd_mem_size <<= 1;
 
 	/* # pages / 2 */
-	pteg_count = max(rnd_mem_size >> (12 + 1), 1UL << 11);
+	psize = mmu_psize_defs[mmu_virtual_psize].shift;
+	pteg_count = max(rnd_mem_size >> (psize + 1), 1UL << 11);
 
 	return pteg_count << 7;
 }
@@ -541,7 +544,7 @@ static unsigned long __init htab_get_table_size(void)
 void create_section_mapping(unsigned long start, unsigned long end)
 {
 	BUG_ON(htab_bolt_mapping(start, end, __pa(start),
-				 PAGE_KERNEL, mmu_linear_psize,
+				 pgprot_val(PAGE_KERNEL), mmu_linear_psize,
 				 mmu_kernel_ssize));
 }
 
@@ -587,7 +590,7 @@ static void __init htab_finish_init(void)
 	make_bl(htab_call_hpte_updatepp, ppc_md.hpte_updatepp);
 }
 
-void __init htab_initialize(void)
+static void __init htab_initialize(void)
 {
 	unsigned long table;
 	unsigned long pteg_count;
@@ -649,7 +652,7 @@ void __init htab_initialize(void)
 		mtspr(SPRN_SDR1, _SDR1);
 	}
 
-	prot = PAGE_KERNEL;
+	prot = pgprot_val(PAGE_KERNEL);
 
 #ifdef CONFIG_DEBUG_PAGEALLOC
 	linear_map_hash_count = lmb_end_of_DRAM() >> PAGE_SHIFT;
@@ -729,11 +732,43 @@ void __init htab_initialize(void)
 #undef KB
 #undef MB
 
-void htab_initialize_secondary(void)
+void __init early_init_mmu(void)
 {
+	/* Setup initial STAB address in the PACA */
+	get_paca()->stab_real = __pa((u64)&initial_stab);
+	get_paca()->stab_addr = (u64)&initial_stab;
+
+	/* Initialize the MMU Hash table and create the linear mapping
+	 * of memory. Has to be done before stab/slb initialization as
+	 * this is currently where the page size encoding is obtained
+	 */
+	htab_initialize();
+
+	/* Initialize stab / SLB management except on iSeries
+	 */
+	if (cpu_has_feature(CPU_FTR_SLB))
+		slb_initialize();
+	else if (!firmware_has_feature(FW_FEATURE_ISERIES))
+		stab_initialize(get_paca()->stab_real);
+}
+
+#ifdef CONFIG_SMP
+void __cpuinit early_init_mmu_secondary(void)
+{
+	/* Initialize hash table for that CPU */
 	if (!firmware_has_feature(FW_FEATURE_LPAR))
 		mtspr(SPRN_SDR1, _SDR1);
+
+	/* Initialize STAB/SLB. We use a virtual address as it works
+	 * in real mode on pSeries and we want a virutal address on
+	 * iSeries anyway
+	 */
+	if (cpu_has_feature(CPU_FTR_SLB))
+		slb_initialize();
+	else
+		stab_initialize(get_paca()->stab_addr);
 }
+#endif /* CONFIG_SMP */
 
 /*
  * Called by asm hashtable.S for doing lazy icache flush
@@ -856,7 +891,7 @@ int hash_page(unsigned long ea, unsigned long access, unsigned long trap)
 	unsigned long vsid;
 	struct mm_struct *mm;
 	pte_t *ptep;
-	cpumask_t tmp;
+	const struct cpumask *tmp;
 	int rc, user_region = 0, local = 0;
 	int psize, ssize;
 
@@ -904,8 +939,8 @@ int hash_page(unsigned long ea, unsigned long access, unsigned long trap)
 		return 1;
 
 	/* Check CPU locality */
-	tmp = cpumask_of_cpu(smp_processor_id());
-	if (user_region && cpus_equal(mm->cpu_vm_mask, tmp))
+	tmp = cpumask_of(smp_processor_id());
+	if (user_region && cpumask_equal(mm_cpumask(mm), tmp))
 		local = 1;
 
 #ifdef CONFIG_HUGETLB_PAGE
@@ -1021,7 +1056,6 @@ void hash_preload(struct mm_struct *mm, unsigned long ea,
 	unsigned long vsid;
 	void *pgdir;
 	pte_t *ptep;
-	cpumask_t mask;
 	unsigned long flags;
 	int local = 0;
 	int ssize;
@@ -1064,8 +1098,7 @@ void hash_preload(struct mm_struct *mm, unsigned long ea,
 	local_irq_save(flags);
 
 	/* Is that local to this CPU ? */
-	mask = cpumask_of_cpu(smp_processor_id());
-	if (cpus_equal(mm->cpu_vm_mask, mask))
+	if (cpumask_equal(mm_cpumask(mm), cpumask_of(smp_processor_id())))
 		local = 1;
 
 	/* Hash it in */

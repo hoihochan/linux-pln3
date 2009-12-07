@@ -4,8 +4,12 @@
   * IOCTL handlers as well as command preperation and response routines
   *  for sending scan commands to the firmware.
   */
+#include <linux/types.h>
+#include <linux/kernel.h>
 #include <linux/etherdevice.h>
+#include <linux/if_arp.h>
 #include <asm/unaligned.h>
+#include <net/lib80211.h>
 
 #include "host.h"
 #include "decl.h"
@@ -24,12 +28,12 @@
                              + 40)	/* 40 for WPAIE */
 
 //! Memory needed to store a max sized channel List TLV for a firmware scan
-#define CHAN_TLV_MAX_SIZE  (sizeof(struct mrvlietypesheader)    \
+#define CHAN_TLV_MAX_SIZE  (sizeof(struct mrvl_ie_header)    \
                             + (MRVDRV_MAX_CHANNELS_PER_SCAN     \
                                * sizeof(struct chanscanparamset)))
 
 //! Memory needed to store a max number/size SSID TLV for a firmware scan
-#define SSID_TLV_MAX_SIZE  (1 * sizeof(struct mrvlietypes_ssidparamset))
+#define SSID_TLV_MAX_SIZE  (1 * sizeof(struct mrvl_ie_ssid_param_set))
 
 //! Maximum memory needed for a cmd_ds_802_11_scan with all TLVs at max
 #define MAX_SCAN_CFG_ALLOC (sizeof(struct cmd_ds_802_11_scan)	\
@@ -51,6 +55,8 @@
 
 //! Scan time specified in the channel TLV for each channel for active scans
 #define MRVDRV_ACTIVE_SCAN_CHAN_TIME   100
+
+#define DEFAULT_MAX_SCAN_AGE (15 * HZ)
 
 static int lbs_ret_80211_scan(struct lbs_private *priv, unsigned long dummy,
 			      struct cmd_header *resp);
@@ -206,7 +212,7 @@ static int lbs_scan_create_channel_list(struct lbs_private *priv,
  */
 static int lbs_scan_add_ssid_tlv(struct lbs_private *priv, u8 *tlv)
 {
-	struct mrvlietypes_ssidparamset *ssid_tlv = (void *)tlv;
+	struct mrvl_ie_ssid_param_set *ssid_tlv = (void *)tlv;
 
 	ssid_tlv->header.type = cpu_to_le16(TLV_TYPE_SSID);
 	ssid_tlv->header.len = cpu_to_le16(priv->scan_ssid_len);
@@ -244,7 +250,7 @@ static int lbs_scan_add_chanlist_tlv(uint8_t *tlv,
 				     int chan_count)
 {
 	size_t size = sizeof(struct chanscanparamset) *chan_count;
-	struct mrvlietypes_chanlistparamset *chan_tlv = (void *)tlv;
+	struct mrvl_ie_chanlist_param_set *chan_tlv = (void *)tlv;
 
 	chan_tlv->header.type = cpu_to_le16(TLV_TYPE_CHANLIST);
 	memcpy(chan_tlv->chanscanparam, chan_list, size);
@@ -265,7 +271,7 @@ static int lbs_scan_add_chanlist_tlv(uint8_t *tlv,
 static int lbs_scan_add_rates_tlv(uint8_t *tlv)
 {
 	int i;
-	struct mrvlietypes_ratesparamset *rate_tlv = (void *)tlv;
+	struct mrvl_ie_rates_param_set *rate_tlv = (void *)tlv;
 
 	rate_tlv->header.type = cpu_to_le16(TLV_TYPE_RATES);
 	tlv += sizeof(rate_tlv->header);
@@ -359,7 +365,7 @@ int lbs_scan_networks(struct lbs_private *priv, int full_scan)
 #ifdef CONFIG_LIBERTAS_DEBUG
 	struct bss_descriptor *iter;
 	int i = 0;
-	DECLARE_MAC_BUF(mac);
+	DECLARE_SSID_BUF(ssid);
 #endif
 
 	lbs_deb_enter_args(LBS_DEB_SCAN, "full_scan %d", full_scan);
@@ -451,9 +457,9 @@ int lbs_scan_networks(struct lbs_private *priv, int full_scan)
 	mutex_lock(&priv->lock);
 	lbs_deb_scan("scan table:\n");
 	list_for_each_entry(iter, &priv->network_list, list)
-		lbs_deb_scan("%02d: BSSID %s, RSSI %d, SSID '%s'\n",
-			     i++, print_mac(mac, iter->bssid), iter->rssi,
-			     escape_essid(iter->ssid, iter->ssid_len));
+		lbs_deb_scan("%02d: BSSID %pM, RSSI %d, SSID '%s'\n",
+			     i++, iter->bssid, iter->rssi,
+			     print_ssid(ssid, iter->ssid, iter->ssid_len));
 	mutex_unlock(&priv->lock);
 #endif
 
@@ -508,12 +514,12 @@ void lbs_scan_worker(struct work_struct *work)
 static int lbs_process_bss(struct bss_descriptor *bss,
 			   uint8_t **pbeaconinfo, int *bytesleft)
 {
-	struct ieeetypes_fhparamset *pFH;
-	struct ieeetypes_dsparamset *pDS;
-	struct ieeetypes_cfparamset *pCF;
-	struct ieeetypes_ibssparamset *pibss;
-	DECLARE_MAC_BUF(mac);
-	struct ieeetypes_countryinfoset *pcountryinfo;
+	struct ieee_ie_fh_param_set *fh;
+	struct ieee_ie_ds_param_set *ds;
+	struct ieee_ie_cf_param_set *cf;
+	struct ieee_ie_ibss_param_set *ibss;
+	DECLARE_SSID_BUF(ssid);
+	struct ieee_ie_country_info_set *pcountryinfo;
 	uint8_t *pos, *end, *p;
 	uint8_t n_ex_rates = 0, got_basic_rates = 0, n_basic_rates = 0;
 	uint16_t beaconsize = 0;
@@ -544,7 +550,7 @@ static int lbs_process_bss(struct bss_descriptor *bss,
 	*bytesleft -= beaconsize;
 
 	memcpy(bss->bssid, pos, ETH_ALEN);
-	lbs_deb_scan("process_bss: BSSID %s\n", print_mac(mac, bss->bssid));
+	lbs_deb_scan("process_bss: BSSID %pM\n", bss->bssid);
 	pos += ETH_ALEN;
 
 	if ((end - pos) < 12) {
@@ -588,78 +594,75 @@ static int lbs_process_bss(struct bss_descriptor *bss,
 
 	/* process variable IE */
 	while (pos <= end - 2) {
-		struct ieee80211_info_element * elem = (void *)pos;
-
-		if (pos + elem->len > end) {
+		if (pos + pos[1] > end) {
 			lbs_deb_scan("process_bss: error in processing IE, "
 				     "bytes left < IE length\n");
 			break;
 		}
 
-		switch (elem->id) {
-		case MFIE_TYPE_SSID:
-			bss->ssid_len = min_t(int, 32, elem->len);
-			memcpy(bss->ssid, elem->data, bss->ssid_len);
+		switch (pos[0]) {
+		case WLAN_EID_SSID:
+			bss->ssid_len = min_t(int, IEEE80211_MAX_SSID_LEN, pos[1]);
+			memcpy(bss->ssid, pos + 2, bss->ssid_len);
 			lbs_deb_scan("got SSID IE: '%s', len %u\n",
-			             escape_essid(bss->ssid, bss->ssid_len),
+			             print_ssid(ssid, bss->ssid, bss->ssid_len),
 			             bss->ssid_len);
 			break;
 
-		case MFIE_TYPE_RATES:
-			n_basic_rates = min_t(uint8_t, MAX_RATES, elem->len);
-			memcpy(bss->rates, elem->data, n_basic_rates);
+		case WLAN_EID_SUPP_RATES:
+			n_basic_rates = min_t(uint8_t, MAX_RATES, pos[1]);
+			memcpy(bss->rates, pos + 2, n_basic_rates);
 			got_basic_rates = 1;
 			lbs_deb_scan("got RATES IE\n");
 			break;
 
-		case MFIE_TYPE_FH_SET:
-			pFH = (struct ieeetypes_fhparamset *) pos;
-			memmove(&bss->phyparamset.fhparamset, pFH,
-				sizeof(struct ieeetypes_fhparamset));
+		case WLAN_EID_FH_PARAMS:
+			fh = (struct ieee_ie_fh_param_set *) pos;
+			memcpy(&bss->phy.fh, fh, sizeof(*fh));
 			lbs_deb_scan("got FH IE\n");
 			break;
 
-		case MFIE_TYPE_DS_SET:
-			pDS = (struct ieeetypes_dsparamset *) pos;
-			bss->channel = pDS->currentchan;
-			memcpy(&bss->phyparamset.dsparamset, pDS,
-			       sizeof(struct ieeetypes_dsparamset));
+		case WLAN_EID_DS_PARAMS:
+			ds = (struct ieee_ie_ds_param_set *) pos;
+			bss->channel = ds->channel;
+			memcpy(&bss->phy.ds, ds, sizeof(*ds));
 			lbs_deb_scan("got DS IE, channel %d\n", bss->channel);
 			break;
 
-		case MFIE_TYPE_CF_SET:
-			pCF = (struct ieeetypes_cfparamset *) pos;
-			memcpy(&bss->ssparamset.cfparamset, pCF,
-			       sizeof(struct ieeetypes_cfparamset));
+		case WLAN_EID_CF_PARAMS:
+			cf = (struct ieee_ie_cf_param_set *) pos;
+			memcpy(&bss->ss.cf, cf, sizeof(*cf));
 			lbs_deb_scan("got CF IE\n");
 			break;
 
-		case MFIE_TYPE_IBSS_SET:
-			pibss = (struct ieeetypes_ibssparamset *) pos;
-			bss->atimwindow = le16_to_cpu(pibss->atimwindow);
-			memmove(&bss->ssparamset.ibssparamset, pibss,
-				sizeof(struct ieeetypes_ibssparamset));
+		case WLAN_EID_IBSS_PARAMS:
+			ibss = (struct ieee_ie_ibss_param_set *) pos;
+			bss->atimwindow = ibss->atimwindow;
+			memcpy(&bss->ss.ibss, ibss, sizeof(*ibss));
 			lbs_deb_scan("got IBSS IE\n");
 			break;
 
-		case MFIE_TYPE_COUNTRY:
-			pcountryinfo = (struct ieeetypes_countryinfoset *) pos;
+		case WLAN_EID_COUNTRY:
+			pcountryinfo = (struct ieee_ie_country_info_set *) pos;
 			lbs_deb_scan("got COUNTRY IE\n");
-			if (pcountryinfo->len < sizeof(pcountryinfo->countrycode)
-			    || pcountryinfo->len > 254) {
-				lbs_deb_scan("process_bss: 11D- Err CountryInfo len %d, min %zd, max 254\n",
-					     pcountryinfo->len, sizeof(pcountryinfo->countrycode));
+			if (pcountryinfo->header.len < sizeof(pcountryinfo->countrycode)
+			    || pcountryinfo->header.len > 254) {
+				lbs_deb_scan("%s: 11D- Err CountryInfo len %d, min %zd, max 254\n",
+					     __func__,
+					     pcountryinfo->header.len,
+					     sizeof(pcountryinfo->countrycode));
 				ret = -1;
 				goto done;
 			}
 
-			memcpy(&bss->countryinfo, pcountryinfo, pcountryinfo->len + 2);
+			memcpy(&bss->countryinfo, pcountryinfo,
+				pcountryinfo->header.len + 2);
 			lbs_deb_hex(LBS_DEB_SCAN, "process_bss: 11d countryinfo",
 				    (uint8_t *) pcountryinfo,
-				    (int) (pcountryinfo->len + 2));
+				    (int) (pcountryinfo->header.len + 2));
 			break;
 
-		case MFIE_TYPE_RATES_EX:
+		case WLAN_EID_EXT_SUPP_RATES:
 			/* only process extended supported rate if data rate is
 			 * already found. Data rate IE should come before
 			 * extended supported rate IE
@@ -670,50 +673,51 @@ static int lbs_process_bss(struct bss_descriptor *bss,
 				break;
 			}
 
-			n_ex_rates = elem->len;
+			n_ex_rates = pos[1];
 			if (n_basic_rates + n_ex_rates > MAX_RATES)
 				n_ex_rates = MAX_RATES - n_basic_rates;
 
 			p = bss->rates + n_basic_rates;
-			memcpy(p, elem->data, n_ex_rates);
+			memcpy(p, pos + 2, n_ex_rates);
 			break;
 
-		case MFIE_TYPE_GENERIC:
-			if (elem->len >= 4 &&
-			    elem->data[0] == 0x00 && elem->data[1] == 0x50 &&
-			    elem->data[2] == 0xf2 && elem->data[3] == 0x01) {
-				bss->wpa_ie_len = min(elem->len + 2, MAX_WPA_IE_LEN);
-				memcpy(bss->wpa_ie, elem, bss->wpa_ie_len);
+		case WLAN_EID_GENERIC:
+			if (pos[1] >= 4 &&
+			    pos[2] == 0x00 && pos[3] == 0x50 &&
+			    pos[4] == 0xf2 && pos[5] == 0x01) {
+				bss->wpa_ie_len = min(pos[1] + 2, MAX_WPA_IE_LEN);
+				memcpy(bss->wpa_ie, pos, bss->wpa_ie_len);
 				lbs_deb_scan("got WPA IE\n");
-				lbs_deb_hex(LBS_DEB_SCAN, "WPA IE", bss->wpa_ie, elem->len);
-			} else if (elem->len >= MARVELL_MESH_IE_LENGTH &&
-				   elem->data[0] == 0x00 && elem->data[1] == 0x50 &&
-				   elem->data[2] == 0x43 && elem->data[3] == 0x04) {
+				lbs_deb_hex(LBS_DEB_SCAN, "WPA IE", bss->wpa_ie,
+					    bss->wpa_ie_len);
+			} else if (pos[1] >= MARVELL_MESH_IE_LENGTH &&
+				   pos[2] == 0x00 && pos[3] == 0x50 &&
+				   pos[4] == 0x43 && pos[5] == 0x04) {
 				lbs_deb_scan("got mesh IE\n");
 				bss->mesh = 1;
 			} else {
 				lbs_deb_scan("got generic IE: %02x:%02x:%02x:%02x, len %d\n",
-					elem->data[0], elem->data[1],
-					elem->data[2], elem->data[3],
-					elem->len);
+					pos[2], pos[3],
+					pos[4], pos[5],
+					pos[1]);
 			}
 			break;
 
-		case MFIE_TYPE_RSN:
+		case WLAN_EID_RSN:
 			lbs_deb_scan("got RSN IE\n");
-			bss->rsn_ie_len = min(elem->len + 2, MAX_WPA_IE_LEN);
-			memcpy(bss->rsn_ie, elem, bss->rsn_ie_len);
+			bss->rsn_ie_len = min(pos[1] + 2, MAX_WPA_IE_LEN);
+			memcpy(bss->rsn_ie, pos, bss->rsn_ie_len);
 			lbs_deb_hex(LBS_DEB_SCAN, "process_bss: RSN_IE",
-				    bss->rsn_ie, elem->len);
+				    bss->rsn_ie, bss->rsn_ie_len);
 			break;
 
 		default:
 			lbs_deb_scan("got IE 0x%04x, len %d\n",
-				     elem->id, elem->len);
+				     pos[0], pos[1]);
 			break;
 		}
 
-		pos += elem->len + 2;
+		pos += pos[1] + 2;
 	}
 
 	/* Timestamp */
@@ -741,10 +745,11 @@ done:
 int lbs_send_specific_ssid_scan(struct lbs_private *priv, uint8_t *ssid,
 				uint8_t ssid_len)
 {
+	DECLARE_SSID_BUF(ssid_buf);
 	int ret = 0;
 
 	lbs_deb_enter_args(LBS_DEB_SCAN, "SSID '%s'\n",
-			   escape_essid(ssid, ssid_len));
+			   print_ssid(ssid_buf, ssid, ssid_len));
 
 	if (!ssid_len)
 		goto out;
@@ -872,7 +877,7 @@ static inline char *lbs_translate_scan(struct lbs_private *priv,
 	iwe.u.bitrate.disabled = 0;
 	iwe.u.bitrate.value = 0;
 
-	for (j = 0; bss->rates[j] && (j < sizeof(bss->rates)); j++) {
+	for (j = 0; j < ARRAY_SIZE(bss->rates) && bss->rates[j]; j++) {
 		/* Bit rate given in 500 kb/s units */
 		iwe.u.bitrate.value = bss->rates[j] * 500000;
 		current_val = iwe_stream_add_value(info, start, current_val,
@@ -939,10 +944,16 @@ out:
 int lbs_set_scan(struct net_device *dev, struct iw_request_info *info,
 		 union iwreq_data *wrqu, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	DECLARE_SSID_BUF(ssid);
+	struct lbs_private *priv = dev->ml_priv;
 	int ret = 0;
 
 	lbs_deb_enter(LBS_DEB_WEXT);
+
+	if (!priv->radio_on) {
+		ret = -EINVAL;
+		goto out;
+	}
 
 	if (!netif_running(dev)) {
 		ret = -ENETDOWN;
@@ -963,7 +974,7 @@ int lbs_set_scan(struct net_device *dev, struct iw_request_info *info,
 		priv->scan_ssid_len = req->essid_len;
 		memcpy(priv->scan_ssid, req->essid, priv->scan_ssid_len);
 		lbs_deb_wext("set_scan, essid '%s'\n",
-			escape_essid(priv->scan_ssid, priv->scan_ssid_len));
+			print_ssid(ssid, priv->scan_ssid, priv->scan_ssid_len));
 	} else {
 		priv->scan_ssid_len = 0;
 	}
@@ -997,7 +1008,7 @@ int lbs_get_scan(struct net_device *dev, struct iw_request_info *info,
 		 struct iw_point *dwrq, char *extra)
 {
 #define SCAN_ITEM_SIZE 128
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	int err = 0;
 	char *ev = extra;
 	char *stop = ev + dwrq->length;
@@ -1119,7 +1130,7 @@ static int lbs_ret_80211_scan(struct lbs_private *priv, unsigned long dummy,
 		goto done;
 	}
 
-	bytesleft = le16_to_cpu(scanresp->bssdescriptsize);
+	bytesleft = get_unaligned_le16(&scanresp->bssdescriptsize);
 	lbs_deb_scan("SCAN_RESP: bssdescriptsize %d\n", bytesleft);
 
 	scanrespsize = le16_to_cpu(resp->size);
@@ -1146,7 +1157,6 @@ static int lbs_ret_80211_scan(struct lbs_private *priv, unsigned long dummy,
 		struct bss_descriptor new;
 		struct bss_descriptor *found = NULL;
 		struct bss_descriptor *oldest = NULL;
-		DECLARE_MAC_BUF(mac);
 
 		/* Process the data fields and IEs returned for this BSS */
 		memset(&new, 0, sizeof (struct bss_descriptor));
@@ -1185,7 +1195,7 @@ static int lbs_ret_80211_scan(struct lbs_private *priv, unsigned long dummy,
 			continue;
 		}
 
-		lbs_deb_scan("SCAN_RESP: BSSID %s\n", print_mac(mac, new.bssid));
+		lbs_deb_scan("SCAN_RESP: BSSID %pM\n", new.bssid);
 
 		/* Copy the locally created newbssentry to the scan table */
 		memcpy(found, &new, offsetof(struct bss_descriptor, list));

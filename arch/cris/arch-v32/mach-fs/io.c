@@ -12,8 +12,8 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <asm/io.h>
-#include <asm/arch/pinmux.h>
-#include <asm/arch/hwregs/gio_defs.h>
+#include <mach/pinmux.h>
+#include <hwregs/gio_defs.h>
 
 #ifndef DEBUG
 #define DEBUG(x)
@@ -52,7 +52,7 @@ struct crisv32_ioport crisv32_ioports[] = {
 	}
 };
 
-#define NBR_OF_PORTS sizeof(crisv32_ioports)/sizeof(struct crisv32_ioport)
+#define NBR_OF_PORTS ARRAY_SIZE(crisv32_ioports)
 
 struct crisv32_iopin crisv32_led_net0_green;
 struct crisv32_iopin crisv32_led_net0_red;

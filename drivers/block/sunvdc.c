@@ -1,6 +1,6 @@
 /* sunvdc.c: Sun LDOM Virtual Disk Client.
  *
- * Copyright (C) 2007 David S. Miller <davem@davemloft.net>
+ * Copyright (C) 2007, 2008 David S. Miller <davem@davemloft.net>
  */
 
 #include <linux/module.h>
@@ -103,7 +103,7 @@ static int vdc_getgeo(struct block_device *bdev, struct hd_geometry *geo)
 	return 0;
 }
 
-static struct block_device_operations vdc_fops = {
+static const struct block_device_operations vdc_fops = {
 	.owner		= THIS_MODULE,
 	.getgeo		= vdc_getgeo,
 };
@@ -153,7 +153,7 @@ static int vdc_send_attr(struct vio_driver_state *vio)
 	pkt.vdisk_block_size = port->vdisk_block_size;
 	pkt.max_xfer_size = port->max_xfer_size;
 
-	viodbg(HS, "SEND ATTR xfer_mode[0x%x] blksz[%u] max_xfer[%lu]\n",
+	viodbg(HS, "SEND ATTR xfer_mode[0x%x] blksz[%u] max_xfer[%llu]\n",
 	       pkt.xfer_mode, pkt.vdisk_block_size, pkt.max_xfer_size);
 
 	return vio_ldc_send(&port->vio, &pkt, sizeof(pkt));
@@ -164,8 +164,8 @@ static int vdc_handle_attr(struct vio_driver_state *vio, void *arg)
 	struct vdc_port *port = to_vdc_port(vio);
 	struct vio_disk_attr_info *pkt = arg;
 
-	viodbg(HS, "GOT ATTR stype[0x%x] ops[%lx] disk_size[%lu] disk_type[%x] "
-	       "xfer_mode[0x%x] blksz[%u] max_xfer[%lu]\n",
+	viodbg(HS, "GOT ATTR stype[0x%x] ops[%llx] disk_size[%llu] disk_type[%x] "
+	       "xfer_mode[0x%x] blksz[%u] max_xfer[%llu]\n",
 	       pkt->tag.stype, pkt->operations,
 	       pkt->vdisk_size, pkt->vdisk_type,
 	       pkt->xfer_mode, pkt->vdisk_block_size,
@@ -212,11 +212,6 @@ static void vdc_end_special(struct vdc_port *port, struct vio_disk_desc *desc)
 	vdc_finish(&port->vio, -err, WAITING_FOR_GEN_CMD);
 }
 
-static void vdc_end_request(struct request *req, int error, int num_sectors)
-{
-	__blk_end_request(req, error, num_sectors << 9);
-}
-
 static void vdc_end_one(struct vdc_port *port, struct vio_dring_state *dr,
 			unsigned int index)
 {
@@ -239,7 +234,7 @@ static void vdc_end_one(struct vdc_port *port, struct vio_dring_state *dr,
 
 	rqe->req = NULL;
 
-	vdc_end_request(req, (desc->status ? -EIO : 0), desc->size >> 9);
+	__blk_end_request(req, (desc->status ? -EIO : 0), desc->size);
 
 	if (blk_queue_stopped(port->disk->queue))
 		blk_start_queue(port->disk->queue);
@@ -421,7 +416,7 @@ static int __send_request(struct request *req)
 		desc->slice = 0;
 	}
 	desc->status = ~0;
-	desc->offset = (req->sector << 9) / port->vdisk_block_size;
+	desc->offset = (blk_rq_pos(req) << 9) / port->vdisk_block_size;
 	desc->size = len;
 	desc->ncookies = err;
 
@@ -446,14 +441,13 @@ out:
 static void do_vdc_request(struct request_queue *q)
 {
 	while (1) {
-		struct request *req = elv_next_request(q);
+		struct request *req = blk_fetch_request(q);
 
 		if (!req)
 			break;
 
-		blkdev_dequeue_request(req);
 		if (__send_request(req) < 0)
-			vdc_end_request(req, -EIO, req->hard_nr_sectors);
+			__blk_end_request_all(req, -EIO);
 	}
 }
 
@@ -753,7 +747,7 @@ static int __devinit vdc_port_probe(struct vio_dev *vdev,
 
 	err = -ENODEV;
 	if ((vdev->dev_no << PARTITION_SHIFT) & ~(u64)MINORMASK) {
-		printk(KERN_ERR PFX "Port id [%lu] too large.\n",
+		printk(KERN_ERR PFX "Port id [%llu] too large.\n",
 		       vdev->dev_no);
 		goto err_out_release_mdesc;
 	}
@@ -834,7 +828,7 @@ static int vdc_port_remove(struct vio_dev *vdev)
 	return 0;
 }
 
-static struct vio_device_id vdc_port_match[] = {
+static const struct vio_device_id vdc_port_match[] = {
 	{
 		.type = "vdc-port",
 	},

@@ -1,7 +1,7 @@
 /*
  * ASoC driver for TI DAVINCI EVM platform
  *
- * Author:      Vladimir Barinov, <vbarinov@ru.mvista.com>
+ * Author:      Vladimir Barinov, <vbarinov@embeddedalley.com>
  * Copyright:   (C) 2007 MontaVista Software, Inc., <source@mvista.com>
  *
  * This program is free software; you can redistribute it and/or modify
@@ -14,20 +14,27 @@
 #include <linux/timer.h>
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
+#include <linux/i2c.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/soc.h>
 #include <sound/soc-dapm.h>
 
 #include <asm/dma.h>
-#include <mach/hardware.h>
+#include <asm/mach-types.h>
+
+#include <mach/asp.h>
+#include <mach/edma.h>
+#include <mach/mux.h>
 
 #include "../codecs/tlv320aic3x.h"
+#include "../codecs/spdif_transciever.h"
 #include "davinci-pcm.h"
 #include "davinci-i2s.h"
+#include "davinci-mcasp.h"
 
-#define EVM_CODEC_CLOCK 22579200
-
+#define AUDIO_FORMAT (SND_SOC_DAIFMT_DSP_B | \
+		SND_SOC_DAIFMT_CBM_CFM | SND_SOC_DAIFMT_IB_NF)
 static int evm_hw_params(struct snd_pcm_substream *substream,
 			 struct snd_pcm_hw_params *params)
 {
@@ -35,22 +42,38 @@ static int evm_hw_params(struct snd_pcm_substream *substream,
 	struct snd_soc_dai *codec_dai = rtd->dai->codec_dai;
 	struct snd_soc_dai *cpu_dai = rtd->dai->cpu_dai;
 	int ret = 0;
+	unsigned sysclk;
+
+	/* ASP1 on DM355 EVM is clocked by an external oscillator */
+	if (machine_is_davinci_dm355_evm() || machine_is_davinci_dm6467_evm())
+		sysclk = 27000000;
+
+	/* ASP0 in DM6446 EVM is clocked by U55, as configured by
+	 * board-dm644x-evm.c using GPIOs from U18.  There are six
+	 * options; here we "know" we use a 48 KHz sample rate.
+	 */
+	else if (machine_is_davinci_evm())
+		sysclk = 12288000;
+
+	else if (machine_is_davinci_da830_evm() ||
+				machine_is_davinci_da850_evm())
+		sysclk = 24576000;
+
+	else
+		return -EINVAL;
 
 	/* set codec DAI configuration */
-	ret = snd_soc_dai_set_fmt(codec_dai, SND_SOC_DAIFMT_I2S |
-					 SND_SOC_DAIFMT_CBM_CFM);
+	ret = snd_soc_dai_set_fmt(codec_dai, AUDIO_FORMAT);
 	if (ret < 0)
 		return ret;
 
 	/* set cpu DAI configuration */
-	ret = snd_soc_dai_set_fmt(cpu_dai, SND_SOC_DAIFMT_CBM_CFM |
-				       SND_SOC_DAIFMT_IB_NF);
+	ret = snd_soc_dai_set_fmt(cpu_dai, AUDIO_FORMAT);
 	if (ret < 0)
 		return ret;
 
 	/* set the codec system clock */
-	ret = snd_soc_dai_set_sysclk(codec_dai, 0, EVM_CODEC_CLOCK,
-					    SND_SOC_CLOCK_OUT);
+	ret = snd_soc_dai_set_sysclk(codec_dai, 0, sysclk, SND_SOC_CLOCK_OUT);
 	if (ret < 0)
 		return ret;
 
@@ -127,60 +150,123 @@ static struct snd_soc_dai_link evm_dai = {
 	.ops = &evm_ops,
 };
 
+static struct snd_soc_dai_link dm6467_evm_dai[] = {
+	{
+		.name = "TLV320AIC3X",
+		.stream_name = "AIC3X",
+		.cpu_dai = &davinci_mcasp_dai[DAVINCI_MCASP_I2S_DAI],
+		.codec_dai = &aic3x_dai,
+		.init = evm_aic3x_init,
+		.ops = &evm_ops,
+	},
+	{
+		.name = "McASP",
+		.stream_name = "spdif",
+		.cpu_dai = &davinci_mcasp_dai[DAVINCI_MCASP_DIT_DAI],
+		.codec_dai = &dit_stub_dai,
+		.ops = &evm_ops,
+	},
+};
+static struct snd_soc_dai_link da8xx_evm_dai = {
+	.name = "TLV320AIC3X",
+	.stream_name = "AIC3X",
+	.cpu_dai = &davinci_mcasp_dai[DAVINCI_MCASP_I2S_DAI],
+	.codec_dai = &aic3x_dai,
+	.init = evm_aic3x_init,
+	.ops = &evm_ops,
+};
+
 /* davinci-evm audio machine driver */
-static struct snd_soc_machine snd_soc_machine_evm = {
+static struct snd_soc_card snd_soc_card_evm = {
 	.name = "DaVinci EVM",
+	.platform = &davinci_soc_platform,
 	.dai_link = &evm_dai,
 	.num_links = 1,
 };
 
-/* evm audio private data */
-static struct aic3x_setup_data evm_aic3x_setup = {
-	.i2c_address = 0x1b,
+/* davinci dm6467 evm audio machine driver */
+static struct snd_soc_card dm6467_snd_soc_card_evm = {
+	.name = "DaVinci DM6467 EVM",
+	.platform = &davinci_soc_platform,
+	.dai_link = dm6467_evm_dai,
+	.num_links = ARRAY_SIZE(dm6467_evm_dai),
 };
+
+static struct snd_soc_card da830_snd_soc_card = {
+	.name = "DA830/OMAP-L137 EVM",
+	.dai_link = &da8xx_evm_dai,
+	.platform = &davinci_soc_platform,
+	.num_links = 1,
+};
+
+static struct snd_soc_card da850_snd_soc_card = {
+	.name = "DA850/OMAP-L138 EVM",
+	.dai_link = &da8xx_evm_dai,
+	.platform = &davinci_soc_platform,
+	.num_links = 1,
+};
+
+static struct aic3x_setup_data aic3x_setup;
 
 /* evm audio subsystem */
 static struct snd_soc_device evm_snd_devdata = {
-	.machine = &snd_soc_machine_evm,
-	.platform = &davinci_soc_platform,
+	.card = &snd_soc_card_evm,
 	.codec_dev = &soc_codec_dev_aic3x,
-	.codec_data = &evm_aic3x_setup,
+	.codec_data = &aic3x_setup,
 };
 
-static struct resource evm_snd_resources[] = {
-	{
-		.start = DAVINCI_MCBSP_BASE,
-		.end = DAVINCI_MCBSP_BASE + SZ_8K - 1,
-		.flags = IORESOURCE_MEM,
-	},
+/* evm audio subsystem */
+static struct snd_soc_device dm6467_evm_snd_devdata = {
+	.card = &dm6467_snd_soc_card_evm,
+	.codec_dev = &soc_codec_dev_aic3x,
+	.codec_data = &aic3x_setup,
 };
 
-static struct evm_snd_platform_data evm_snd_data = {
-	.tx_dma_ch	= DM644X_DMACH_MCBSP_TX,
-	.rx_dma_ch	= DM644X_DMACH_MCBSP_RX,
+/* evm audio subsystem */
+static struct snd_soc_device da830_evm_snd_devdata = {
+	.card = &da830_snd_soc_card,
+	.codec_dev = &soc_codec_dev_aic3x,
+	.codec_data = &aic3x_setup,
+};
+
+static struct snd_soc_device da850_evm_snd_devdata = {
+	.card		= &da850_snd_soc_card,
+	.codec_dev	= &soc_codec_dev_aic3x,
+	.codec_data	= &aic3x_setup,
 };
 
 static struct platform_device *evm_snd_device;
 
 static int __init evm_init(void)
 {
+	struct snd_soc_device *evm_snd_dev_data;
+	int index;
 	int ret;
 
-	evm_snd_device = platform_device_alloc("soc-audio", 0);
+	if (machine_is_davinci_evm()) {
+		evm_snd_dev_data = &evm_snd_devdata;
+		index = 0;
+	} else if (machine_is_davinci_dm355_evm()) {
+		evm_snd_dev_data = &evm_snd_devdata;
+		index = 1;
+	} else if (machine_is_davinci_dm6467_evm()) {
+		evm_snd_dev_data = &dm6467_evm_snd_devdata;
+		index = 0;
+	} else if (machine_is_davinci_da830_evm()) {
+		evm_snd_dev_data = &da830_evm_snd_devdata;
+		index = 1;
+	} else if (machine_is_davinci_da850_evm()) {
+		evm_snd_dev_data = &da850_evm_snd_devdata;
+		index = 0;
+	} else
+		return -EINVAL;
+
+	evm_snd_device = platform_device_alloc("soc-audio", index);
 	if (!evm_snd_device)
 		return -ENOMEM;
 
-	platform_set_drvdata(evm_snd_device, &evm_snd_devdata);
-	evm_snd_devdata.dev = &evm_snd_device->dev;
-	evm_snd_device->dev.platform_data = &evm_snd_data;
-
-	ret = platform_device_add_resources(evm_snd_device, evm_snd_resources,
-					    ARRAY_SIZE(evm_snd_resources));
-	if (ret) {
-		platform_device_put(evm_snd_device);
-		return ret;
-	}
-
+	platform_set_drvdata(evm_snd_device, evm_snd_dev_data);
+	evm_snd_dev_data->dev = &evm_snd_device->dev;
 	ret = platform_device_add(evm_snd_device);
 	if (ret)
 		platform_device_put(evm_snd_device);

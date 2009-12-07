@@ -151,7 +151,8 @@ int sn_setup_msi_irq(struct pci_dev *pdev, struct msi_desc *entry)
 }
 
 #ifdef CONFIG_SMP
-static void sn_set_msi_irq_affinity(unsigned int irq, cpumask_t cpu_mask)
+static int sn_set_msi_irq_affinity(unsigned int irq,
+				    const struct cpumask *cpu_mask)
 {
 	struct msi_msg msg;
 	int slice;
@@ -164,10 +165,10 @@ static void sn_set_msi_irq_affinity(unsigned int irq, cpumask_t cpu_mask)
 	struct sn_pcibus_provider *provider;
 	unsigned int cpu;
 
-	cpu = first_cpu(cpu_mask);
+	cpu = cpumask_first(cpu_mask);
 	sn_irq_info = sn_msi_info[irq].sn_irq_info;
 	if (sn_irq_info == NULL || sn_irq_info->irq_int_bit >= 0)
-		return;
+		return -1;
 
 	/*
 	 * Release XIO resources for the old MSI PCI address
@@ -188,7 +189,7 @@ static void sn_set_msi_irq_affinity(unsigned int irq, cpumask_t cpu_mask)
 	new_irq_info = sn_retarget_vector(sn_irq_info, nasid, slice);
 	sn_msi_info[irq].sn_irq_info = new_irq_info;
 	if (new_irq_info == NULL)
-		return;
+		return -1;
 
 	/*
 	 * Map the xio address into bus space
@@ -204,7 +205,9 @@ static void sn_set_msi_irq_affinity(unsigned int irq, cpumask_t cpu_mask)
 	msg.address_lo = (u32)(bus_addr & 0x00000000ffffffff);
 
 	write_msi_msg(irq, &msg);
-	irq_desc[irq].affinity = cpu_mask;
+	cpumask_copy(irq_desc[irq].affinity, cpu_mask);
+
+	return 0;
 }
 #endif /* CONFIG_SMP */
 

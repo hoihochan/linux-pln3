@@ -389,7 +389,7 @@ i2c_au1550_probe(struct platform_device *pdev)
 		goto out;
 	}
 
-	priv->ioarea = request_mem_region(r->start, r->end - r->start + 1,
+	priv->ioarea = request_mem_region(r->start, resource_size(r),
 					  pdev->name);
 	if (!priv->ioarea) {
 		ret = -EBUSY;
@@ -400,7 +400,6 @@ i2c_au1550_probe(struct platform_device *pdev)
 	priv->xfer_timeout = 200;
 	priv->ack_timeout = 200;
 
-	priv->adap.id = I2C_HW_AU1550_PSC;
 	priv->adap.nr = pdev->id;
 	priv->adap.algo = &au1550_algo;
 	priv->adap.algo_data = priv;

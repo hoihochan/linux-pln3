@@ -428,10 +428,11 @@ bmac_init_phy(struct net_device *dev)
 	printk(KERN_DEBUG "phy registers:");
 	for (addr = 0; addr < 32; ++addr) {
 		if ((addr & 7) == 0)
-			printk("\n" KERN_DEBUG);
-		printk(" %.4x", bmac_mif_read(dev, addr));
+			printk(KERN_DEBUG);
+		printk(KERN_CONT " %.4x", bmac_mif_read(dev, addr));
 	}
-	printk("\n");
+	printk(KERN_CONT "\n");
+
 	if (bp->is_bmac_plus) {
 		unsigned int capable, ctrl;
 
@@ -716,13 +717,11 @@ static irqreturn_t bmac_rxdma_intr(int irq, void *dev_id)
 			skb_put(skb, nb);
 			skb->protocol = eth_type_trans(skb, dev);
 			netif_rx(skb);
-			dev->last_rx = jiffies;
 			++dev->stats.rx_packets;
 			dev->stats.rx_bytes += nb;
 		} else {
 			++dev->stats.rx_dropped;
 		}
-		dev->last_rx = jiffies;
 		if ((skb = bp->rx_bufs[i]) == NULL) {
 			bp->rx_bufs[i] = skb = dev_alloc_skb(RX_BUFLEN+2);
 			if (skb != NULL)
@@ -1064,7 +1063,6 @@ static int miscintcount;
 static irqreturn_t bmac_misc_intr(int irq, void *dev_id)
 {
 	struct net_device *dev = (struct net_device *) dev_id;
-	struct bmac_data *bp = netdev_priv(dev);
 	unsigned int status = bmread(dev, STATUS);
 	if (miscintcount++ < 10) {
 		XXDEBUG(("bmac_misc_intr\n"));
@@ -1242,12 +1240,22 @@ static void bmac_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *inf
 {
 	struct bmac_data *bp = netdev_priv(dev);
 	strcpy(info->driver, "bmac");
-	strcpy(info->bus_info, bp->mdev->ofdev.dev.bus_id);
+	strcpy(info->bus_info, dev_name(&bp->mdev->ofdev.dev));
 }
 
 static const struct ethtool_ops bmac_ethtool_ops = {
 	.get_drvinfo		= bmac_get_drvinfo,
 	.get_link		= ethtool_op_get_link,
+};
+
+static const struct net_device_ops bmac_netdev_ops = {
+	.ndo_open		= bmac_open,
+	.ndo_stop		= bmac_close,
+	.ndo_start_xmit		= bmac_output,
+	.ndo_set_multicast_list	= bmac_set_multicast,
+	.ndo_set_mac_address	= bmac_set_address,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_validate_addr	= eth_validate_addr,
 };
 
 static int __devinit bmac_probe(struct macio_dev *mdev, const struct of_device_id *match)
@@ -1258,7 +1266,6 @@ static int __devinit bmac_probe(struct macio_dev *mdev, const struct of_device_i
 	unsigned char addr[6];
 	struct net_device *dev;
 	int is_bmac_plus = ((int)match->data) != 0;
-	DECLARE_MAC_BUF(mac);
 
 	if (macio_resource_count(mdev) != 3 || macio_irq_count(mdev) != 3) {
 		printk(KERN_ERR "BMAC: can't use, need 3 addrs and 3 intrs\n");
@@ -1312,12 +1319,8 @@ static int __devinit bmac_probe(struct macio_dev *mdev, const struct of_device_i
 	bmac_enable_and_reset_chip(dev);
 	bmwrite(dev, INTDISABLE, DisableAll);
 
-	dev->open = bmac_open;
-	dev->stop = bmac_close;
+	dev->netdev_ops = &bmac_netdev_ops;
 	dev->ethtool_ops = &bmac_ethtool_ops;
-	dev->hard_start_xmit = bmac_output;
-	dev->set_multicast_list = bmac_set_multicast;
-	dev->set_mac_address = bmac_set_address;
 
 	bmac_get_station_address(dev, addr);
 	if (bmac_verify_checksum(dev) != 0)
@@ -1368,8 +1371,8 @@ static int __devinit bmac_probe(struct macio_dev *mdev, const struct of_device_i
 		goto err_out_irq2;
 	}
 
-	printk(KERN_INFO "%s: BMAC%s at %s",
-	       dev->name, (is_bmac_plus ? "+" : ""), print_mac(mac, dev->dev_addr));
+	printk(KERN_INFO "%s: BMAC%s at %pM",
+	       dev->name, (is_bmac_plus ? "+" : ""), dev->dev_addr);
 	XXDEBUG((", base_addr=%#0lx", dev->base_addr));
 	printk("\n");
 
@@ -1486,7 +1489,7 @@ bmac_output(struct sk_buff *skb, struct net_device *dev)
 	struct bmac_data *bp = netdev_priv(dev);
 	skb_queue_tail(bp->queue, skb);
 	bmac_start(dev);
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 static void bmac_tx_timeout(unsigned long data)

@@ -1,79 +1,49 @@
 /*
  *  drivers/s390/cio/qdio_debug.c
  *
- *  Copyright IBM Corp. 2008
+ *  Copyright IBM Corp. 2008,2009
  *
  *  Author: Jan Glauber (jang@linux.vnet.ibm.com)
  */
-#include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/debugfs.h>
-#include <asm/qdio.h>
 #include <asm/debug.h>
 #include "qdio_debug.h"
 #include "qdio.h"
 
 debug_info_t *qdio_dbf_setup;
-debug_info_t *qdio_dbf_trace;
+debug_info_t *qdio_dbf_error;
 
 static struct dentry *debugfs_root;
-#define MAX_DEBUGFS_QUEUES	32
-static struct dentry *debugfs_queues[MAX_DEBUGFS_QUEUES] = { NULL };
-static DEFINE_MUTEX(debugfs_mutex);
+#define QDIO_DEBUGFS_NAME_LEN	10
 
-void qdio_allocate_do_dbf(struct qdio_initialize *init_data)
+void qdio_allocate_dbf(struct qdio_initialize *init_data,
+		       struct qdio_irq *irq_ptr)
 {
-	char dbf_text[20];
+	char text[20];
 
-	sprintf(dbf_text, "qfmt:%x", init_data->q_format);
-	QDIO_DBF_TEXT0(0, setup, dbf_text);
-	QDIO_DBF_HEX0(0, setup, init_data->adapter_name, 8);
-	sprintf(dbf_text, "qpff%4x", init_data->qib_param_field_format);
-	QDIO_DBF_TEXT0(0, setup, dbf_text);
-	QDIO_DBF_HEX0(0, setup, &init_data->qib_param_field, sizeof(void *));
-	QDIO_DBF_HEX0(0, setup, &init_data->input_slib_elements, sizeof(void *));
-	QDIO_DBF_HEX0(0, setup, &init_data->output_slib_elements, sizeof(void *));
-	sprintf(dbf_text, "niq:%4x", init_data->no_input_qs);
-	QDIO_DBF_TEXT0(0, setup, dbf_text);
-	sprintf(dbf_text, "noq:%4x", init_data->no_output_qs);
-	QDIO_DBF_TEXT0(0, setup, dbf_text);
-	QDIO_DBF_HEX0(0, setup, &init_data->input_handler, sizeof(void *));
-	QDIO_DBF_HEX0(0, setup, &init_data->output_handler, sizeof(void *));
-	QDIO_DBF_HEX0(0, setup, &init_data->int_parm, sizeof(long));
-	QDIO_DBF_HEX0(0, setup, &init_data->flags, sizeof(long));
-	QDIO_DBF_HEX0(0, setup, &init_data->input_sbal_addr_array, sizeof(void *));
-	QDIO_DBF_HEX0(0, setup, &init_data->output_sbal_addr_array, sizeof(void *));
-}
+	DBF_EVENT("qfmt:%1d", init_data->q_format);
+	DBF_HEX(init_data->adapter_name, 8);
+	DBF_EVENT("qpff%4x", init_data->qib_param_field_format);
+	DBF_HEX(&init_data->qib_param_field, sizeof(void *));
+	DBF_HEX(&init_data->input_slib_elements, sizeof(void *));
+	DBF_HEX(&init_data->output_slib_elements, sizeof(void *));
+	DBF_EVENT("niq:%1d noq:%1d", init_data->no_input_qs,
+		  init_data->no_output_qs);
+	DBF_HEX(&init_data->input_handler, sizeof(void *));
+	DBF_HEX(&init_data->output_handler, sizeof(void *));
+	DBF_HEX(&init_data->int_parm, sizeof(long));
+	DBF_HEX(&init_data->flags, sizeof(long));
+	DBF_HEX(&init_data->input_sbal_addr_array, sizeof(void *));
+	DBF_HEX(&init_data->output_sbal_addr_array, sizeof(void *));
+	DBF_EVENT("irq:%8lx", (unsigned long)irq_ptr);
 
-static void qdio_unregister_dbf_views(void)
-{
-	if (qdio_dbf_setup)
-		debug_unregister(qdio_dbf_setup);
-	if (qdio_dbf_trace)
-		debug_unregister(qdio_dbf_trace);
-}
-
-static int qdio_register_dbf_views(void)
-{
-	qdio_dbf_setup = debug_register("qdio_setup", QDIO_DBF_SETUP_PAGES,
-					QDIO_DBF_SETUP_NR_AREAS,
-					QDIO_DBF_SETUP_LEN);
-	if (!qdio_dbf_setup)
-		goto oom;
-	debug_register_view(qdio_dbf_setup, &debug_hex_ascii_view);
-	debug_set_level(qdio_dbf_setup, QDIO_DBF_SETUP_LEVEL);
-
-	qdio_dbf_trace = debug_register("qdio_trace", QDIO_DBF_TRACE_PAGES,
-					QDIO_DBF_TRACE_NR_AREAS,
-					QDIO_DBF_TRACE_LEN);
-	if (!qdio_dbf_trace)
-		goto oom;
-	debug_register_view(qdio_dbf_trace, &debug_hex_ascii_view);
-	debug_set_level(qdio_dbf_trace, QDIO_DBF_TRACE_LEVEL);
-	return 0;
-oom:
-	qdio_unregister_dbf_views();
-	return -ENOMEM;
+	/* allocate trace view for the interface */
+	snprintf(text, 20, "qdio_%s", dev_name(&init_data->cdev->dev));
+	irq_ptr->debug_area = debug_register(text, 2, 1, 16);
+	debug_register_view(irq_ptr->debug_area, &debug_hex_ascii_view);
+	debug_set_level(irq_ptr->debug_area, DBF_WARN);
+	DBF_DEV_EVENT(DBF_ERR, irq_ptr, "dbf created");
 }
 
 static int qstat_show(struct seq_file *m, void *v)
@@ -85,16 +55,18 @@ static int qstat_show(struct seq_file *m, void *v)
 	if (!q)
 		return 0;
 
-	seq_printf(m, "device state indicator: %d\n", *q->irq_ptr->dsci);
+	seq_printf(m, "device state indicator: %d\n", *(u32 *)q->irq_ptr->dsci);
 	seq_printf(m, "nr_used: %d\n", atomic_read(&q->nr_buf_used));
 	seq_printf(m, "ftc: %d\n", q->first_to_check);
-	seq_printf(m, "last_move_ftc: %d\n", q->last_move_ftc);
+	seq_printf(m, "last_move: %d\n", q->last_move);
 	seq_printf(m, "polling: %d\n", q->u.in.polling);
+	seq_printf(m, "ack start: %d\n", q->u.in.ack_start);
+	seq_printf(m, "ack count: %d\n", q->u.in.ack_count);
 	seq_printf(m, "slsb buffer states:\n");
+	seq_printf(m, "|0      |8      |16     |24     |32     |40     |48     |56  63|\n");
 
-	qdio_siga_sync_q(q);
 	for (i = 0; i < QDIO_MAX_BUFFERS_PER_Q; i++) {
-		get_buf_state(q, i, &state);
+		debug_get_buf_state(q, i, &state);
 		switch (state) {
 		case SLSB_P_INPUT_NOT_INIT:
 		case SLSB_P_OUTPUT_NOT_INIT:
@@ -126,6 +98,7 @@ static int qstat_show(struct seq_file *m, void *v)
 			seq_printf(m, "\n");
 	}
 	seq_printf(m, "\n");
+	seq_printf(m, "|64     |72     |80     |88     |96     |104    |112    |   127|\n");
 	return 0;
 }
 
@@ -152,32 +125,7 @@ static int qstat_seq_open(struct inode *inode, struct file *filp)
 			   filp->f_path.dentry->d_inode->i_private);
 }
 
-static void get_queue_name(struct qdio_q *q, struct ccw_device *cdev, char *name)
-{
-	memset(name, 0, sizeof(name));
-	sprintf(name, "%s", cdev->dev.bus_id);
-	if (q->is_input_q)
-		sprintf(name + strlen(name), "_input");
-	else
-		sprintf(name + strlen(name), "_output");
-	sprintf(name + strlen(name), "_%d", q->nr);
-}
-
-static void remove_debugfs_entry(struct qdio_q *q)
-{
-	int i;
-
-	for (i = 0; i < MAX_DEBUGFS_QUEUES; i++) {
-		if (!debugfs_queues[i])
-			continue;
-		if (debugfs_queues[i]->d_inode->i_private == q) {
-			debugfs_remove(debugfs_queues[i]);
-			debugfs_queues[i] = NULL;
-		}
-	}
-}
-
-static struct file_operations debugfs_fops = {
+static const struct file_operations debugfs_fops = {
 	.owner	 = THIS_MODULE,
 	.open	 = qstat_seq_open,
 	.read	 = seq_read,
@@ -188,17 +136,15 @@ static struct file_operations debugfs_fops = {
 
 static void setup_debugfs_entry(struct qdio_q *q, struct ccw_device *cdev)
 {
-	int i = 0;
-	char name[40];
+	char name[QDIO_DEBUGFS_NAME_LEN];
 
-	while (debugfs_queues[i] != NULL) {
-		i++;
-		if (i >= MAX_DEBUGFS_QUEUES)
-			return;
-	}
-	get_queue_name(q, cdev, name);
-	debugfs_queues[i] = debugfs_create_file(name, S_IFREG | S_IRUGO | S_IWUSR,
-						debugfs_root, q, &debugfs_fops);
+	snprintf(name, QDIO_DEBUGFS_NAME_LEN, "%s_%d",
+		 q->is_input_q ? "input" : "output",
+		 q->nr);
+	q->debugfs_q = debugfs_create_file(name, S_IFREG | S_IRUGO | S_IWUSR,
+				q->irq_ptr->debugfs_dev, q, &debugfs_fops);
+	if (IS_ERR(q->debugfs_q))
+		q->debugfs_q = NULL;
 }
 
 void qdio_setup_debug_entries(struct qdio_irq *irq_ptr, struct ccw_device *cdev)
@@ -206,12 +152,14 @@ void qdio_setup_debug_entries(struct qdio_irq *irq_ptr, struct ccw_device *cdev)
 	struct qdio_q *q;
 	int i;
 
-	mutex_lock(&debugfs_mutex);
+	irq_ptr->debugfs_dev = debugfs_create_dir(dev_name(&cdev->dev),
+						  debugfs_root);
+	if (IS_ERR(irq_ptr->debugfs_dev))
+		irq_ptr->debugfs_dev = NULL;
 	for_each_input_queue(irq_ptr, q, i)
 		setup_debugfs_entry(q, cdev);
 	for_each_output_queue(irq_ptr, q, i)
 		setup_debugfs_entry(q, cdev);
-	mutex_unlock(&debugfs_mutex);
 }
 
 void qdio_shutdown_debug_entries(struct qdio_irq *irq_ptr, struct ccw_device *cdev)
@@ -219,22 +167,34 @@ void qdio_shutdown_debug_entries(struct qdio_irq *irq_ptr, struct ccw_device *cd
 	struct qdio_q *q;
 	int i;
 
-	mutex_lock(&debugfs_mutex);
 	for_each_input_queue(irq_ptr, q, i)
-		remove_debugfs_entry(q);
+		debugfs_remove(q->debugfs_q);
 	for_each_output_queue(irq_ptr, q, i)
-		remove_debugfs_entry(q);
-	mutex_unlock(&debugfs_mutex);
+		debugfs_remove(q->debugfs_q);
+	debugfs_remove(irq_ptr->debugfs_dev);
 }
 
 int __init qdio_debug_init(void)
 {
-	debugfs_root = debugfs_create_dir("qdio_queues", NULL);
-	return qdio_register_dbf_views();
+	debugfs_root = debugfs_create_dir("qdio", NULL);
+
+	qdio_dbf_setup = debug_register("qdio_setup", 16, 1, 16);
+	debug_register_view(qdio_dbf_setup, &debug_hex_ascii_view);
+	debug_set_level(qdio_dbf_setup, DBF_INFO);
+	DBF_EVENT("dbf created\n");
+
+	qdio_dbf_error = debug_register("qdio_error", 4, 1, 16);
+	debug_register_view(qdio_dbf_error, &debug_hex_ascii_view);
+	debug_set_level(qdio_dbf_error, DBF_INFO);
+	DBF_ERROR("dbf created\n");
+	return 0;
 }
 
 void qdio_debug_exit(void)
 {
 	debugfs_remove(debugfs_root);
-	qdio_unregister_dbf_views();
+	if (qdio_dbf_setup)
+		debug_unregister(qdio_dbf_setup);
+	if (qdio_dbf_error)
+		debug_unregister(qdio_dbf_error);
 }

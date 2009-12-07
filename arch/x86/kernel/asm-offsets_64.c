@@ -3,6 +3,7 @@
  * This code generates raw asm output which is post-processed to extract
  * and format the required data.
  */
+#define COMPILE_OFFSETS
 
 #include <linux/crypto.h>
 #include <linux/sched.h> 
@@ -11,18 +12,20 @@
 #include <linux/hardirq.h>
 #include <linux/suspend.h>
 #include <linux/kbuild.h>
-#include <asm/pda.h>
 #include <asm/processor.h>
 #include <asm/segment.h>
 #include <asm/thread_info.h>
 #include <asm/ia32.h>
 #include <asm/bootparam.h>
+#include <asm/suspend.h>
 
 #include <xen/interface/xen.h>
 
+#include <asm/sigframe.h>
+
 #define __NO_STUBS 1
 #undef __SYSCALL
-#undef _ASM_X86_64_UNISTD_H_
+#undef _ASM_X86_UNISTD_64_H
 #define __SYSCALL(nr, sym) [nr] = 1,
 static char syscalls[] = {
 #include <asm/unistd.h>
@@ -44,16 +47,6 @@ int main(void)
 #ifdef CONFIG_IA32_EMULATION
 	ENTRY(sysenter_return);
 #endif
-	BLANK();
-#undef ENTRY
-#define ENTRY(entry) DEFINE(pda_ ## entry, offsetof(struct x8664_pda, entry))
-	ENTRY(kernelstack); 
-	ENTRY(oldrsp); 
-	ENTRY(pcurrent); 
-	ENTRY(irqcount);
-	ENTRY(cpunumber);
-	ENTRY(irqstackptr);
-	ENTRY(data_offset);
 	BLANK();
 #undef ENTRY
 #ifdef CONFIG_PARAVIRT
@@ -87,7 +80,7 @@ int main(void)
 	BLANK();
 #undef ENTRY
 	DEFINE(IA32_RT_SIGFRAME_sigcontext,
-	       offsetof (struct rt_sigframe32, uc.uc_mcontext));
+	       offsetof (struct rt_sigframe_ia32, uc.uc_mcontext));
 	BLANK();
 #endif
 	DEFINE(pbe_address, offsetof(struct pbe, address));
@@ -133,6 +126,7 @@ int main(void)
 	OFFSET(BP_loadflags, boot_params, hdr.loadflags);
 	OFFSET(BP_hardware_subarch, boot_params, hdr.hardware_subarch);
 	OFFSET(BP_version, boot_params, hdr.version);
+	OFFSET(BP_kernel_alignment, boot_params, hdr.kernel_alignment);
 
 	BLANK();
 	DEFINE(PAGE_SIZE_asm, PAGE_SIZE);

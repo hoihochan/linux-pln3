@@ -1,7 +1,7 @@
 /*
  *   fs/cifs/inode.c
  *
- *   Copyright (C) International Business Machines  Corp., 2002,2007
+ *   Copyright (C) International Business Machines  Corp., 2002,2008
  *   Author(s): Steve French (sfrench@us.ibm.com)
  *
  *   This library is free software; you can redistribute it and/or modify
@@ -77,205 +77,202 @@ static void cifs_set_ops(struct inode *inode, const bool is_dfs_referral)
 	}
 }
 
-static void cifs_unix_info_to_inode(struct inode *inode,
-		FILE_UNIX_BASIC_INFO *info, int force_uid_gid)
+/* populate an inode with info from a cifs_fattr struct */
+void
+cifs_fattr_to_inode(struct inode *inode, struct cifs_fattr *fattr)
 {
+	struct cifsInodeInfo *cifs_i = CIFS_I(inode);
 	struct cifs_sb_info *cifs_sb = CIFS_SB(inode->i_sb);
-	struct cifsInodeInfo *cifsInfo = CIFS_I(inode);
-	__u64 num_of_bytes = le64_to_cpu(info->NumOfBytes);
-	__u64 end_of_file = le64_to_cpu(info->EndOfFile);
+	unsigned long oldtime = cifs_i->time;
 
-	inode->i_atime = cifs_NTtimeToUnix(le64_to_cpu(info->LastAccessTime));
-	inode->i_mtime =
-		cifs_NTtimeToUnix(le64_to_cpu(info->LastModificationTime));
-	inode->i_ctime = cifs_NTtimeToUnix(le64_to_cpu(info->LastStatusChange));
-	inode->i_mode = le64_to_cpu(info->Permissions);
+	inode->i_atime = fattr->cf_atime;
+	inode->i_mtime = fattr->cf_mtime;
+	inode->i_ctime = fattr->cf_ctime;
+	inode->i_rdev = fattr->cf_rdev;
+	inode->i_nlink = fattr->cf_nlink;
+	inode->i_uid = fattr->cf_uid;
+	inode->i_gid = fattr->cf_gid;
+
+	/* if dynperm is set, don't clobber existing mode */
+	if (inode->i_state & I_NEW ||
+	    !(cifs_sb->mnt_cifs_flags & CIFS_MOUNT_DYNPERM))
+		inode->i_mode = fattr->cf_mode;
+
+	cifs_i->cifsAttrs = fattr->cf_cifsattrs;
+	cifs_i->uniqueid = fattr->cf_uniqueid;
+
+	if (fattr->cf_flags & CIFS_FATTR_NEED_REVAL)
+		cifs_i->time = 0;
+	else
+		cifs_i->time = jiffies;
+
+	cFYI(1, ("inode 0x%p old_time=%ld new_time=%ld", inode,
+		 oldtime, cifs_i->time));
+
+	cifs_i->delete_pending = fattr->cf_flags & CIFS_FATTR_DELETE_PENDING;
 
 	/*
-	 * Since we set the inode type below we need to mask off
-	 * to avoid strange results if bits set above.
+	 * Can't safely change the file size here if the client is writing to
+	 * it due to potential races.
 	 */
-	inode->i_mode &= ~S_IFMT;
-	switch (le32_to_cpu(info->Type)) {
-	case UNIX_FILE:
-		inode->i_mode |= S_IFREG;
-		break;
-	case UNIX_SYMLINK:
-		inode->i_mode |= S_IFLNK;
-		break;
-	case UNIX_DIR:
-		inode->i_mode |= S_IFDIR;
-		break;
-	case UNIX_CHARDEV:
-		inode->i_mode |= S_IFCHR;
-		inode->i_rdev = MKDEV(le64_to_cpu(info->DevMajor),
-				      le64_to_cpu(info->DevMinor) & MINORMASK);
-		break;
-	case UNIX_BLOCKDEV:
-		inode->i_mode |= S_IFBLK;
-		inode->i_rdev = MKDEV(le64_to_cpu(info->DevMajor),
-				      le64_to_cpu(info->DevMinor) & MINORMASK);
-		break;
-	case UNIX_FIFO:
-		inode->i_mode |= S_IFIFO;
-		break;
-	case UNIX_SOCKET:
-		inode->i_mode |= S_IFSOCK;
-		break;
-	default:
-		/* safest to call it a file if we do not know */
-		inode->i_mode |= S_IFREG;
-		cFYI(1, ("unknown type %d", le32_to_cpu(info->Type)));
-		break;
-	}
-
-	if ((cifs_sb->mnt_cifs_flags & CIFS_MOUNT_OVERR_UID) &&
-	    !force_uid_gid)
-		inode->i_uid = cifs_sb->mnt_uid;
-	else
-		inode->i_uid = le64_to_cpu(info->Uid);
-
-	if ((cifs_sb->mnt_cifs_flags & CIFS_MOUNT_OVERR_GID) &&
-	    !force_uid_gid)
-		inode->i_gid = cifs_sb->mnt_gid;
-	else
-		inode->i_gid = le64_to_cpu(info->Gid);
-
-	inode->i_nlink = le64_to_cpu(info->Nlinks);
-
 	spin_lock(&inode->i_lock);
-	if (is_size_safe_to_change(cifsInfo, end_of_file)) {
-		/*
-		 * We can not safely change the file size here if the client
-		 * is writing to it due to potential races.
-		 */
-		i_size_write(inode, end_of_file);
+	if (is_size_safe_to_change(cifs_i, fattr->cf_eof)) {
+		i_size_write(inode, fattr->cf_eof);
 
 		/*
 		 * i_blocks is not related to (i_size / i_blksize),
 		 * but instead 512 byte (2**9) size is required for
 		 * calculating num blocks.
 		 */
-		inode->i_blocks = (512 - 1 + num_of_bytes) >> 9;
+		inode->i_blocks = (512 - 1 + fattr->cf_bytes) >> 9;
 	}
 	spin_unlock(&inode->i_lock);
+
+	cifs_set_ops(inode, fattr->cf_flags & CIFS_FATTR_DFS_REFERRAL);
 }
 
+/* Fill a cifs_fattr struct with info from FILE_UNIX_BASIC_INFO. */
+void
+cifs_unix_basic_to_fattr(struct cifs_fattr *fattr, FILE_UNIX_BASIC_INFO *info,
+			 struct cifs_sb_info *cifs_sb)
+{
+	memset(fattr, 0, sizeof(*fattr));
+	fattr->cf_uniqueid = le64_to_cpu(info->UniqueId);
+	fattr->cf_bytes = le64_to_cpu(info->NumOfBytes);
+	fattr->cf_eof = le64_to_cpu(info->EndOfFile);
+
+	fattr->cf_atime = cifs_NTtimeToUnix(info->LastAccessTime);
+	fattr->cf_mtime = cifs_NTtimeToUnix(info->LastModificationTime);
+	fattr->cf_ctime = cifs_NTtimeToUnix(info->LastStatusChange);
+	fattr->cf_mode = le64_to_cpu(info->Permissions);
+
+	/*
+	 * Since we set the inode type below we need to mask off
+	 * to avoid strange results if bits set above.
+	 */
+	fattr->cf_mode &= ~S_IFMT;
+	switch (le32_to_cpu(info->Type)) {
+	case UNIX_FILE:
+		fattr->cf_mode |= S_IFREG;
+		fattr->cf_dtype = DT_REG;
+		break;
+	case UNIX_SYMLINK:
+		fattr->cf_mode |= S_IFLNK;
+		fattr->cf_dtype = DT_LNK;
+		break;
+	case UNIX_DIR:
+		fattr->cf_mode |= S_IFDIR;
+		fattr->cf_dtype = DT_DIR;
+		break;
+	case UNIX_CHARDEV:
+		fattr->cf_mode |= S_IFCHR;
+		fattr->cf_dtype = DT_CHR;
+		fattr->cf_rdev = MKDEV(le64_to_cpu(info->DevMajor),
+				       le64_to_cpu(info->DevMinor) & MINORMASK);
+		break;
+	case UNIX_BLOCKDEV:
+		fattr->cf_mode |= S_IFBLK;
+		fattr->cf_dtype = DT_BLK;
+		fattr->cf_rdev = MKDEV(le64_to_cpu(info->DevMajor),
+				       le64_to_cpu(info->DevMinor) & MINORMASK);
+		break;
+	case UNIX_FIFO:
+		fattr->cf_mode |= S_IFIFO;
+		fattr->cf_dtype = DT_FIFO;
+		break;
+	case UNIX_SOCKET:
+		fattr->cf_mode |= S_IFSOCK;
+		fattr->cf_dtype = DT_SOCK;
+		break;
+	default:
+		/* safest to call it a file if we do not know */
+		fattr->cf_mode |= S_IFREG;
+		fattr->cf_dtype = DT_REG;
+		cFYI(1, ("unknown type %d", le32_to_cpu(info->Type)));
+		break;
+	}
+
+	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_OVERR_UID)
+		fattr->cf_uid = cifs_sb->mnt_uid;
+	else
+		fattr->cf_uid = le64_to_cpu(info->Uid);
+
+	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_OVERR_GID)
+		fattr->cf_gid = cifs_sb->mnt_gid;
+	else
+		fattr->cf_gid = le64_to_cpu(info->Gid);
+
+	fattr->cf_nlink = le64_to_cpu(info->Nlinks);
+}
 
 /*
- *	Needed to setup inode data for the directory which is the
- *	junction to the new submount (ie to setup the fake directory
- *      which represents a DFS referral)
+ * Fill a cifs_fattr struct with fake inode info.
+ *
+ * Needed to setup cifs_fattr data for the directory which is the
+ * junction to the new submount (ie to setup the fake directory
+ * which represents a DFS referral).
  */
-static void fill_fake_finddataunix(FILE_UNIX_BASIC_INFO *pfnd_dat,
-			       struct super_block *sb)
+static void
+cifs_create_dfs_fattr(struct cifs_fattr *fattr, struct super_block *sb)
 {
-	struct inode *pinode = NULL;
+	struct cifs_sb_info *cifs_sb = CIFS_SB(sb);
 
-	memset(pfnd_dat, 0, sizeof(FILE_UNIX_BASIC_INFO));
+	cFYI(1, ("creating fake fattr for DFS referral"));
 
-/*	__le64 pfnd_dat->EndOfFile = cpu_to_le64(0);
-	__le64 pfnd_dat->NumOfBytes = cpu_to_le64(0);
-	__u64 UniqueId = 0;  */
-	pfnd_dat->LastStatusChange =
-		cpu_to_le64(cifs_UnixTimeToNT(CURRENT_TIME));
-	pfnd_dat->LastAccessTime =
-		cpu_to_le64(cifs_UnixTimeToNT(CURRENT_TIME));
-	pfnd_dat->LastModificationTime =
-		cpu_to_le64(cifs_UnixTimeToNT(CURRENT_TIME));
-	pfnd_dat->Type = cpu_to_le32(UNIX_DIR);
-	pfnd_dat->Permissions = cpu_to_le64(S_IXUGO | S_IRWXU);
-	pfnd_dat->Nlinks = cpu_to_le64(2);
-	if (sb->s_root)
-		pinode = sb->s_root->d_inode;
-	if (pinode == NULL)
-		return;
-
-	/* fill in default values for the remaining based on root
-	   inode since we can not query the server for this inode info */
-	pfnd_dat->DevMajor = cpu_to_le64(MAJOR(pinode->i_rdev));
-	pfnd_dat->DevMinor = cpu_to_le64(MINOR(pinode->i_rdev));
-	pfnd_dat->Uid = cpu_to_le64(pinode->i_uid);
-	pfnd_dat->Gid = cpu_to_le64(pinode->i_gid);
+	memset(fattr, 0, sizeof(*fattr));
+	fattr->cf_mode = S_IFDIR | S_IXUGO | S_IRWXU;
+	fattr->cf_uid = cifs_sb->mnt_uid;
+	fattr->cf_gid = cifs_sb->mnt_gid;
+	fattr->cf_atime = CURRENT_TIME;
+	fattr->cf_ctime = CURRENT_TIME;
+	fattr->cf_mtime = CURRENT_TIME;
+	fattr->cf_nlink = 2;
+	fattr->cf_flags |= CIFS_FATTR_DFS_REFERRAL;
 }
 
 int cifs_get_inode_info_unix(struct inode **pinode,
-	const unsigned char *full_path, struct super_block *sb, int xid)
+			     const unsigned char *full_path,
+			     struct super_block *sb, int xid)
 {
-	int rc = 0;
+	int rc;
 	FILE_UNIX_BASIC_INFO find_data;
-	struct cifsTconInfo *pTcon;
-	struct inode *inode;
+	struct cifs_fattr fattr;
+	struct cifsTconInfo *tcon;
 	struct cifs_sb_info *cifs_sb = CIFS_SB(sb);
-	bool is_dfs_referral = false;
-	struct cifsInodeInfo *cifsInfo;
-	__u64 num_of_bytes;
-	__u64 end_of_file;
 
-	pTcon = cifs_sb->tcon;
+	tcon = cifs_sb->tcon;
 	cFYI(1, ("Getting info on %s", full_path));
 
 	/* could have done a find first instead but this returns more info */
-	rc = CIFSSMBUnixQPathInfo(xid, pTcon, full_path, &find_data,
+	rc = CIFSSMBUnixQPathInfo(xid, tcon, full_path, &find_data,
 				  cifs_sb->local_nls, cifs_sb->mnt_cifs_flags &
 					CIFS_MOUNT_MAP_SPECIAL_CHR);
-	if (rc == -EREMOTE && !is_dfs_referral) {
-		is_dfs_referral = true;
-		cFYI(DBG2, ("DFS ref"));
-		/* for DFS, server does not give us real inode data */
-		fill_fake_finddataunix(&find_data, sb);
+
+	if (!rc) {
+		cifs_unix_basic_to_fattr(&fattr, &find_data, cifs_sb);
+	} else if (rc == -EREMOTE) {
+		cifs_create_dfs_fattr(&fattr, sb);
 		rc = 0;
-	} else if (rc)
-		goto cgiiu_exit;
-
-	num_of_bytes = le64_to_cpu(find_data.NumOfBytes);
-	end_of_file = le64_to_cpu(find_data.EndOfFile);
-
-	/* get new inode */
-	if (*pinode == NULL) {
-		*pinode = new_inode(sb);
-		if (*pinode == NULL) {
-			rc = -ENOMEM;
-			goto cgiiu_exit;
-		}
-		/* Is an i_ino of zero legal? */
-		/* note ino incremented to unique num in new_inode */
-		/* Are there sanity checks we can use to ensure that
-		   the server is really filling in that field? */
-		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_SERVER_INUM)
-			(*pinode)->i_ino = (unsigned long)find_data.UniqueId;
-
-		if (sb->s_flags & MS_NOATIME)
-			(*pinode)->i_flags |= S_NOATIME | S_NOCMTIME;
-
-		insert_inode_hash(*pinode);
+	} else {
+		return rc;
 	}
 
-	inode = *pinode;
-	cifsInfo = CIFS_I(inode);
+	if (*pinode == NULL) {
+		/* get new inode */
+		*pinode = cifs_iget(sb, &fattr);
+		if (!*pinode)
+			rc = -ENOMEM;
+	} else {
+		/* we already have inode, update it */
+		cifs_fattr_to_inode(*pinode, &fattr);
+	}
 
-	cFYI(1, ("Old time %ld", cifsInfo->time));
-	cifsInfo->time = jiffies;
-	cFYI(1, ("New time %ld", cifsInfo->time));
-	/* this is ok to set on every inode revalidate */
-	atomic_set(&cifsInfo->inUse, 1);
-
-	cifs_unix_info_to_inode(inode, &find_data, 0);
-
-	if (num_of_bytes < end_of_file)
-		cFYI(1, ("allocation size less than end of file"));
-	cFYI(1, ("Size %ld and blocks %llu",
-		(unsigned long) inode->i_size,
-		(unsigned long long)inode->i_blocks));
-
-	cifs_set_ops(inode, is_dfs_referral);
-cgiiu_exit:
 	return rc;
 }
 
-static int decode_sfu_inode(struct inode *inode, __u64 size,
-			    const unsigned char *path,
-			    struct cifs_sb_info *cifs_sb, int xid)
+static int
+cifs_sfu_type(struct cifs_fattr *fattr, const unsigned char *path,
+	      struct cifs_sb_info *cifs_sb, int xid)
 {
 	int rc;
 	int oplock = 0;
@@ -287,10 +284,15 @@ static int decode_sfu_inode(struct inode *inode, __u64 size,
 
 	pbuf = buf;
 
-	if (size == 0) {
-		inode->i_mode |= S_IFIFO;
+	fattr->cf_mode &= ~S_IFMT;
+
+	if (fattr->cf_eof == 0) {
+		fattr->cf_mode |= S_IFIFO;
+		fattr->cf_dtype = DT_FIFO;
 		return 0;
-	} else if (size < 8) {
+	} else if (fattr->cf_eof < 8) {
+		fattr->cf_mode |= S_IFREG;
+		fattr->cf_dtype = DT_REG;
 		return -EINVAL;	 /* EOPNOTSUPP? */
 	}
 
@@ -302,42 +304,46 @@ static int decode_sfu_inode(struct inode *inode, __u64 size,
 	if (rc == 0) {
 		int buf_type = CIFS_NO_BUFFER;
 			/* Read header */
-		rc = CIFSSMBRead(xid, pTcon,
-				 netfid,
+		rc = CIFSSMBRead(xid, pTcon, netfid,
 				 24 /* length */, 0 /* offset */,
 				 &bytes_read, &pbuf, &buf_type);
 		if ((rc == 0) && (bytes_read >= 8)) {
 			if (memcmp("IntxBLK", pbuf, 8) == 0) {
 				cFYI(1, ("Block device"));
-				inode->i_mode |= S_IFBLK;
+				fattr->cf_mode |= S_IFBLK;
+				fattr->cf_dtype = DT_BLK;
 				if (bytes_read == 24) {
 					/* we have enough to decode dev num */
 					__u64 mjr; /* major */
 					__u64 mnr; /* minor */
 					mjr = le64_to_cpu(*(__le64 *)(pbuf+8));
 					mnr = le64_to_cpu(*(__le64 *)(pbuf+16));
-					inode->i_rdev = MKDEV(mjr, mnr);
+					fattr->cf_rdev = MKDEV(mjr, mnr);
 				}
 			} else if (memcmp("IntxCHR", pbuf, 8) == 0) {
 				cFYI(1, ("Char device"));
-				inode->i_mode |= S_IFCHR;
+				fattr->cf_mode |= S_IFCHR;
+				fattr->cf_dtype = DT_CHR;
 				if (bytes_read == 24) {
 					/* we have enough to decode dev num */
 					__u64 mjr; /* major */
 					__u64 mnr; /* minor */
 					mjr = le64_to_cpu(*(__le64 *)(pbuf+8));
 					mnr = le64_to_cpu(*(__le64 *)(pbuf+16));
-					inode->i_rdev = MKDEV(mjr, mnr);
+					fattr->cf_rdev = MKDEV(mjr, mnr);
 				}
 			} else if (memcmp("IntxLNK", pbuf, 7) == 0) {
 				cFYI(1, ("Symlink"));
-				inode->i_mode |= S_IFLNK;
+				fattr->cf_mode |= S_IFLNK;
+				fattr->cf_dtype = DT_LNK;
 			} else {
-				inode->i_mode |= S_IFREG; /* file? */
+				fattr->cf_mode |= S_IFREG; /* file? */
+				fattr->cf_dtype = DT_REG;
 				rc = -EOPNOTSUPP;
 			}
 		} else {
-			inode->i_mode |= S_IFREG; /* then it is a file */
+			fattr->cf_mode |= S_IFREG; /* then it is a file */
+			fattr->cf_dtype = DT_REG;
 			rc = -EOPNOTSUPP; /* or some unknown SFU type */
 		}
 		CIFSSMBClose(xid, pTcon, netfid);
@@ -347,9 +353,13 @@ static int decode_sfu_inode(struct inode *inode, __u64 size,
 
 #define SFBITS_MASK (S_ISVTX | S_ISGID | S_ISUID)  /* SETFILEBITS valid bits */
 
-static int get_sfu_mode(struct inode *inode,
-			const unsigned char *path,
-			struct cifs_sb_info *cifs_sb, int xid)
+/*
+ * Fetch mode bits as provided by SFU.
+ *
+ * FIXME: Doesn't this clobber the type bit we got from cifs_sfu_type ?
+ */
+static int cifs_sfu_mode(struct cifs_fattr *fattr, const unsigned char *path,
+			 struct cifs_sb_info *cifs_sb, int xid)
 {
 #ifdef CONFIG_CIFS_XATTR
 	ssize_t rc;
@@ -357,68 +367,80 @@ static int get_sfu_mode(struct inode *inode,
 	__u32 mode;
 
 	rc = CIFSSMBQueryEA(xid, cifs_sb->tcon, path, "SETFILEBITS",
-			ea_value, 4 /* size of buf */, cifs_sb->local_nls,
-		cifs_sb->mnt_cifs_flags & CIFS_MOUNT_MAP_SPECIAL_CHR);
+			    ea_value, 4 /* size of buf */, cifs_sb->local_nls,
+			    cifs_sb->mnt_cifs_flags &
+				CIFS_MOUNT_MAP_SPECIAL_CHR);
 	if (rc < 0)
 		return (int)rc;
 	else if (rc > 3) {
 		mode = le32_to_cpu(*((__le32 *)ea_value));
-		inode->i_mode &= ~SFBITS_MASK;
-		cFYI(1, ("special bits 0%o org mode 0%o", mode, inode->i_mode));
-		inode->i_mode = (mode &  SFBITS_MASK) | inode->i_mode;
+		fattr->cf_mode &= ~SFBITS_MASK;
+		cFYI(1, ("special bits 0%o org mode 0%o", mode,
+			 fattr->cf_mode));
+		fattr->cf_mode = (mode & SFBITS_MASK) | fattr->cf_mode;
 		cFYI(1, ("special mode bits 0%o", mode));
-		return 0;
-	} else {
-		return 0;
 	}
+
+	return 0;
 #else
 	return -EOPNOTSUPP;
 #endif
 }
 
-/*
- *	Needed to setup inode data for the directory which is the
- *	junction to the new submount (ie to setup the fake directory
- *      which represents a DFS referral)
- */
-static void fill_fake_finddata(FILE_ALL_INFO *pfnd_dat,
-			       struct super_block *sb)
+/* Fill a cifs_fattr struct with info from FILE_ALL_INFO */
+static void
+cifs_all_info_to_fattr(struct cifs_fattr *fattr, FILE_ALL_INFO *info,
+		       struct cifs_sb_info *cifs_sb, bool adjust_tz)
 {
-	memset(pfnd_dat, 0, sizeof(FILE_ALL_INFO));
+	memset(fattr, 0, sizeof(*fattr));
+	fattr->cf_cifsattrs = le32_to_cpu(info->Attributes);
+	if (info->DeletePending)
+		fattr->cf_flags |= CIFS_FATTR_DELETE_PENDING;
 
-/*	__le64 pfnd_dat->AllocationSize = cpu_to_le64(0);
-	__le64 pfnd_dat->EndOfFile = cpu_to_le64(0);
-	__u8 pfnd_dat->DeletePending = 0;
-	__u8 pfnd_data->Directory = 0;
-	__le32 pfnd_dat->EASize = 0;
-	__u64 pfnd_dat->IndexNumber = 0;
-	__u64 pfnd_dat->IndexNumber1 = 0;  */
-	pfnd_dat->CreationTime =
-		cpu_to_le64(cifs_UnixTimeToNT(CURRENT_TIME));
-	pfnd_dat->LastAccessTime =
-		cpu_to_le64(cifs_UnixTimeToNT(CURRENT_TIME));
-	pfnd_dat->LastWriteTime =
-		cpu_to_le64(cifs_UnixTimeToNT(CURRENT_TIME));
-	pfnd_dat->ChangeTime =
-		cpu_to_le64(cifs_UnixTimeToNT(CURRENT_TIME));
-	pfnd_dat->Attributes = cpu_to_le32(ATTR_DIRECTORY);
-	pfnd_dat->NumberOfLinks = cpu_to_le32(2);
+	if (info->LastAccessTime)
+		fattr->cf_atime = cifs_NTtimeToUnix(info->LastAccessTime);
+	else
+		fattr->cf_atime = CURRENT_TIME;
+
+	fattr->cf_ctime = cifs_NTtimeToUnix(info->ChangeTime);
+	fattr->cf_mtime = cifs_NTtimeToUnix(info->LastWriteTime);
+
+	if (adjust_tz) {
+		fattr->cf_ctime.tv_sec += cifs_sb->tcon->ses->server->timeAdj;
+		fattr->cf_mtime.tv_sec += cifs_sb->tcon->ses->server->timeAdj;
+	}
+
+	fattr->cf_eof = le64_to_cpu(info->EndOfFile);
+	fattr->cf_bytes = le64_to_cpu(info->AllocationSize);
+
+	if (fattr->cf_cifsattrs & ATTR_DIRECTORY) {
+		fattr->cf_mode = S_IFDIR | cifs_sb->mnt_dir_mode;
+		fattr->cf_dtype = DT_DIR;
+	} else {
+		fattr->cf_mode = S_IFREG | cifs_sb->mnt_file_mode;
+		fattr->cf_dtype = DT_REG;
+
+		/* clear write bits if ATTR_READONLY is set */
+		if (fattr->cf_cifsattrs & ATTR_READONLY)
+			fattr->cf_mode &= ~(S_IWUGO);
+	}
+
+	fattr->cf_nlink = le32_to_cpu(info->NumberOfLinks);
+
+	fattr->cf_uid = cifs_sb->mnt_uid;
+	fattr->cf_gid = cifs_sb->mnt_gid;
 }
 
 int cifs_get_inode_info(struct inode **pinode,
 	const unsigned char *full_path, FILE_ALL_INFO *pfindData,
 	struct super_block *sb, int xid, const __u16 *pfid)
 {
-	int rc = 0;
-	__u32 attr;
-	struct cifsInodeInfo *cifsInfo;
+	int rc = 0, tmprc;
 	struct cifsTconInfo *pTcon;
-	struct inode *inode;
 	struct cifs_sb_info *cifs_sb = CIFS_SB(sb);
 	char *buf = NULL;
 	bool adjustTZ = false;
-	bool is_dfs_referral = false;
-	umode_t default_mode;
+	struct cifs_fattr fattr;
 
 	pTcon = cifs_sb->tcon;
 	cFYI(1, ("Getting info on %s", full_path));
@@ -453,163 +475,82 @@ int cifs_get_inode_info(struct inode **pinode,
 			adjustTZ = true;
 		}
 	}
-	/* dump_mem("\nQPathInfo return data",&findData, sizeof(findData)); */
-	if (rc == -EREMOTE) {
-		is_dfs_referral = true;
-		fill_fake_finddata(pfindData, sb);
+
+	if (!rc) {
+		cifs_all_info_to_fattr(&fattr, (FILE_ALL_INFO *) pfindData,
+				       cifs_sb, adjustTZ);
+	} else if (rc == -EREMOTE) {
+		cifs_create_dfs_fattr(&fattr, sb);
 		rc = 0;
-	} else if (rc)
+	} else {
 		goto cgii_exit;
+	}
 
-	attr = le32_to_cpu(pfindData->Attributes);
-
-	/* get new inode */
+	/*
+	 * If an inode wasn't passed in, then get the inode number
+	 *
+	 * Is an i_ino of zero legal? Can we use that to check if the server
+	 * supports returning inode numbers?  Are there other sanity checks we
+	 * can use to ensure that the server is really filling in that field?
+	 *
+	 * We can not use the IndexNumber field by default from Windows or
+	 * Samba (in ALL_INFO buf) but we can request it explicitly. The SNIA
+	 * CIFS spec claims that this value is unique within the scope of a
+	 * share, and the windows docs hint that it's actually unique
+	 * per-machine.
+	 *
+	 * There may be higher info levels that work but are there Windows
+	 * server or network appliances for which IndexNumber field is not
+	 * guaranteed unique?
+	 */
 	if (*pinode == NULL) {
-		*pinode = new_inode(sb);
-		if (*pinode == NULL) {
-			rc = -ENOMEM;
-			goto cgii_exit;
-		}
-		/* Is an i_ino of zero legal? Can we use that to check
-		   if the server supports returning inode numbers?  Are
-		   there other sanity checks we can use to ensure that
-		   the server is really filling in that field? */
-
-		/* We can not use the IndexNumber field by default from
-		   Windows or Samba (in ALL_INFO buf) but we can request
-		   it explicitly.  It may not be unique presumably if
-		   the server has multiple devices mounted under one share */
-
-		/* There may be higher info levels that work but are
-		   there Windows server or network appliances for which
-		   IndexNumber field is not guaranteed unique? */
-
 		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_SERVER_INUM) {
 			int rc1 = 0;
-			__u64 inode_num;
 
 			rc1 = CIFSGetSrvInodeNumber(xid, pTcon,
-					full_path, &inode_num,
+					full_path, &fattr.cf_uniqueid,
 					cifs_sb->local_nls,
 					cifs_sb->mnt_cifs_flags &
 						CIFS_MOUNT_MAP_SPECIAL_CHR);
-			if (rc1) {
+			if (rc1 || !fattr.cf_uniqueid) {
 				cFYI(1, ("GetSrvInodeNum rc %d", rc1));
-				/* BB EOPNOSUPP disable SERVER_INUM? */
-			} else /* do we need cast or hash to ino? */
-				(*pinode)->i_ino = inode_num;
-		} /* else ino incremented to unique num in new_inode*/
-		if (sb->s_flags & MS_NOATIME)
-			(*pinode)->i_flags |= S_NOATIME | S_NOCMTIME;
-		insert_inode_hash(*pinode);
-	}
-	inode = *pinode;
-	cifsInfo = CIFS_I(inode);
-	cifsInfo->cifsAttrs = attr;
-	cFYI(1, ("Old time %ld", cifsInfo->time));
-	cifsInfo->time = jiffies;
-	cFYI(1, ("New time %ld", cifsInfo->time));
-
-	/* blksize needs to be multiple of two. So safer to default to
-	blksize and blkbits set in superblock so 2**blkbits and blksize
-	will match rather than setting to:
-	(pTcon->ses->server->maxBuf - MAX_CIFS_HDR_SIZE) & 0xFFFFFE00;*/
-
-	/* Linux can not store file creation time so ignore it */
-	if (pfindData->LastAccessTime)
-		inode->i_atime = cifs_NTtimeToUnix
-			(le64_to_cpu(pfindData->LastAccessTime));
-	else /* do not need to use current_fs_time - time not stored */
-		inode->i_atime = CURRENT_TIME;
-	inode->i_mtime =
-		    cifs_NTtimeToUnix(le64_to_cpu(pfindData->LastWriteTime));
-	inode->i_ctime =
-	    cifs_NTtimeToUnix(le64_to_cpu(pfindData->ChangeTime));
-	cFYI(DBG2, ("Attributes came in as 0x%x", attr));
-	if (adjustTZ && (pTcon->ses) && (pTcon->ses->server)) {
-		inode->i_ctime.tv_sec += pTcon->ses->server->timeAdj;
-		inode->i_mtime.tv_sec += pTcon->ses->server->timeAdj;
-	}
-
-	/* get default inode mode */
-	if (attr & ATTR_DIRECTORY)
-		default_mode = cifs_sb->mnt_dir_mode;
-	else
-		default_mode = cifs_sb->mnt_file_mode;
-
-	/* set permission bits */
-	if (atomic_read(&cifsInfo->inUse) == 0 ||
-	    (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_DYNPERM) == 0)
-		inode->i_mode = default_mode;
-	else {
-		/* just reenable write bits if !ATTR_READONLY */
-		if ((inode->i_mode & S_IWUGO) == 0 &&
-		    (attr & ATTR_READONLY) == 0)
-			inode->i_mode |= (S_IWUGO & default_mode);
-
-		inode->i_mode &= ~S_IFMT;
-	}
-	/* clear write bits if ATTR_READONLY is set */
-	if (attr & ATTR_READONLY)
-		inode->i_mode &= ~S_IWUGO;
-
-	/* set inode type */
-	if ((attr & ATTR_SYSTEM) &&
-	    (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_UNX_EMUL)) {
-		/* no need to fix endianness on 0 */
-		if (pfindData->EndOfFile == 0)
-			inode->i_mode |= S_IFIFO;
-		else if (decode_sfu_inode(inode,
-				le64_to_cpu(pfindData->EndOfFile),
-				full_path, cifs_sb, xid))
-			cFYI(1, ("unknown SFU file type\n"));
+				fattr.cf_uniqueid = iunique(sb, ROOT_I);
+				cifs_autodisable_serverino(cifs_sb);
+			}
+		} else {
+			fattr.cf_uniqueid = iunique(sb, ROOT_I);
+		}
 	} else {
-		if (attr & ATTR_DIRECTORY)
-			inode->i_mode |= S_IFDIR;
-		else
-			inode->i_mode |= S_IFREG;
+		fattr.cf_uniqueid = CIFS_I(*pinode)->uniqueid;
 	}
 
-	spin_lock(&inode->i_lock);
-	if (is_size_safe_to_change(cifsInfo,
-				   le64_to_cpu(pfindData->EndOfFile))) {
-		/* can not safely shrink the file size here if the
-		   client is writing to it due to potential races */
-		i_size_write(inode, le64_to_cpu(pfindData->EndOfFile));
-
-		/* 512 bytes (2**9) is the fake blocksize that must be
-		   used for this calculation */
-		inode->i_blocks = (512 - 1 + le64_to_cpu(
-				   pfindData->AllocationSize)) >> 9;
+	/* query for SFU type info if supported and needed */
+	if (fattr.cf_cifsattrs & ATTR_SYSTEM &&
+	    cifs_sb->mnt_cifs_flags & CIFS_MOUNT_UNX_EMUL) {
+		tmprc = cifs_sfu_type(&fattr, full_path, cifs_sb, xid);
+		if (tmprc)
+			cFYI(1, ("cifs_sfu_type failed: %d", tmprc));
 	}
-	spin_unlock(&inode->i_lock);
 
-	inode->i_nlink = le32_to_cpu(pfindData->NumberOfLinks);
-
-	/* BB fill in uid and gid here? with help from winbind?
-	   or retrieve from NTFS stream extended attribute */
 #ifdef CONFIG_CIFS_EXPERIMENTAL
 	/* fill in 0777 bits from ACL */
 	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_CIFS_ACL) {
 		cFYI(1, ("Getting mode bits from ACL"));
-		acl_to_uid_mode(inode, full_path, pfid);
+		cifs_acl_to_fattr(cifs_sb, &fattr, *pinode, full_path, pfid);
 	}
 #endif
-	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_UNX_EMUL) {
-		/* fill in remaining high mode bits e.g. SUID, VTX */
-		get_sfu_mode(inode, full_path, cifs_sb, xid);
-	} else if (atomic_read(&cifsInfo->inUse) == 0) {
-		inode->i_uid = cifs_sb->mnt_uid;
-		inode->i_gid = cifs_sb->mnt_gid;
-		/* set so we do not keep refreshing these fields with
-		   bad data after user has changed them in memory */
-		atomic_set(&cifsInfo->inUse, 1);
+
+	/* fill in remaining high mode bits e.g. SUID, VTX */
+	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_UNX_EMUL)
+		cifs_sfu_mode(&fattr, full_path, cifs_sb, xid);
+
+	if (!*pinode) {
+		*pinode = cifs_iget(sb, &fattr);
+		if (!*pinode)
+			rc = -ENOMEM;
+	} else {
+		cifs_fattr_to_inode(*pinode, &fattr);
 	}
-
-	cifs_set_ops(inode, is_dfs_referral);
-
-
-
 
 cgii_exit:
 	kfree(buf);
@@ -620,28 +561,119 @@ static const struct inode_operations cifs_ipc_inode_ops = {
 	.lookup = cifs_lookup,
 };
 
+char *cifs_build_path_to_root(struct cifs_sb_info *cifs_sb)
+{
+	int pplen = cifs_sb->prepathlen;
+	int dfsplen;
+	char *full_path = NULL;
+
+	/* if no prefix path, simply set path to the root of share to "" */
+	if (pplen == 0) {
+		full_path = kmalloc(1, GFP_KERNEL);
+		if (full_path)
+			full_path[0] = 0;
+		return full_path;
+	}
+
+	if (cifs_sb->tcon && (cifs_sb->tcon->Flags & SMB_SHARE_IS_IN_DFS))
+		dfsplen = strnlen(cifs_sb->tcon->treeName, MAX_TREE_SIZE + 1);
+	else
+		dfsplen = 0;
+
+	full_path = kmalloc(dfsplen + pplen + 1, GFP_KERNEL);
+	if (full_path == NULL)
+		return full_path;
+
+	if (dfsplen) {
+		strncpy(full_path, cifs_sb->tcon->treeName, dfsplen);
+		/* switch slash direction in prepath depending on whether
+		 * windows or posix style path names
+		 */
+		if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_POSIX_PATHS) {
+			int i;
+			for (i = 0; i < dfsplen; i++) {
+				if (full_path[i] == '\\')
+					full_path[i] = '/';
+			}
+		}
+	}
+	strncpy(full_path + dfsplen, cifs_sb->prepath, pplen);
+	full_path[dfsplen + pplen] = 0; /* add trailing null */
+	return full_path;
+}
+
+static int
+cifs_find_inode(struct inode *inode, void *opaque)
+{
+	struct cifs_fattr *fattr = (struct cifs_fattr *) opaque;
+
+	if (CIFS_I(inode)->uniqueid != fattr->cf_uniqueid)
+		return 0;
+
+	return 1;
+}
+
+static int
+cifs_init_inode(struct inode *inode, void *opaque)
+{
+	struct cifs_fattr *fattr = (struct cifs_fattr *) opaque;
+
+	CIFS_I(inode)->uniqueid = fattr->cf_uniqueid;
+	return 0;
+}
+
+/* Given fattrs, get a corresponding inode */
+struct inode *
+cifs_iget(struct super_block *sb, struct cifs_fattr *fattr)
+{
+	unsigned long hash;
+	struct inode *inode;
+
+	cFYI(1, ("looking for uniqueid=%llu", fattr->cf_uniqueid));
+
+	/* hash down to 32-bits on 32-bit arch */
+	hash = cifs_uniqueid_to_ino_t(fattr->cf_uniqueid);
+
+	inode = iget5_locked(sb, hash, cifs_find_inode, cifs_init_inode, fattr);
+
+	/* we have fattrs in hand, update the inode */
+	if (inode) {
+		cifs_fattr_to_inode(inode, fattr);
+		if (sb->s_flags & MS_NOATIME)
+			inode->i_flags |= S_NOATIME | S_NOCMTIME;
+		if (inode->i_state & I_NEW) {
+			inode->i_ino = hash;
+			unlock_new_inode(inode);
+		}
+	}
+
+	return inode;
+}
+
 /* gets root inode */
-struct inode *cifs_iget(struct super_block *sb, unsigned long ino)
+struct inode *cifs_root_iget(struct super_block *sb, unsigned long ino)
 {
 	int xid;
 	struct cifs_sb_info *cifs_sb;
-	struct inode *inode;
+	struct inode *inode = NULL;
 	long rc;
+	char *full_path;
 
-	inode = iget_locked(sb, ino);
+	cifs_sb = CIFS_SB(sb);
+	full_path = cifs_build_path_to_root(cifs_sb);
+	if (full_path == NULL)
+		return ERR_PTR(-ENOMEM);
+
+	xid = GetXid();
+	if (cifs_sb->tcon->unix_ext)
+		rc = cifs_get_inode_info_unix(&inode, full_path, sb, xid);
+	else
+		rc = cifs_get_inode_info(&inode, full_path, NULL, sb,
+						xid, NULL);
+
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
-	if (!(inode->i_state & I_NEW))
-		return inode;
 
-	cifs_sb = CIFS_SB(inode->i_sb);
-	xid = GetXid();
-
-	if (cifs_sb->tcon->unix_ext)
-		rc = cifs_get_inode_info_unix(&inode, "", inode->i_sb, xid);
-	else
-		rc = cifs_get_inode_info(&inode, "", NULL, inode->i_sb, xid,
-					 NULL);
 	if (rc && cifs_sb->tcon->ipc) {
 		cFYI(1, ("ipc connection - fake read inode"));
 		inode->i_mode |= S_IFDIR;
@@ -651,13 +683,14 @@ struct inode *cifs_iget(struct super_block *sb, unsigned long ino)
 		inode->i_uid = cifs_sb->mnt_uid;
 		inode->i_gid = cifs_sb->mnt_gid;
 	} else if (rc) {
+		kfree(full_path);
 		_FreeXid(xid);
 		iget_failed(inode);
 		return ERR_PTR(rc);
 	}
 
-	unlock_new_inode(inode);
 
+	kfree(full_path);
 	/* can not call macro FreeXid here since in a void func
 	 * TODO: This is no longer true
 	 */
@@ -665,40 +698,256 @@ struct inode *cifs_iget(struct super_block *sb, unsigned long ino)
 	return inode;
 }
 
-int cifs_unlink(struct inode *inode, struct dentry *direntry)
+static int
+cifs_set_file_info(struct inode *inode, struct iattr *attrs, int xid,
+		    char *full_path, __u32 dosattr)
+{
+	int rc;
+	int oplock = 0;
+	__u16 netfid;
+	__u32 netpid;
+	bool set_time = false;
+	struct cifsFileInfo *open_file;
+	struct cifsInodeInfo *cifsInode = CIFS_I(inode);
+	struct cifs_sb_info *cifs_sb = CIFS_SB(inode->i_sb);
+	struct cifsTconInfo *pTcon = cifs_sb->tcon;
+	FILE_BASIC_INFO	info_buf;
+
+	if (attrs == NULL)
+		return -EINVAL;
+
+	if (attrs->ia_valid & ATTR_ATIME) {
+		set_time = true;
+		info_buf.LastAccessTime =
+			cpu_to_le64(cifs_UnixTimeToNT(attrs->ia_atime));
+	} else
+		info_buf.LastAccessTime = 0;
+
+	if (attrs->ia_valid & ATTR_MTIME) {
+		set_time = true;
+		info_buf.LastWriteTime =
+		    cpu_to_le64(cifs_UnixTimeToNT(attrs->ia_mtime));
+	} else
+		info_buf.LastWriteTime = 0;
+
+	/*
+	 * Samba throws this field away, but windows may actually use it.
+	 * Do not set ctime unless other time stamps are changed explicitly
+	 * (i.e. by utimes()) since we would then have a mix of client and
+	 * server times.
+	 */
+	if (set_time && (attrs->ia_valid & ATTR_CTIME)) {
+		cFYI(1, ("CIFS - CTIME changed"));
+		info_buf.ChangeTime =
+		    cpu_to_le64(cifs_UnixTimeToNT(attrs->ia_ctime));
+	} else
+		info_buf.ChangeTime = 0;
+
+	info_buf.CreationTime = 0;	/* don't change */
+	info_buf.Attributes = cpu_to_le32(dosattr);
+
+	/*
+	 * If the file is already open for write, just use that fileid
+	 */
+	open_file = find_writable_file(cifsInode);
+	if (open_file) {
+		netfid = open_file->netfid;
+		netpid = open_file->pid;
+		goto set_via_filehandle;
+	}
+
+	/*
+	 * NT4 apparently returns success on this call, but it doesn't
+	 * really work.
+	 */
+	if (!(pTcon->ses->flags & CIFS_SES_NT4)) {
+		rc = CIFSSMBSetPathInfo(xid, pTcon, full_path,
+				     &info_buf, cifs_sb->local_nls,
+				     cifs_sb->mnt_cifs_flags &
+					CIFS_MOUNT_MAP_SPECIAL_CHR);
+		if (rc == 0) {
+			cifsInode->cifsAttrs = dosattr;
+			goto out;
+		} else if (rc != -EOPNOTSUPP && rc != -EINVAL)
+			goto out;
+	}
+
+	cFYI(1, ("calling SetFileInfo since SetPathInfo for "
+		 "times not supported by this server"));
+	rc = CIFSSMBOpen(xid, pTcon, full_path, FILE_OPEN,
+			 SYNCHRONIZE | FILE_WRITE_ATTRIBUTES,
+			 CREATE_NOT_DIR, &netfid, &oplock,
+			 NULL, cifs_sb->local_nls,
+			 cifs_sb->mnt_cifs_flags &
+				CIFS_MOUNT_MAP_SPECIAL_CHR);
+
+	if (rc != 0) {
+		if (rc == -EIO)
+			rc = -EINVAL;
+		goto out;
+	}
+
+	netpid = current->tgid;
+
+set_via_filehandle:
+	rc = CIFSSMBSetFileInfo(xid, pTcon, &info_buf, netfid, netpid);
+	if (!rc)
+		cifsInode->cifsAttrs = dosattr;
+
+	if (open_file == NULL)
+		CIFSSMBClose(xid, pTcon, netfid);
+	else
+		cifsFileInfo_put(open_file);
+out:
+	return rc;
+}
+
+/*
+ * open the given file (if it isn't already), set the DELETE_ON_CLOSE bit
+ * and rename it to a random name that hopefully won't conflict with
+ * anything else.
+ */
+static int
+cifs_rename_pending_delete(char *full_path, struct dentry *dentry, int xid)
+{
+	int oplock = 0;
+	int rc;
+	__u16 netfid;
+	struct inode *inode = dentry->d_inode;
+	struct cifsInodeInfo *cifsInode = CIFS_I(inode);
+	struct cifs_sb_info *cifs_sb = CIFS_SB(inode->i_sb);
+	struct cifsTconInfo *tcon = cifs_sb->tcon;
+	__u32 dosattr, origattr;
+	FILE_BASIC_INFO *info_buf = NULL;
+
+	rc = CIFSSMBOpen(xid, tcon, full_path, FILE_OPEN,
+			 DELETE|FILE_WRITE_ATTRIBUTES, CREATE_NOT_DIR,
+			 &netfid, &oplock, NULL, cifs_sb->local_nls,
+			 cifs_sb->mnt_cifs_flags & CIFS_MOUNT_MAP_SPECIAL_CHR);
+	if (rc != 0)
+		goto out;
+
+	origattr = cifsInode->cifsAttrs;
+	if (origattr == 0)
+		origattr |= ATTR_NORMAL;
+
+	dosattr = origattr & ~ATTR_READONLY;
+	if (dosattr == 0)
+		dosattr |= ATTR_NORMAL;
+	dosattr |= ATTR_HIDDEN;
+
+	/* set ATTR_HIDDEN and clear ATTR_READONLY, but only if needed */
+	if (dosattr != origattr) {
+		info_buf = kzalloc(sizeof(*info_buf), GFP_KERNEL);
+		if (info_buf == NULL) {
+			rc = -ENOMEM;
+			goto out_close;
+		}
+		info_buf->Attributes = cpu_to_le32(dosattr);
+		rc = CIFSSMBSetFileInfo(xid, tcon, info_buf, netfid,
+					current->tgid);
+		/* although we would like to mark the file hidden
+ 		   if that fails we will still try to rename it */
+		if (rc != 0)
+			cifsInode->cifsAttrs = dosattr;
+		else
+			dosattr = origattr; /* since not able to change them */
+	}
+
+	/* rename the file */
+	rc = CIFSSMBRenameOpenFile(xid, tcon, netfid, NULL, cifs_sb->local_nls,
+				   cifs_sb->mnt_cifs_flags &
+					    CIFS_MOUNT_MAP_SPECIAL_CHR);
+	if (rc != 0) {
+		rc = -ETXTBSY;
+		goto undo_setattr;
+	}
+
+	/* try to set DELETE_ON_CLOSE */
+	if (!cifsInode->delete_pending) {
+		rc = CIFSSMBSetFileDisposition(xid, tcon, true, netfid,
+					       current->tgid);
+		/*
+		 * some samba versions return -ENOENT when we try to set the
+		 * file disposition here. Likely a samba bug, but work around
+		 * it for now. This means that some cifsXXX files may hang
+		 * around after they shouldn't.
+		 *
+		 * BB: remove this hack after more servers have the fix
+		 */
+		if (rc == -ENOENT)
+			rc = 0;
+		else if (rc != 0) {
+			rc = -ETXTBSY;
+			goto undo_rename;
+		}
+		cifsInode->delete_pending = true;
+	}
+
+out_close:
+	CIFSSMBClose(xid, tcon, netfid);
+out:
+	kfree(info_buf);
+	return rc;
+
+	/*
+	 * reset everything back to the original state. Don't bother
+	 * dealing with errors here since we can't do anything about
+	 * them anyway.
+	 */
+undo_rename:
+	CIFSSMBRenameOpenFile(xid, tcon, netfid, dentry->d_name.name,
+				cifs_sb->local_nls, cifs_sb->mnt_cifs_flags &
+					    CIFS_MOUNT_MAP_SPECIAL_CHR);
+undo_setattr:
+	if (dosattr != origattr) {
+		info_buf->Attributes = cpu_to_le32(origattr);
+		if (!CIFSSMBSetFileInfo(xid, tcon, info_buf, netfid,
+					current->tgid))
+			cifsInode->cifsAttrs = origattr;
+	}
+
+	goto out_close;
+}
+
+
+/*
+ * If dentry->d_inode is null (usually meaning the cached dentry
+ * is a negative dentry) then we would attempt a standard SMB delete, but
+ * if that fails we can not attempt the fall back mechanisms on EACESS
+ * but will return the EACESS to the caller.  Note that the VFS does not call
+ * unlink on negative dentries currently.
+ */
+int cifs_unlink(struct inode *dir, struct dentry *dentry)
 {
 	int rc = 0;
 	int xid;
-	struct cifs_sb_info *cifs_sb;
-	struct cifsTconInfo *pTcon;
 	char *full_path = NULL;
-	struct cifsInodeInfo *cifsInode;
-	FILE_BASIC_INFO *pinfo_buf;
+	struct inode *inode = dentry->d_inode;
+	struct cifsInodeInfo *cifs_inode;
+	struct super_block *sb = dir->i_sb;
+	struct cifs_sb_info *cifs_sb = CIFS_SB(sb);
+	struct cifsTconInfo *tcon = cifs_sb->tcon;
+	struct iattr *attrs = NULL;
+	__u32 dosattr = 0, origattr = 0;
 
-	cFYI(1, ("cifs_unlink, inode = 0x%p", inode));
+	cFYI(1, ("cifs_unlink, dir=0x%p, dentry=0x%p", dir, dentry));
 
 	xid = GetXid();
 
-	if (inode)
-		cifs_sb = CIFS_SB(inode->i_sb);
-	else
-		cifs_sb = CIFS_SB(direntry->d_sb);
-	pTcon = cifs_sb->tcon;
-
-	/* Unlink can be called from rename so we can not grab the sem here
-	   since we deadlock otherwise */
-/*	mutex_lock(&direntry->d_sb->s_vfs_rename_mutex);*/
-	full_path = build_path_from_dentry(direntry);
-/*	mutex_unlock(&direntry->d_sb->s_vfs_rename_mutex);*/
+	/* Unlink can be called from rename so we can not take the
+	 * sb->s_vfs_rename_mutex here */
+	full_path = build_path_from_dentry(dentry);
 	if (full_path == NULL) {
+		rc = -ENOMEM;
 		FreeXid(xid);
-		return -ENOMEM;
+		return rc;
 	}
 
-	if ((pTcon->ses->capabilities & CAP_UNIX) &&
+	if ((tcon->ses->capabilities & CAP_UNIX) &&
 		(CIFS_UNIX_POSIX_PATH_OPS_CAP &
-			le64_to_cpu(pTcon->fsUnixInfo.Capability))) {
-		rc = CIFSPOSIXDelFile(xid, pTcon, full_path,
+			le64_to_cpu(tcon->fsUnixInfo.Capability))) {
+		rc = CIFSPOSIXDelFile(xid, tcon, full_path,
 			SMB_POSIX_UNLINK_FILE_TARGET, cifs_sb->local_nls,
 			cifs_sb->mnt_cifs_flags & CIFS_MOUNT_MAP_SPECIAL_CHR);
 		cFYI(1, ("posix del rc %d", rc));
@@ -706,175 +955,74 @@ int cifs_unlink(struct inode *inode, struct dentry *direntry)
 			goto psx_del_no_retry;
 	}
 
-	rc = CIFSSMBDelFile(xid, pTcon, full_path, cifs_sb->local_nls,
+retry_std_delete:
+	rc = CIFSSMBDelFile(xid, tcon, full_path, cifs_sb->local_nls,
 			cifs_sb->mnt_cifs_flags & CIFS_MOUNT_MAP_SPECIAL_CHR);
+
 psx_del_no_retry:
 	if (!rc) {
-		if (direntry->d_inode)
-			drop_nlink(direntry->d_inode);
+		if (inode)
+			drop_nlink(inode);
 	} else if (rc == -ENOENT) {
-		d_drop(direntry);
+		d_drop(dentry);
 	} else if (rc == -ETXTBSY) {
-		int oplock = 0;
-		__u16 netfid;
-
-		rc = CIFSSMBOpen(xid, pTcon, full_path, FILE_OPEN, DELETE,
-				 CREATE_NOT_DIR | CREATE_DELETE_ON_CLOSE,
-				 &netfid, &oplock, NULL, cifs_sb->local_nls,
-				 cifs_sb->mnt_cifs_flags &
-					CIFS_MOUNT_MAP_SPECIAL_CHR);
-		if (rc == 0) {
-			CIFSSMBRenameOpenFile(xid, pTcon, netfid, NULL,
-					      cifs_sb->local_nls,
-					      cifs_sb->mnt_cifs_flags &
-						CIFS_MOUNT_MAP_SPECIAL_CHR);
-			CIFSSMBClose(xid, pTcon, netfid);
-			if (direntry->d_inode)
-				drop_nlink(direntry->d_inode);
+		rc = cifs_rename_pending_delete(full_path, dentry, xid);
+		if (rc == 0)
+			drop_nlink(inode);
+	} else if ((rc == -EACCES) && (dosattr == 0) && inode) {
+		attrs = kzalloc(sizeof(*attrs), GFP_KERNEL);
+		if (attrs == NULL) {
+			rc = -ENOMEM;
+			goto out_reval;
 		}
-	} else if (rc == -EACCES) {
-		/* try only if r/o attribute set in local lookup data? */
-		pinfo_buf = kzalloc(sizeof(FILE_BASIC_INFO), GFP_KERNEL);
-		if (pinfo_buf) {
-			/* ATTRS set to normal clears r/o bit */
-			pinfo_buf->Attributes = cpu_to_le32(ATTR_NORMAL);
-			if (!(pTcon->ses->flags & CIFS_SES_NT4))
-				rc = CIFSSMBSetPathInfo(xid, pTcon, full_path,
-						     pinfo_buf,
-						     cifs_sb->local_nls,
-						     cifs_sb->mnt_cifs_flags &
-							CIFS_MOUNT_MAP_SPECIAL_CHR);
-			else
-				rc = -EOPNOTSUPP;
 
-			if (rc == -EOPNOTSUPP) {
-				int oplock = 0;
-				__u16 netfid;
-			/*	rc = CIFSSMBSetAttrLegacy(xid, pTcon,
-							  full_path,
-							  (__u16)ATTR_NORMAL,
-							  cifs_sb->local_nls);
-			   For some strange reason it seems that NT4 eats the
-			   old setattr call without actually setting the
-			   attributes so on to the third attempted workaround
-			   */
+		/* try to reset dos attributes */
+		cifs_inode = CIFS_I(inode);
+		origattr = cifs_inode->cifsAttrs;
+		if (origattr == 0)
+			origattr |= ATTR_NORMAL;
+		dosattr = origattr & ~ATTR_READONLY;
+		if (dosattr == 0)
+			dosattr |= ATTR_NORMAL;
+		dosattr |= ATTR_HIDDEN;
 
-			/* BB could scan to see if we already have it open
-			   and pass in pid of opener to function */
-				rc = CIFSSMBOpen(xid, pTcon, full_path,
-						 FILE_OPEN, SYNCHRONIZE |
-						 FILE_WRITE_ATTRIBUTES, 0,
-						 &netfid, &oplock, NULL,
-						 cifs_sb->local_nls,
-						 cifs_sb->mnt_cifs_flags &
-						    CIFS_MOUNT_MAP_SPECIAL_CHR);
-				if (rc == 0) {
-					rc = CIFSSMBSetFileInfo(xid, pTcon,
-								pinfo_buf,
-								netfid,
-								current->tgid);
-					CIFSSMBClose(xid, pTcon, netfid);
-				}
-			}
-			kfree(pinfo_buf);
-		}
-		if (rc == 0) {
-			rc = CIFSSMBDelFile(xid, pTcon, full_path,
-					    cifs_sb->local_nls,
-					    cifs_sb->mnt_cifs_flags &
-						CIFS_MOUNT_MAP_SPECIAL_CHR);
-			if (!rc) {
-				if (direntry->d_inode)
-					drop_nlink(direntry->d_inode);
-			} else if (rc == -ETXTBSY) {
-				int oplock = 0;
-				__u16 netfid;
+		rc = cifs_set_file_info(inode, attrs, xid, full_path, dosattr);
+		if (rc != 0)
+			goto out_reval;
 
-				rc = CIFSSMBOpen(xid, pTcon, full_path,
-						 FILE_OPEN, DELETE,
-						 CREATE_NOT_DIR |
-						 CREATE_DELETE_ON_CLOSE,
-						 &netfid, &oplock, NULL,
-						 cifs_sb->local_nls,
-						 cifs_sb->mnt_cifs_flags &
-						    CIFS_MOUNT_MAP_SPECIAL_CHR);
-				if (rc == 0) {
-					CIFSSMBRenameOpenFile(xid, pTcon,
-						netfid, NULL,
-						cifs_sb->local_nls,
-						cifs_sb->mnt_cifs_flags &
-						    CIFS_MOUNT_MAP_SPECIAL_CHR);
-					CIFSSMBClose(xid, pTcon, netfid);
-					if (direntry->d_inode)
-						drop_nlink(direntry->d_inode);
-				}
-			/* BB if rc = -ETXTBUSY goto the rename logic BB */
-			}
-		}
+		goto retry_std_delete;
 	}
-	if (direntry->d_inode) {
-		cifsInode = CIFS_I(direntry->d_inode);
-		cifsInode->time = 0;	/* will force revalidate to get info
-					   when needed */
-		direntry->d_inode->i_ctime = current_fs_time(inode->i_sb);
-	}
+
+	/* undo the setattr if we errored out and it's needed */
+	if (rc != 0 && dosattr != 0)
+		cifs_set_file_info(inode, attrs, xid, full_path, origattr);
+
+out_reval:
 	if (inode) {
-		inode->i_ctime = inode->i_mtime = current_fs_time(inode->i_sb);
-		cifsInode = CIFS_I(inode);
-		cifsInode->time = 0;	/* force revalidate of dir as well */
+		cifs_inode = CIFS_I(inode);
+		cifs_inode->time = 0;	/* will force revalidate to get info
+					   when needed */
+		inode->i_ctime = current_fs_time(sb);
 	}
+	dir->i_ctime = dir->i_mtime = current_fs_time(sb);
+	cifs_inode = CIFS_I(dir);
+	CIFS_I(dir)->time = 0;	/* force revalidate of dir as well */
 
 	kfree(full_path);
+	kfree(attrs);
 	FreeXid(xid);
 	return rc;
 }
 
-static void posix_fill_in_inode(struct inode *tmp_inode,
-	FILE_UNIX_BASIC_INFO *pData, int isNewInode)
-{
-	struct cifsInodeInfo *cifsInfo = CIFS_I(tmp_inode);
-	loff_t local_size;
-	struct timespec local_mtime;
-
-	cifsInfo->time = jiffies;
-	atomic_inc(&cifsInfo->inUse);
-
-	/* save mtime and size */
-	local_mtime = tmp_inode->i_mtime;
-	local_size  = tmp_inode->i_size;
-
-	cifs_unix_info_to_inode(tmp_inode, pData, 1);
-	cifs_set_ops(tmp_inode, false);
-
-	if (!S_ISREG(tmp_inode->i_mode))
-		return;
-
-	/*
-	 * No sense invalidating pages for new inode
-	 * since we we have not started caching
-	 * readahead file data yet.
-	 */
-	if (isNewInode)
-		return;
-
-	if (timespec_equal(&tmp_inode->i_mtime, &local_mtime) &&
-		(local_size == tmp_inode->i_size)) {
-		cFYI(1, ("inode exists but unchanged"));
-	} else {
-		/* file may have changed on server */
-		cFYI(1, ("invalidate inode, readdir detected change"));
-		invalidate_remote_inode(tmp_inode);
-	}
-}
-
 int cifs_mkdir(struct inode *inode, struct dentry *direntry, int mode)
 {
-	int rc = 0;
+	int rc = 0, tmprc;
 	int xid;
 	struct cifs_sb_info *cifs_sb;
 	struct cifsTconInfo *pTcon;
 	char *full_path = NULL;
 	struct inode *newinode = NULL;
+	struct cifs_fattr fattr;
 
 	cFYI(1, ("In cifs_mkdir, mode = 0x%x inode = 0x%p", mode, inode));
 
@@ -885,8 +1033,9 @@ int cifs_mkdir(struct inode *inode, struct dentry *direntry, int mode)
 
 	full_path = build_path_from_dentry(direntry);
 	if (full_path == NULL) {
+		rc = -ENOMEM;
 		FreeXid(xid);
-		return -ENOMEM;
+		return rc;
 	}
 
 	if ((pTcon->ses->capabilities & CAP_UNIX) &&
@@ -900,7 +1049,7 @@ int cifs_mkdir(struct inode *inode, struct dentry *direntry, int mode)
 			goto mkdir_out;
 		}
 
-		mode &= ~current->fs->umask;
+		mode &= ~current_umask();
 		rc = CIFSPOSIXCreate(xid, pTcon, SMB_O_DIRECTORY | SMB_O_CREAT,
 				mode, NULL /* netfid */, pInfo, &oplock,
 				full_path, cifs_sb->local_nls,
@@ -926,29 +1075,15 @@ int cifs_mkdir(struct inode *inode, struct dentry *direntry, int mode)
 			else
 				direntry->d_op = &cifs_dentry_ops;
 
-			newinode = new_inode(inode->i_sb);
-			if (newinode == NULL) {
+			cifs_unix_basic_to_fattr(&fattr, pInfo, cifs_sb);
+			newinode = cifs_iget(inode->i_sb, &fattr);
+			if (!newinode) {
 				kfree(pInfo);
 				goto mkdir_get_info;
 			}
-			/* Is an i_ino of zero legal? */
-			/* Are there sanity checks we can use to ensure that
-			   the server is really filling in that field? */
-			if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_SERVER_INUM) {
-				newinode->i_ino =
-					(unsigned long)pInfo->UniqueId;
-			} /* note ino incremented to unique num in new_inode */
-			if (inode->i_sb->s_flags & MS_NOATIME)
-				newinode->i_flags |= S_NOATIME | S_NOCMTIME;
-			newinode->i_nlink = 2;
 
-			insert_inode_hash(newinode);
 			d_instantiate(direntry, newinode);
 
-			/* we already checked in POSIXCreate whether
-			   frame was long enough */
-			posix_fill_in_inode(direntry->d_inode,
-					pInfo, 1 /* NewInode */);
 #ifdef CONFIG_CIFS_DEBUG2
 			cFYI(1, ("instantiated dentry %p %s to inode %p",
 				direntry, direntry->d_name.name, newinode));
@@ -988,7 +1123,7 @@ mkdir_get_info:
 		if ((direntry->d_inode) && (direntry->d_inode->i_nlink < 2))
 				direntry->d_inode->i_nlink = 2;
 
-		mode &= ~current->fs->umask;
+		mode &= ~current_umask();
 		/* must turn on setgid bit if parent dir has it */
 		if (inode->i_mode & S_ISGID)
 			mode |= S_ISGID;
@@ -1002,29 +1137,37 @@ mkdir_get_info:
 				.device	= 0,
 			};
 			if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_SET_UID) {
-				args.uid = (__u64)current->fsuid;
+				args.uid = (__u64)current_fsuid();
 				if (inode->i_mode & S_ISGID)
 					args.gid = (__u64)inode->i_gid;
 				else
-					args.gid = (__u64)current->fsgid;
+					args.gid = (__u64)current_fsgid();
 			} else {
 				args.uid = NO_CHANGE_64;
 				args.gid = NO_CHANGE_64;
 			}
-			CIFSSMBUnixSetInfo(xid, pTcon, full_path, &args,
-					    cifs_sb->local_nls,
-					    cifs_sb->mnt_cifs_flags &
-					    CIFS_MOUNT_MAP_SPECIAL_CHR);
+			CIFSSMBUnixSetPathInfo(xid, pTcon, full_path, &args,
+					       cifs_sb->local_nls,
+					       cifs_sb->mnt_cifs_flags &
+						CIFS_MOUNT_MAP_SPECIAL_CHR);
 		} else {
 			if (!(cifs_sb->mnt_cifs_flags & CIFS_MOUNT_CIFS_ACL) &&
 			    (mode & S_IWUGO) == 0) {
 				FILE_BASIC_INFO pInfo;
+				struct cifsInodeInfo *cifsInode;
+				u32 dosattrs;
+
 				memset(&pInfo, 0, sizeof(pInfo));
-				pInfo.Attributes = cpu_to_le32(ATTR_READONLY);
-				CIFSSMBSetPathInfo(xid, pTcon, full_path,
-						&pInfo, cifs_sb->local_nls,
+				cifsInode = CIFS_I(newinode);
+				dosattrs = cifsInode->cifsAttrs|ATTR_READONLY;
+				pInfo.Attributes = cpu_to_le32(dosattrs);
+				tmprc = CIFSSMBSetPathInfo(xid, pTcon,
+						full_path, &pInfo,
+						cifs_sb->local_nls,
 						cifs_sb->mnt_cifs_flags &
 						CIFS_MOUNT_MAP_SPECIAL_CHR);
+				if (tmprc == 0)
+					cifsInode->cifsAttrs = dosattrs;
 			}
 			if (direntry->d_inode) {
 				if (cifs_sb->mnt_cifs_flags &
@@ -1035,13 +1178,13 @@ mkdir_get_info:
 				if (cifs_sb->mnt_cifs_flags &
 				     CIFS_MOUNT_SET_UID) {
 					direntry->d_inode->i_uid =
-						current->fsuid;
+						current_fsuid();
 					if (inode->i_mode & S_ISGID)
 						direntry->d_inode->i_gid =
 							inode->i_gid;
 					else
 						direntry->d_inode->i_gid =
-							current->fsgid;
+							current_fsgid();
 				}
 			}
 		}
@@ -1070,8 +1213,9 @@ int cifs_rmdir(struct inode *inode, struct dentry *direntry)
 
 	full_path = build_path_from_dentry(direntry);
 	if (full_path == NULL) {
+		rc = -ENOMEM;
 		FreeXid(xid);
-		return -ENOMEM;
+		return rc;
 	}
 
 	rc = CIFSSMBRmDir(xid, pTcon, full_path, cifs_sb->local_nls,
@@ -1088,6 +1232,11 @@ int cifs_rmdir(struct inode *inode, struct dentry *direntry)
 	cifsInode = CIFS_I(direntry->d_inode);
 	cifsInode->time = 0;	/* force revalidate to go get info when
 				   needed */
+
+	cifsInode = CIFS_I(inode);
+	cifsInode->time = 0;	/* force revalidate to get parent dir info
+				   since cached search results now invalid */
+
 	direntry->d_inode->i_ctime = inode->i_ctime = inode->i_mtime =
 		current_fs_time(inode->i_sb);
 
@@ -1096,117 +1245,143 @@ int cifs_rmdir(struct inode *inode, struct dentry *direntry)
 	return rc;
 }
 
-int cifs_rename(struct inode *source_inode, struct dentry *source_direntry,
-	struct inode *target_inode, struct dentry *target_direntry)
+static int
+cifs_do_rename(int xid, struct dentry *from_dentry, const char *fromPath,
+		struct dentry *to_dentry, const char *toPath)
 {
-	char *fromName;
-	char *toName;
+	struct cifs_sb_info *cifs_sb = CIFS_SB(from_dentry->d_sb);
+	struct cifsTconInfo *pTcon = cifs_sb->tcon;
+	__u16 srcfid;
+	int oplock, rc;
+
+	/* try path-based rename first */
+	rc = CIFSSMBRename(xid, pTcon, fromPath, toPath, cifs_sb->local_nls,
+			   cifs_sb->mnt_cifs_flags &
+				CIFS_MOUNT_MAP_SPECIAL_CHR);
+
+	/*
+	 * don't bother with rename by filehandle unless file is busy and
+	 * source Note that cross directory moves do not work with
+	 * rename by filehandle to various Windows servers.
+	 */
+	if (rc == 0 || rc != -ETXTBSY)
+		return rc;
+
+	/* open the file to be renamed -- we need DELETE perms */
+	rc = CIFSSMBOpen(xid, pTcon, fromPath, FILE_OPEN, DELETE,
+			 CREATE_NOT_DIR, &srcfid, &oplock, NULL,
+			 cifs_sb->local_nls, cifs_sb->mnt_cifs_flags &
+				CIFS_MOUNT_MAP_SPECIAL_CHR);
+
+	if (rc == 0) {
+		rc = CIFSSMBRenameOpenFile(xid, pTcon, srcfid,
+				(const char *) to_dentry->d_name.name,
+				cifs_sb->local_nls, cifs_sb->mnt_cifs_flags &
+					CIFS_MOUNT_MAP_SPECIAL_CHR);
+
+		CIFSSMBClose(xid, pTcon, srcfid);
+	}
+
+	return rc;
+}
+
+int cifs_rename(struct inode *source_dir, struct dentry *source_dentry,
+	struct inode *target_dir, struct dentry *target_dentry)
+{
+	char *fromName = NULL;
+	char *toName = NULL;
 	struct cifs_sb_info *cifs_sb_source;
 	struct cifs_sb_info *cifs_sb_target;
-	struct cifsTconInfo *pTcon;
-	int xid;
-	int rc = 0;
+	struct cifsTconInfo *tcon;
+	FILE_UNIX_BASIC_INFO *info_buf_source = NULL;
+	FILE_UNIX_BASIC_INFO *info_buf_target;
+	int xid, rc, tmprc;
+
+	cifs_sb_target = CIFS_SB(target_dir->i_sb);
+	cifs_sb_source = CIFS_SB(source_dir->i_sb);
+	tcon = cifs_sb_source->tcon;
 
 	xid = GetXid();
 
-	cifs_sb_target = CIFS_SB(target_inode->i_sb);
-	cifs_sb_source = CIFS_SB(source_inode->i_sb);
-	pTcon = cifs_sb_source->tcon;
-
-	if (pTcon != cifs_sb_target->tcon) {
-		FreeXid(xid);
-		return -EXDEV;	/* BB actually could be allowed if same server,
-				   but different share.
-				   Might eventually add support for this */
+	/*
+	 * BB: this might be allowed if same server, but different share.
+	 * Consider adding support for this
+	 */
+	if (tcon != cifs_sb_target->tcon) {
+		rc = -EXDEV;
+		goto cifs_rename_exit;
 	}
 
-	/* we already  have the rename sem so we do not need to grab it again
-	   here to protect the path integrity */
-	fromName = build_path_from_dentry(source_direntry);
-	toName = build_path_from_dentry(target_direntry);
-	if ((fromName == NULL) || (toName == NULL)) {
+	/*
+	 * we already have the rename sem so we do not need to
+	 * grab it again here to protect the path integrity
+	 */
+	fromName = build_path_from_dentry(source_dentry);
+	if (fromName == NULL) {
 		rc = -ENOMEM;
 		goto cifs_rename_exit;
 	}
 
-	rc = CIFSSMBRename(xid, pTcon, fromName, toName,
-			   cifs_sb_source->local_nls,
-			   cifs_sb_source->mnt_cifs_flags &
-				CIFS_MOUNT_MAP_SPECIAL_CHR);
-	if (rc == -EEXIST) {
-		/* check if they are the same file because rename of hardlinked
-		   files is a noop */
-		FILE_UNIX_BASIC_INFO *info_buf_source;
-		FILE_UNIX_BASIC_INFO *info_buf_target;
+	toName = build_path_from_dentry(target_dentry);
+	if (toName == NULL) {
+		rc = -ENOMEM;
+		goto cifs_rename_exit;
+	}
 
+	rc = cifs_do_rename(xid, source_dentry, fromName,
+			    target_dentry, toName);
+
+	if (rc == -EEXIST && tcon->unix_ext) {
+		/*
+		 * Are src and dst hardlinks of same inode? We can
+		 * only tell with unix extensions enabled
+		 */
 		info_buf_source =
-			kmalloc(2 * sizeof(FILE_UNIX_BASIC_INFO), GFP_KERNEL);
-		if (info_buf_source != NULL) {
-			info_buf_target = info_buf_source + 1;
-			if (pTcon->unix_ext)
-				rc = CIFSSMBUnixQPathInfo(xid, pTcon, fromName,
+			kmalloc(2 * sizeof(FILE_UNIX_BASIC_INFO),
+					GFP_KERNEL);
+		if (info_buf_source == NULL) {
+			rc = -ENOMEM;
+			goto cifs_rename_exit;
+		}
+
+		info_buf_target = info_buf_source + 1;
+		tmprc = CIFSSMBUnixQPathInfo(xid, tcon, fromName,
 					info_buf_source,
 					cifs_sb_source->local_nls,
 					cifs_sb_source->mnt_cifs_flags &
-						CIFS_MOUNT_MAP_SPECIAL_CHR);
-			/* else rc is still EEXIST so will fall through to
-			   unlink the target and retry rename */
-			if (rc == 0) {
-				rc = CIFSSMBUnixQPathInfo(xid, pTcon, toName,
-						info_buf_target,
-						cifs_sb_target->local_nls,
-						/* remap based on source sb */
-						cifs_sb_source->mnt_cifs_flags &
-						    CIFS_MOUNT_MAP_SPECIAL_CHR);
-			}
-			if ((rc == 0) &&
-			    (info_buf_source->UniqueId ==
-			     info_buf_target->UniqueId)) {
-			/* do not rename since the files are hardlinked which
-			   is a noop */
-			} else {
-			/* we either can not tell the files are hardlinked
-			   (as with Windows servers) or files are not
-			   hardlinked so delete the target manually before
-			   renaming to follow POSIX rather than Windows
-			   semantics */
-				cifs_unlink(target_inode, target_direntry);
-				rc = CIFSSMBRename(xid, pTcon, fromName,
-						   toName,
-						   cifs_sb_source->local_nls,
-						   cifs_sb_source->mnt_cifs_flags
-						   & CIFS_MOUNT_MAP_SPECIAL_CHR);
-			}
-			kfree(info_buf_source);
-		} /* if we can not get memory just leave rc as EEXIST */
-	}
-
-	if (rc)
-		cFYI(1, ("rename rc %d", rc));
-
-	if ((rc == -EIO) || (rc == -EEXIST)) {
-		int oplock = 0;
-		__u16 netfid;
-
-		/* BB FIXME Is Generic Read correct for rename? */
-		/* if renaming directory - we should not say CREATE_NOT_DIR,
-		   need to test renaming open directory, also GENERIC_READ
-		   might not right be right access to request */
-		rc = CIFSSMBOpen(xid, pTcon, fromName, FILE_OPEN, GENERIC_READ,
-				 CREATE_NOT_DIR, &netfid, &oplock, NULL,
-				 cifs_sb_source->local_nls,
-				 cifs_sb_source->mnt_cifs_flags &
 					CIFS_MOUNT_MAP_SPECIAL_CHR);
-		if (rc == 0) {
-			rc = CIFSSMBRenameOpenFile(xid, pTcon, netfid, toName,
-					      cifs_sb_source->local_nls,
-					      cifs_sb_source->mnt_cifs_flags &
-						CIFS_MOUNT_MAP_SPECIAL_CHR);
-			CIFSSMBClose(xid, pTcon, netfid);
+		if (tmprc != 0)
+			goto unlink_target;
+
+		tmprc = CIFSSMBUnixQPathInfo(xid, tcon,
+					toName, info_buf_target,
+					cifs_sb_target->local_nls,
+					/* remap based on source sb */
+					cifs_sb_source->mnt_cifs_flags &
+					CIFS_MOUNT_MAP_SPECIAL_CHR);
+
+		if (tmprc == 0 && (info_buf_source->UniqueId ==
+				   info_buf_target->UniqueId)) {
+			/* same file, POSIX says that this is a noop */
+			rc = 0;
+			goto cifs_rename_exit;
 		}
+	} /* else ... BB we could add the same check for Windows by
+		     checking the UniqueId via FILE_INTERNAL_INFO */
+
+unlink_target:
+	/* Try unlinking the target dentry if it's not negative */
+	if (target_dentry->d_inode && (rc == -EACCES || rc == -EEXIST)) {
+		tmprc = cifs_unlink(target_dir, target_dentry);
+		if (tmprc)
+			goto cifs_rename_exit;
+
+		rc = cifs_do_rename(xid, source_dentry, fromName,
+				    target_dentry, toName);
 	}
 
 cifs_rename_exit:
+	kfree(info_buf_source);
 	kfree(fromName);
 	kfree(toName);
 	FreeXid(xid);
@@ -1244,8 +1419,9 @@ int cifs_revalidate(struct dentry *direntry)
 	   since that would deadlock */
 	full_path = build_path_from_dentry(direntry);
 	if (full_path == NULL) {
+		rc = -ENOMEM;
 		FreeXid(xid);
-		return -ENOMEM;
+		return rc;
 	}
 	cFYI(1, ("Revalidate: %s inode 0x%p count %d dentry: 0x%p d_time %ld "
 		 "jiffies %ld", full_path, direntry->d_inode,
@@ -1354,6 +1530,7 @@ int cifs_getattr(struct vfsmount *mnt, struct dentry *dentry,
 	if (!err) {
 		generic_fillattr(dentry->d_inode, stat);
 		stat->blksize = CIFS_MAX_MSGSIZE;
+		stat->ino = CIFS_I(dentry->d_inode)->uniqueid;
 	}
 	return err;
 }
@@ -1377,57 +1554,24 @@ static int cifs_truncate_page(struct address_space *mapping, loff_t from)
 
 static int cifs_vmtruncate(struct inode *inode, loff_t offset)
 {
-	struct address_space *mapping = inode->i_mapping;
-	unsigned long limit;
+	loff_t oldsize;
+	int err;
 
 	spin_lock(&inode->i_lock);
-	if (inode->i_size < offset)
-		goto do_expand;
-	/*
-	 * truncation of in-use swapfiles is disallowed - it would cause
-	 * subsequent swapout to scribble on the now-freed blocks.
-	 */
-	if (IS_SWAPFILE(inode)) {
+	err = inode_newsize_ok(inode, offset);
+	if (err) {
 		spin_unlock(&inode->i_lock);
-		goto out_busy;
+		goto out;
 	}
-	i_size_write(inode, offset);
-	spin_unlock(&inode->i_lock);
-	/*
-	 * unmap_mapping_range is called twice, first simply for efficiency
-	 * so that truncate_inode_pages does fewer single-page unmaps. However
-	 * after this first call, and before truncate_inode_pages finishes,
-	 * it is possible for private pages to be COWed, which remain after
-	 * truncate_inode_pages finishes, hence the second unmap_mapping_range
-	 * call must be made for correctness.
-	 */
-	unmap_mapping_range(mapping, offset + PAGE_SIZE - 1, 0, 1);
-	truncate_inode_pages(mapping, offset);
-	unmap_mapping_range(mapping, offset + PAGE_SIZE - 1, 0, 1);
-	goto out_truncate;
 
-do_expand:
-	limit = current->signal->rlim[RLIMIT_FSIZE].rlim_cur;
-	if (limit != RLIM_INFINITY && offset > limit) {
-		spin_unlock(&inode->i_lock);
-		goto out_sig;
-	}
-	if (offset > inode->i_sb->s_maxbytes) {
-		spin_unlock(&inode->i_lock);
-		goto out_big;
-	}
+	oldsize = inode->i_size;
 	i_size_write(inode, offset);
 	spin_unlock(&inode->i_lock);
-out_truncate:
-	if (inode->i_op && inode->i_op->truncate)
+	truncate_pagecache(inode, oldsize, offset);
+	if (inode->i_op->truncate)
 		inode->i_op->truncate(inode);
-	return 0;
-out_sig:
-	send_sig(SIGXFSZ, current, 0);
-out_big:
-	return -EFBIG;
-out_busy:
-	return -ETXTBSY;
+out:
+	return err;
 }
 
 static int
@@ -1455,7 +1599,7 @@ cifs_set_file_size(struct inode *inode, struct iattr *attrs,
 		__u32 npid = open_file->pid;
 		rc = CIFSSMBSetFileSize(xid, pTcon, attrs->ia_size, nfid,
 					npid, false);
-		atomic_dec(&open_file->wrtPending);
+		cifsFileInfo_put(open_file);
 		cFYI(1, ("SetFSize for attrs rc = %d", rc));
 		if ((rc == -EINVAL) || (rc == -EOPNOTSUPP)) {
 			unsigned int bytes_written;
@@ -1499,105 +1643,11 @@ cifs_set_file_size(struct inode *inode, struct iattr *attrs,
 	}
 
 	if (rc == 0) {
+		cifsInode->server_eof = attrs->ia_size;
 		rc = cifs_vmtruncate(inode, attrs->ia_size);
 		cifs_truncate_page(inode->i_mapping, inode->i_size);
 	}
 
-	return rc;
-}
-
-static int
-cifs_set_file_info(struct inode *inode, struct iattr *attrs, int xid,
-		    char *full_path, __u32 dosattr)
-{
-	int rc;
-	int oplock = 0;
-	__u16 netfid;
-	__u32 netpid;
-	bool set_time = false;
-	struct cifsFileInfo *open_file;
-	struct cifsInodeInfo *cifsInode = CIFS_I(inode);
-	struct cifs_sb_info *cifs_sb = CIFS_SB(inode->i_sb);
-	struct cifsTconInfo *pTcon = cifs_sb->tcon;
-	FILE_BASIC_INFO	info_buf;
-
-	if (attrs->ia_valid & ATTR_ATIME) {
-		set_time = true;
-		info_buf.LastAccessTime =
-			cpu_to_le64(cifs_UnixTimeToNT(attrs->ia_atime));
-	} else
-		info_buf.LastAccessTime = 0;
-
-	if (attrs->ia_valid & ATTR_MTIME) {
-		set_time = true;
-		info_buf.LastWriteTime =
-		    cpu_to_le64(cifs_UnixTimeToNT(attrs->ia_mtime));
-	} else
-		info_buf.LastWriteTime = 0;
-
-	/*
-	 * Samba throws this field away, but windows may actually use it.
-	 * Do not set ctime unless other time stamps are changed explicitly
-	 * (i.e. by utimes()) since we would then have a mix of client and
-	 * server times.
-	 */
-	if (set_time && (attrs->ia_valid & ATTR_CTIME)) {
-		cFYI(1, ("CIFS - CTIME changed"));
-		info_buf.ChangeTime =
-		    cpu_to_le64(cifs_UnixTimeToNT(attrs->ia_ctime));
-	} else
-		info_buf.ChangeTime = 0;
-
-	info_buf.CreationTime = 0;	/* don't change */
-	info_buf.Attributes = cpu_to_le32(dosattr);
-
-	/*
-	 * If the file is already open for write, just use that fileid
-	 */
-	open_file = find_writable_file(cifsInode);
-	if (open_file) {
-		netfid = open_file->netfid;
-		netpid = open_file->pid;
-		goto set_via_filehandle;
-	}
-
-	/*
-	 * NT4 apparently returns success on this call, but it doesn't
-	 * really work.
-	 */
-	if (!(pTcon->ses->flags & CIFS_SES_NT4)) {
-		rc = CIFSSMBSetPathInfo(xid, pTcon, full_path,
-				     &info_buf, cifs_sb->local_nls,
-				     cifs_sb->mnt_cifs_flags &
-					CIFS_MOUNT_MAP_SPECIAL_CHR);
-		if (rc != -EOPNOTSUPP && rc != -EINVAL)
-			goto out;
-	}
-
-	cFYI(1, ("calling SetFileInfo since SetPathInfo for "
-		 "times not supported by this server"));
-	rc = CIFSSMBOpen(xid, pTcon, full_path, FILE_OPEN,
-			 SYNCHRONIZE | FILE_WRITE_ATTRIBUTES,
-			 CREATE_NOT_DIR, &netfid, &oplock,
-			 NULL, cifs_sb->local_nls,
-			 cifs_sb->mnt_cifs_flags &
-				CIFS_MOUNT_MAP_SPECIAL_CHR);
-
-	if (rc != 0) {
-		if (rc == -EIO)
-			rc = -EINVAL;
-		goto out;
-	}
-
-	netpid = current->tgid;
-
-set_via_filehandle:
-	rc = CIFSSMBSetFileInfo(xid, pTcon, &info_buf, netfid, netpid);
-	if (open_file == NULL)
-		CIFSSMBClose(xid, pTcon, netfid);
-	else
-		atomic_dec(&open_file->wrtPending);
-out:
 	return rc;
 }
 
@@ -1612,6 +1662,7 @@ cifs_setattr_unix(struct dentry *direntry, struct iattr *attrs)
 	struct cifs_sb_info *cifs_sb = CIFS_SB(inode->i_sb);
 	struct cifsTconInfo *pTcon = cifs_sb->tcon;
 	struct cifs_unix_set_info_args *args = NULL;
+	struct cifsFileInfo *open_file;
 
 	cFYI(1, ("setattr_unix on file %s attrs->ia_valid=0x%x",
 		 direntry->d_name.name, attrs->ia_valid));
@@ -1633,20 +1684,21 @@ cifs_setattr_unix(struct dentry *direntry, struct iattr *attrs)
 		goto out;
 	}
 
-	if ((attrs->ia_valid & ATTR_MTIME) || (attrs->ia_valid & ATTR_SIZE)) {
-		/*
-		   Flush data before changing file size or changing the last
-		   write time of the file on the server. If the
-		   flush returns error, store it to report later and continue.
-		   BB: This should be smarter. Why bother flushing pages that
-		   will be truncated anyway? Also, should we error out here if
-		   the flush returns error?
-		 */
-		rc = filemap_write_and_wait(inode->i_mapping);
-		if (rc != 0) {
-			cifsInode->write_behind_rc = rc;
-			rc = 0;
-		}
+	/*
+	 * Attempt to flush data before changing attributes. We need to do
+	 * this for ATTR_SIZE and ATTR_MTIME for sure, and if we change the
+	 * ownership or mode then we may also need to do this. Here, we take
+	 * the safe way out and just do the flush on all setattr requests. If
+	 * the flush returns error, store it to report later and continue.
+	 *
+	 * BB: This should be smarter. Why bother flushing pages that
+	 * will be truncated anyway? Also, should we error out here if
+	 * the flush returns error?
+	 */
+	rc = filemap_write_and_wait(inode->i_mapping);
+	if (rc != 0) {
+		cifsInode->write_behind_rc = rc;
+		rc = 0;
 	}
 
 	if (attrs->ia_valid & ATTR_SIZE) {
@@ -1697,10 +1749,18 @@ cifs_setattr_unix(struct dentry *direntry, struct iattr *attrs)
 		args->ctime = NO_CHANGE_64;
 
 	args->device = 0;
-	rc = CIFSSMBUnixSetInfo(xid, pTcon, full_path, args,
-				cifs_sb->local_nls,
-				cifs_sb->mnt_cifs_flags &
-				CIFS_MOUNT_MAP_SPECIAL_CHR);
+	open_file = find_writable_file(cifsInode);
+	if (open_file) {
+		u16 nfid = open_file->netfid;
+		u32 npid = open_file->pid;
+		rc = CIFSSMBUnixSetFileInfo(xid, pTcon, args, nfid, npid);
+		cifsFileInfo_put(open_file);
+	} else {
+		rc = CIFSSMBUnixSetPathInfo(xid, pTcon, full_path, args,
+				    cifs_sb->local_nls,
+				    cifs_sb->mnt_cifs_flags &
+					CIFS_MOUNT_MAP_SPECIAL_CHR);
+	}
 
 	if (!rc)
 		rc = inode_setattr(inode, attrs);
@@ -1740,24 +1800,26 @@ cifs_setattr_nounix(struct dentry *direntry, struct iattr *attrs)
 
 	full_path = build_path_from_dentry(direntry);
 	if (full_path == NULL) {
+		rc = -ENOMEM;
 		FreeXid(xid);
-		return -ENOMEM;
+		return rc;
 	}
 
-	if ((attrs->ia_valid & ATTR_MTIME) || (attrs->ia_valid & ATTR_SIZE)) {
-		/*
-		   Flush data before changing file size or changing the last
-		   write time of the file on the server. If the
-		   flush returns error, store it to report later and continue.
-		   BB: This should be smarter. Why bother flushing pages that
-		   will be truncated anyway? Also, should we error out here if
-		   the flush returns error?
-		 */
-		rc = filemap_write_and_wait(inode->i_mapping);
-		if (rc != 0) {
-			cifsInode->write_behind_rc = rc;
-			rc = 0;
-		}
+	/*
+	 * Attempt to flush data before changing attributes. We need to do
+	 * this for ATTR_SIZE and ATTR_MTIME for sure, and if we change the
+	 * ownership or mode then we may also need to do this. Here, we take
+	 * the safe way out and just do the flush on all setattr requests. If
+	 * the flush returns error, store it to report later and continue.
+	 *
+	 * BB: This should be smarter. Why bother flushing pages that
+	 * will be truncated anyway? Also, should we error out here if
+	 * the flush returns error?
+	 */
+	rc = filemap_write_and_wait(inode->i_mapping);
+	if (rc != 0) {
+		cifsInode->write_behind_rc = rc;
+		rc = 0;
 	}
 
 	if (attrs->ia_valid & ATTR_SIZE) {

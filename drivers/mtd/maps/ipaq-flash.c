@@ -1,7 +1,7 @@
 /*
  * Flash memory access on iPAQ Handhelds (either SA1100 or PXA250 based)
  *
- * (C) 2000 Nicolas Pitre <nico@cam.org>
+ * (C) 2000 Nicolas Pitre <nico@fluxnic.net>
  * (C) 2002 Hewlett-Packard Company <jamey.hicks@hp.com>
  * (C) 2003 Christian Pellegrin <chri@ascensit.com>, <chri@infis.univ.ts.it>: concatenation of multiple flashes
  */
@@ -202,7 +202,7 @@ static const char *part_probes[] = { "cmdlinepart", "RedBoot", NULL };
 
 static int __init h1900_special_case(void);
 
-int __init ipaq_mtd_init(void)
+static int __init ipaq_mtd_init(void)
 {
 	struct mtd_partition *parts = NULL;
 	int nb_parts = 0;

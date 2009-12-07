@@ -30,6 +30,7 @@
 #include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/proc_fs.h>
+#include <linux/sched.h>
 #include <linux/seq_file.h>
 #include <linux/random.h>
 #include <linux/netdevice.h>
@@ -69,14 +70,14 @@ static int eth;   /* Use "eth" or "irlan" name for devices */
 static int access = ACCESS_PEER; /* PEER, DIRECT or HOSTED */
 
 #ifdef CONFIG_PROC_FS
-static const char *irlan_access[] = {
+static const char *const irlan_access[] = {
 	"UNKNOWN",
 	"DIRECT",
 	"PEER",
 	"HOSTED"
 };
 
-static const char *irlan_media[] = {
+static const char *const irlan_media[] = {
 	"UNKNOWN",
 	"802.3",
 	"802.5"
@@ -207,7 +208,7 @@ static struct irlan_cb *irlan_open(__u32 saddr, __u32 daddr)
 	if (!dev)
 		return NULL;
 
-	self = dev->priv;
+	self = netdev_priv(dev);
 	self->dev = dev;
 
 	/*

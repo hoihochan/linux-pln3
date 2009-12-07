@@ -46,6 +46,7 @@
 #include <linux/hrtimer.h>
 #include <linux/list.h>
 #include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 #include <linux/uio.h>
 #include <linux/net.h>
 #include <linux/netdevice.h>
@@ -70,11 +71,12 @@
 
 #define CAN_BCM_VERSION CAN_VERSION
 static __initdata const char banner[] = KERN_INFO
-	"can: broadcast manager protocol (rev " CAN_BCM_VERSION ")\n";
+	"can: broadcast manager protocol (rev " CAN_BCM_VERSION " t)\n";
 
 MODULE_DESCRIPTION("PF_CAN broadcast manager protocol");
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_AUTHOR("Oliver Hartkopp <oliver.hartkopp@volkswagen.de>");
+MODULE_ALIAS("can-proto-2");
 
 /* easy access to can_frame payload */
 static inline u64 GET_U64(const struct can_frame *cp)
@@ -90,6 +92,7 @@ struct bcm_op {
 	unsigned long frames_abs, frames_filtered;
 	struct timeval ival1, ival2;
 	struct hrtimer timer, thrtimer;
+	struct tasklet_struct tsklet, thrtsklet;
 	ktime_t rx_stamp, kt_ival1, kt_ival2, kt_lastmsg;
 	int rx_ifindex;
 	int count;
@@ -129,38 +132,37 @@ static inline struct bcm_sock *bcm_sk(const struct sock *sk)
 /*
  * procfs functions
  */
-static char *bcm_proc_getifname(int ifindex)
+static char *bcm_proc_getifname(char *result, int ifindex)
 {
 	struct net_device *dev;
 
 	if (!ifindex)
 		return "any";
 
-	/* no usage counting */
+	read_lock(&dev_base_lock);
 	dev = __dev_get_by_index(&init_net, ifindex);
 	if (dev)
-		return dev->name;
+		strcpy(result, dev->name);
+	else
+		strcpy(result, "???");
+	read_unlock(&dev_base_lock);
 
-	return "???";
+	return result;
 }
 
-static int bcm_read_proc(char *page, char **start, off_t off,
-			 int count, int *eof, void *data)
+static int bcm_proc_show(struct seq_file *m, void *v)
 {
-	int len = 0;
-	struct sock *sk = (struct sock *)data;
+	char ifname[IFNAMSIZ];
+	struct sock *sk = (struct sock *)m->private;
 	struct bcm_sock *bo = bcm_sk(sk);
 	struct bcm_op *op;
 
-	len += snprintf(page + len, PAGE_SIZE - len, ">>> socket %p",
-			sk->sk_socket);
-	len += snprintf(page + len, PAGE_SIZE - len, " / sk %p", sk);
-	len += snprintf(page + len, PAGE_SIZE - len, " / bo %p", bo);
-	len += snprintf(page + len, PAGE_SIZE - len, " / dropped %lu",
-			bo->dropped_usr_msgs);
-	len += snprintf(page + len, PAGE_SIZE - len, " / bound %s",
-			bcm_proc_getifname(bo->ifindex));
-	len += snprintf(page + len, PAGE_SIZE - len, " <<<\n");
+	seq_printf(m, ">>> socket %p", sk->sk_socket);
+	seq_printf(m, " / sk %p", sk);
+	seq_printf(m, " / bo %p", bo);
+	seq_printf(m, " / dropped %lu", bo->dropped_usr_msgs);
+	seq_printf(m, " / bound %s", bcm_proc_getifname(ifname, bo->ifindex));
+	seq_printf(m, " <<<\n");
 
 	list_for_each_entry(op, &bo->rx_ops, list) {
 
@@ -170,70 +172,62 @@ static int bcm_read_proc(char *page, char **start, off_t off,
 		if (!op->frames_abs)
 			continue;
 
-		len += snprintf(page + len, PAGE_SIZE - len,
-				"rx_op: %03X %-5s ",
-				op->can_id, bcm_proc_getifname(op->ifindex));
-		len += snprintf(page + len, PAGE_SIZE - len, "[%d]%c ",
-				op->nframes,
+		seq_printf(m, "rx_op: %03X %-5s ",
+				op->can_id, bcm_proc_getifname(ifname, op->ifindex));
+		seq_printf(m, "[%d]%c ", op->nframes,
 				(op->flags & RX_CHECK_DLC)?'d':' ');
 		if (op->kt_ival1.tv64)
-			len += snprintf(page + len, PAGE_SIZE - len,
-					"timeo=%lld ",
+			seq_printf(m, "timeo=%lld ",
 					(long long)
 					ktime_to_us(op->kt_ival1));
 
 		if (op->kt_ival2.tv64)
-			len += snprintf(page + len, PAGE_SIZE - len,
-					"thr=%lld ",
+			seq_printf(m, "thr=%lld ",
 					(long long)
 					ktime_to_us(op->kt_ival2));
 
-		len += snprintf(page + len, PAGE_SIZE - len,
-				"# recv %ld (%ld) => reduction: ",
+		seq_printf(m, "# recv %ld (%ld) => reduction: ",
 				op->frames_filtered, op->frames_abs);
 
 		reduction = 100 - (op->frames_filtered * 100) / op->frames_abs;
 
-		len += snprintf(page + len, PAGE_SIZE - len, "%s%ld%%\n",
+		seq_printf(m, "%s%ld%%\n",
 				(reduction == 100)?"near ":"", reduction);
-
-		if (len > PAGE_SIZE - 200) {
-			/* mark output cut off */
-			len += snprintf(page + len, PAGE_SIZE - len, "(..)\n");
-			break;
-		}
 	}
 
 	list_for_each_entry(op, &bo->tx_ops, list) {
 
-		len += snprintf(page + len, PAGE_SIZE - len,
-				"tx_op: %03X %s [%d] ",
-				op->can_id, bcm_proc_getifname(op->ifindex),
+		seq_printf(m, "tx_op: %03X %s [%d] ",
+				op->can_id,
+				bcm_proc_getifname(ifname, op->ifindex),
 				op->nframes);
 
 		if (op->kt_ival1.tv64)
-			len += snprintf(page + len, PAGE_SIZE - len, "t1=%lld ",
+			seq_printf(m, "t1=%lld ",
 					(long long) ktime_to_us(op->kt_ival1));
 
 		if (op->kt_ival2.tv64)
-			len += snprintf(page + len, PAGE_SIZE - len, "t2=%lld ",
+			seq_printf(m, "t2=%lld ",
 					(long long) ktime_to_us(op->kt_ival2));
 
-		len += snprintf(page + len, PAGE_SIZE - len, "# sent %ld\n",
-				op->frames_abs);
-
-		if (len > PAGE_SIZE - 100) {
-			/* mark output cut off */
-			len += snprintf(page + len, PAGE_SIZE - len, "(..)\n");
-			break;
-		}
+		seq_printf(m, "# sent %ld\n", op->frames_abs);
 	}
-
-	len += snprintf(page + len, PAGE_SIZE - len, "\n");
-
-	*eof = 1;
-	return len;
+	seq_putc(m, '\n');
+	return 0;
 }
+
+static int bcm_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, bcm_proc_show, PDE(inode)->data);
+}
+
+static const struct file_operations bcm_proc_fops = {
+	.owner		= THIS_MODULE,
+	.open		= bcm_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
 
 /*
  * bcm_can_tx - send the (next) CAN frame to the appropriate CAN interface
@@ -341,19 +335,15 @@ static void bcm_send_to_user(struct bcm_op *op, struct bcm_msg_head *head,
 	}
 }
 
-/*
- * bcm_tx_timeout_handler - performes cyclic CAN frame transmissions
- */
-static enum hrtimer_restart bcm_tx_timeout_handler(struct hrtimer *hrtimer)
+static void bcm_tx_timeout_tsklet(unsigned long data)
 {
-	struct bcm_op *op = container_of(hrtimer, struct bcm_op, timer);
-	enum hrtimer_restart ret = HRTIMER_NORESTART;
+	struct bcm_op *op = (struct bcm_op *)data;
+	struct bcm_msg_head msg_head;
 
 	if (op->kt_ival1.tv64 && (op->count > 0)) {
 
 		op->count--;
 		if (!op->count && (op->flags & TX_COUNTEVT)) {
-			struct bcm_msg_head msg_head;
 
 			/* create notification to user */
 			msg_head.opcode  = TX_EXPIRED;
@@ -372,20 +362,32 @@ static enum hrtimer_restart bcm_tx_timeout_handler(struct hrtimer *hrtimer)
 
 		/* send (next) frame */
 		bcm_can_tx(op);
-		hrtimer_forward(hrtimer, ktime_get(), op->kt_ival1);
-		ret = HRTIMER_RESTART;
+		hrtimer_start(&op->timer,
+			      ktime_add(ktime_get(), op->kt_ival1),
+			      HRTIMER_MODE_ABS);
 
 	} else {
 		if (op->kt_ival2.tv64) {
 
 			/* send (next) frame */
 			bcm_can_tx(op);
-			hrtimer_forward(hrtimer, ktime_get(), op->kt_ival2);
-			ret = HRTIMER_RESTART;
+			hrtimer_start(&op->timer,
+				      ktime_add(ktime_get(), op->kt_ival2),
+				      HRTIMER_MODE_ABS);
 		}
 	}
+}
 
-	return ret;
+/*
+ * bcm_tx_timeout_handler - performes cyclic CAN frame transmissions
+ */
+static enum hrtimer_restart bcm_tx_timeout_handler(struct hrtimer *hrtimer)
+{
+	struct bcm_op *op = container_of(hrtimer, struct bcm_op, timer);
+
+	tasklet_schedule(&op->tsklet);
+
+	return HRTIMER_NORESTART;
 }
 
 /*
@@ -401,6 +403,9 @@ static void bcm_rx_changed(struct bcm_op *op, struct can_frame *data)
 	/* prevent statistics overflow */
 	if (op->frames_filtered > ULONG_MAX/100)
 		op->frames_filtered = op->frames_abs = 0;
+
+	/* this element is not throttled anymore */
+	data->can_dlc &= (BCM_CAN_DLC_MASK|RX_RECV);
 
 	head.opcode  = RX_CHANGED;
 	head.flags   = op->flags;
@@ -420,37 +425,32 @@ static void bcm_rx_changed(struct bcm_op *op, struct can_frame *data)
  */
 static void bcm_rx_update_and_send(struct bcm_op *op,
 				   struct can_frame *lastdata,
-				   struct can_frame *rxdata)
+				   const struct can_frame *rxdata)
 {
 	memcpy(lastdata, rxdata, CFSIZ);
 
-	/* mark as used */
-	lastdata->can_dlc |= RX_RECV;
+	/* mark as used and throttled by default */
+	lastdata->can_dlc |= (RX_RECV|RX_THR);
 
-	/* throtteling mode inactive OR data update already on the run ? */
-	if (!op->kt_ival2.tv64 || hrtimer_callback_running(&op->thrtimer)) {
+	/* throtteling mode inactive ? */
+	if (!op->kt_ival2.tv64) {
 		/* send RX_CHANGED to the user immediately */
-		bcm_rx_changed(op, rxdata);
+		bcm_rx_changed(op, lastdata);
 		return;
 	}
 
-	if (hrtimer_active(&op->thrtimer)) {
-		/* mark as 'throttled' */
-		lastdata->can_dlc |= RX_THR;
+	/* with active throttling timer we are just done here */
+	if (hrtimer_active(&op->thrtimer))
 		return;
-	}
 
-	if (!op->kt_lastmsg.tv64) {
-		/* send first RX_CHANGED to the user immediately */
-		bcm_rx_changed(op, rxdata);
-		op->kt_lastmsg = ktime_get();
-		return;
-	}
+	/* first receiption with enabled throttling mode */
+	if (!op->kt_lastmsg.tv64)
+		goto rx_changed_settime;
 
+	/* got a second frame inside a potential throttle period? */
 	if (ktime_us_delta(ktime_get(), op->kt_lastmsg) <
 	    ktime_to_us(op->kt_ival2)) {
-		/* mark as 'throttled' and start timer */
-		lastdata->can_dlc |= RX_THR;
+		/* do not send the saved data - only start throttle timer */
 		hrtimer_start(&op->thrtimer,
 			      ktime_add(op->kt_lastmsg, op->kt_ival2),
 			      HRTIMER_MODE_ABS);
@@ -458,7 +458,8 @@ static void bcm_rx_update_and_send(struct bcm_op *op,
 	}
 
 	/* the gap was that big, that throttling was not needed here */
-	bcm_rx_changed(op, rxdata);
+rx_changed_settime:
+	bcm_rx_changed(op, lastdata);
 	op->kt_lastmsg = ktime_get();
 }
 
@@ -467,7 +468,7 @@ static void bcm_rx_update_and_send(struct bcm_op *op,
  *                       received data stored in op->last_frames[]
  */
 static void bcm_rx_cmp_to_index(struct bcm_op *op, int index,
-				struct can_frame *rxdata)
+				const struct can_frame *rxdata)
 {
 	/*
 	 * no one uses the MSBs of can_dlc for comparation,
@@ -511,14 +512,12 @@ static void bcm_rx_starttimer(struct bcm_op *op)
 		hrtimer_start(&op->timer, op->kt_ival1, HRTIMER_MODE_REL);
 }
 
-/*
- * bcm_rx_timeout_handler - when the (cyclic) CAN frame receiption timed out
- */
-static enum hrtimer_restart bcm_rx_timeout_handler(struct hrtimer *hrtimer)
+static void bcm_rx_timeout_tsklet(unsigned long data)
 {
-	struct bcm_op *op = container_of(hrtimer, struct bcm_op, timer);
+	struct bcm_op *op = (struct bcm_op *)data;
 	struct bcm_msg_head msg_head;
 
+	/* create notification to user */
 	msg_head.opcode  = RX_TIMEOUT;
 	msg_head.flags   = op->flags;
 	msg_head.count   = op->count;
@@ -528,6 +527,17 @@ static enum hrtimer_restart bcm_rx_timeout_handler(struct hrtimer *hrtimer)
 	msg_head.nframes = 0;
 
 	bcm_send_to_user(op, &msg_head, NULL, 0);
+}
+
+/*
+ * bcm_rx_timeout_handler - when the (cyclic) CAN frame receiption timed out
+ */
+static enum hrtimer_restart bcm_rx_timeout_handler(struct hrtimer *hrtimer)
+{
+	struct bcm_op *op = container_of(hrtimer, struct bcm_op, timer);
+
+	/* schedule before NET_RX_SOFTIRQ */
+	tasklet_hi_schedule(&op->tsklet);
 
 	/* no restart of the timer is done here! */
 
@@ -541,9 +551,25 @@ static enum hrtimer_restart bcm_rx_timeout_handler(struct hrtimer *hrtimer)
 }
 
 /*
- * bcm_rx_thr_flush - Check for throttled data and send it to the userspace
+ * bcm_rx_do_flush - helper for bcm_rx_thr_flush
  */
-static int bcm_rx_thr_flush(struct bcm_op *op)
+static inline int bcm_rx_do_flush(struct bcm_op *op, int update, int index)
+{
+	if ((op->last_frames) && (op->last_frames[index].can_dlc & RX_THR)) {
+		if (update)
+			bcm_rx_changed(op, &op->last_frames[index]);
+		return 1;
+	}
+	return 0;
+}
+
+/*
+ * bcm_rx_thr_flush - Check for throttled data and send it to the userspace
+ *
+ * update == 0 : just check if throttled data is available  (any irq context)
+ * update == 1 : check and send throttled data to userspace (soft_irq context)
+ */
+static int bcm_rx_thr_flush(struct bcm_op *op, int update)
 {
 	int updated = 0;
 
@@ -551,25 +577,23 @@ static int bcm_rx_thr_flush(struct bcm_op *op)
 		int i;
 
 		/* for MUX filter we start at index 1 */
-		for (i = 1; i < op->nframes; i++) {
-			if ((op->last_frames) &&
-			    (op->last_frames[i].can_dlc & RX_THR)) {
-				op->last_frames[i].can_dlc &= ~RX_THR;
-				bcm_rx_changed(op, &op->last_frames[i]);
-				updated++;
-			}
-		}
+		for (i = 1; i < op->nframes; i++)
+			updated += bcm_rx_do_flush(op, update, i);
 
 	} else {
 		/* for RX_FILTER_ID and simple filter */
-		if (op->last_frames && (op->last_frames[0].can_dlc & RX_THR)) {
-			op->last_frames[0].can_dlc &= ~RX_THR;
-			bcm_rx_changed(op, &op->last_frames[0]);
-			updated++;
-		}
+		updated += bcm_rx_do_flush(op, update, 0);
 	}
 
 	return updated;
+}
+
+static void bcm_rx_thr_tsklet(unsigned long data)
+{
+	struct bcm_op *op = (struct bcm_op *)data;
+
+	/* push the changed data to the userspace */
+	bcm_rx_thr_flush(op, 1);
 }
 
 /*
@@ -580,7 +604,9 @@ static enum hrtimer_restart bcm_rx_thr_handler(struct hrtimer *hrtimer)
 {
 	struct bcm_op *op = container_of(hrtimer, struct bcm_op, thrtimer);
 
-	if (bcm_rx_thr_flush(op)) {
+	tasklet_schedule(&op->thrtsklet);
+
+	if (bcm_rx_thr_flush(op, 0)) {
 		hrtimer_forward(hrtimer, ktime_get(), op->kt_ival2);
 		return HRTIMER_RESTART;
 	} else {
@@ -596,29 +622,21 @@ static enum hrtimer_restart bcm_rx_thr_handler(struct hrtimer *hrtimer)
 static void bcm_rx_handler(struct sk_buff *skb, void *data)
 {
 	struct bcm_op *op = (struct bcm_op *)data;
-	struct can_frame rxframe;
+	const struct can_frame *rxframe = (struct can_frame *)skb->data;
 	int i;
 
 	/* disable timeout */
 	hrtimer_cancel(&op->timer);
 
-	if (skb->len == sizeof(rxframe)) {
-		memcpy(&rxframe, skb->data, sizeof(rxframe));
-		/* save rx timestamp */
-		op->rx_stamp = skb->tstamp;
-		/* save originator for recvfrom() */
-		op->rx_ifindex = skb->dev->ifindex;
-		/* update statistics */
-		op->frames_abs++;
-		kfree_skb(skb);
-
-	} else {
-		kfree_skb(skb);
+	if (op->can_id != rxframe->can_id)
 		return;
-	}
 
-	if (op->can_id != rxframe.can_id)
-		return;
+	/* save rx timestamp */
+	op->rx_stamp = skb->tstamp;
+	/* save originator for recvfrom() */
+	op->rx_ifindex = skb->dev->ifindex;
+	/* update statistics */
+	op->frames_abs++;
 
 	if (op->flags & RX_RTR_FRAME) {
 		/* send reply for RTR-request (placed in op->frames[0]) */
@@ -628,16 +646,14 @@ static void bcm_rx_handler(struct sk_buff *skb, void *data)
 
 	if (op->flags & RX_FILTER_ID) {
 		/* the easiest case */
-		bcm_rx_update_and_send(op, &op->last_frames[0], &rxframe);
-		bcm_rx_starttimer(op);
-		return;
+		bcm_rx_update_and_send(op, &op->last_frames[0], rxframe);
+		goto rx_starttimer;
 	}
 
 	if (op->nframes == 1) {
 		/* simple compare with index 0 */
-		bcm_rx_cmp_to_index(op, 0, &rxframe);
-		bcm_rx_starttimer(op);
-		return;
+		bcm_rx_cmp_to_index(op, 0, rxframe);
+		goto rx_starttimer;
 	}
 
 	if (op->nframes > 1) {
@@ -649,15 +665,17 @@ static void bcm_rx_handler(struct sk_buff *skb, void *data)
 		 */
 
 		for (i = 1; i < op->nframes; i++) {
-			if ((GET_U64(&op->frames[0]) & GET_U64(&rxframe)) ==
+			if ((GET_U64(&op->frames[0]) & GET_U64(rxframe)) ==
 			    (GET_U64(&op->frames[0]) &
 			     GET_U64(&op->frames[i]))) {
-				bcm_rx_cmp_to_index(op, i, &rxframe);
+				bcm_rx_cmp_to_index(op, i, rxframe);
 				break;
 			}
 		}
-		bcm_rx_starttimer(op);
 	}
+
+rx_starttimer:
+	bcm_rx_starttimer(op);
 }
 
 /*
@@ -680,6 +698,12 @@ static void bcm_remove_op(struct bcm_op *op)
 {
 	hrtimer_cancel(&op->timer);
 	hrtimer_cancel(&op->thrtimer);
+
+	if (op->tsklet.func)
+		tasklet_kill(&op->tsklet);
+
+	if (op->thrtsklet.func)
+		tasklet_kill(&op->thrtsklet);
 
 	if ((op->frames) && (op->frames != &op->sframe))
 		kfree(op->frames);
@@ -891,6 +915,10 @@ static int bcm_tx_setup(struct bcm_msg_head *msg_head, struct msghdr *msg,
 		hrtimer_init(&op->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 		op->timer.function = bcm_tx_timeout_handler;
 
+		/* initialize tasklet for tx countevent notification */
+		tasklet_init(&op->tsklet, bcm_tx_timeout_tsklet,
+			     (unsigned long) op);
+
 		/* currently unused in tx_ops */
 		hrtimer_init(&op->thrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 
@@ -1054,8 +1082,16 @@ static int bcm_rx_setup(struct bcm_msg_head *msg_head, struct msghdr *msg,
 		hrtimer_init(&op->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 		op->timer.function = bcm_rx_timeout_handler;
 
+		/* initialize tasklet for rx timeout notification */
+		tasklet_init(&op->tsklet, bcm_rx_timeout_tsklet,
+			     (unsigned long) op);
+
 		hrtimer_init(&op->thrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 		op->thrtimer.function = bcm_rx_thr_handler;
+
+		/* initialize tasklet for rx throttle handling */
+		tasklet_init(&op->thrtsklet, bcm_rx_thr_tsklet,
+			     (unsigned long) op);
 
 		/* add this bcm_op to the list of the rx_ops */
 		list_add(&op->list, &bo->rx_ops);
@@ -1102,7 +1138,7 @@ static int bcm_rx_setup(struct bcm_msg_head *msg_head, struct msghdr *msg,
 			 */
 			op->kt_lastmsg = ktime_set(0, 0);
 			hrtimer_cancel(&op->thrtimer);
-			bcm_rx_thr_flush(op);
+			bcm_rx_thr_flush(op, 1);
 		}
 
 		if ((op->flags & STARTTIMER) && op->kt_ival1.tv64)
@@ -1426,6 +1462,9 @@ static int bcm_release(struct socket *sock)
 		bo->ifindex = 0;
 	}
 
+	sock_orphan(sk);
+	sock->sk = NULL;
+
 	release_sock(sk);
 	sock_put(sk);
 
@@ -1468,9 +1507,9 @@ static int bcm_connect(struct socket *sock, struct sockaddr *uaddr, int len,
 	if (proc_dir) {
 		/* unique socket address as filename */
 		sprintf(bo->procname, "%p", sock);
-		bo->bcm_proc_read = create_proc_read_entry(bo->procname, 0644,
-							   proc_dir,
-							   bcm_read_proc, sk);
+		bo->bcm_proc_read = proc_create_data(bo->procname, 0644,
+						     proc_dir,
+						     &bcm_proc_fops, sk);
 	}
 
 	return 0;
@@ -1561,10 +1600,6 @@ static int __init bcm_module_init(void)
 
 	/* create /proc/net/can-bcm directory */
 	proc_dir = proc_mkdir("can-bcm", init_net.proc_net);
-
-	if (proc_dir)
-		proc_dir->owner = THIS_MODULE;
-
 	return 0;
 }
 

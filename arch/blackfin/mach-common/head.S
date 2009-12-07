@@ -3,8 +3,6 @@
  *
  * Copyright 2004-2008 Analog Devices Inc.
  *
- * Enter bugs at http://blackfin.uclinux.org/
- *
  * Licensed under the GPL-2 or later.
  */
 
@@ -13,10 +11,22 @@
 #include <asm/blackfin.h>
 #include <asm/thread_info.h>
 #include <asm/trace.h>
+#include <asm/asm-offsets.h>
 
 __INIT
 
-#define INITIAL_STACK	(L1_SCRATCH_START + L1_SCRATCH_LENGTH - 12)
+ENTRY(__init_clear_bss)
+	r2 = r2 - r1;
+	cc = r2 == 0;
+	if cc jump .L_bss_done;
+	r2 >>= 2;
+	p1 = r1;
+	p2 = r2;
+	lsetup (1f, 1f) lc0 = p2;
+1:	[p1++] = r0;
+.L_bss_done:
+	rts;
+ENDPROC(__init_clear_bss)
 
 ENTRY(__start)
 	/* R0: argument of command line string, passed from uboot, save it */
@@ -68,6 +78,16 @@ ENTRY(__start)
 	M2 = r0;
 	M3 = r0;
 
+	/*
+	 * Clear ITEST_COMMAND and DTEST_COMMAND registers,
+	 * Leaving these as non-zero can confuse the emulator
+	 */
+	p0.L = LO(DTEST_COMMAND);
+	p0.H = HI(DTEST_COMMAND);
+	[p0] = R0;
+	[p0 + (ITEST_COMMAND - DTEST_COMMAND)] = R0;
+	CSYNC;
+
 	trace_buffer_init(p0,r0);
 	P0 = R1;
 	R0 = R1;
@@ -90,26 +110,92 @@ ENTRY(__start)
 	[p0] = R0;
 	SSYNC;
 
-	/* Save RETX, in case of doublefault */
-	p0.l = ___retx;
-	p0.h = ___retx;
+	/* in case of double faults, save a few things */
+	p0.l = _init_retx;
+	p0.h = _init_retx;
 	R0 = RETX;
 	[P0] = R0;
 
+#ifdef CONFIG_DEBUG_DOUBLEFAULT
+	/* Only save these if we are storing them,
+	 * This happens here, since L1 gets clobbered
+	 * below
+	 */
+	GET_PDA(p0, r0);
+	r6 = [p0 + PDA_DF_RETX];
+	p1.l = _init_saved_retx;
+	p1.h = _init_saved_retx;
+	[p1] = r6;
+
+	r6 = [p0 + PDA_DF_DCPLB];
+	p1.l = _init_saved_dcplb_fault_addr;
+	p1.h = _init_saved_dcplb_fault_addr;
+	[p1] = r6;
+
+	r6 = [p0 + PDA_DF_ICPLB];
+	p1.l = _init_saved_icplb_fault_addr;
+	p1.h = _init_saved_icplb_fault_addr;
+	[p1] = r6;
+
+	r6 = [p0 + PDA_DF_SEQSTAT];
+	p1.l = _init_saved_seqstat;
+	p1.h = _init_saved_seqstat;
+	[p1] = r6;
+#endif
+
 	/* Initialize stack pointer */
-	sp.l = lo(INITIAL_STACK);
-	sp.h = hi(INITIAL_STACK);
+	sp.l = _init_thread_union;
+	sp.h = _init_thread_union;
 	fp = sp;
 	usp = sp;
 
 #ifdef CONFIG_EARLY_PRINTK
 	call _init_early_exception_vectors;
+	r0 = (EVT_IVHW | EVT_IRPTEN | EVT_EVX | EVT_NMI | EVT_RST | EVT_EMU);
+	sti r0;
 #endif
 
+	r0 = 0 (x);
+	/* Zero out all of the fun bss regions */
+#if L1_DATA_A_LENGTH > 0
+	r1.l = __sbss_l1;
+	r1.h = __sbss_l1;
+	r2.l = __ebss_l1;
+	r2.h = __ebss_l1;
+	call __init_clear_bss
+#endif
+#if L1_DATA_B_LENGTH > 0
+	r1.l = __sbss_b_l1;
+	r1.h = __sbss_b_l1;
+	r2.l = __ebss_b_l1;
+	r2.h = __ebss_b_l1;
+	call __init_clear_bss
+#endif
+#if L2_LENGTH > 0
+	r1.l = __sbss_l2;
+	r1.h = __sbss_l2;
+	r2.l = __ebss_l2;
+	r2.h = __ebss_l2;
+	call __init_clear_bss
+#endif
+	r1.l = ___bss_start;
+	r1.h = ___bss_start;
+	r2.l = ___bss_stop;
+	r2.h = ___bss_stop;
+	call __init_clear_bss
+
 	/* Put The Code for PLL Programming and SDRAM Programming in L1 ISRAM */
-	call _bf53x_relocate_l1_mem;
+	call _bfin_relocate_l1_mem;
 #ifdef CONFIG_BFIN_KERNEL_CLOCK
-	call _start_dma_code;
+	/* Only use on-chip scratch space for stack when absolutely required
+	 * to avoid Anomaly 05000227 ... we know the init_clocks() func only
+	 * uses L1 text and stack space and no other memory region.
+	 */
+# define KERNEL_CLOCK_STACK (L1_SCRATCH_START + L1_SCRATCH_LENGTH - 12)
+	sp.l = lo(KERNEL_CLOCK_STACK);
+	sp.h = hi(KERNEL_CLOCK_STACK);
+	call _init_clocks;
+	sp = usp;	/* usp hasnt been touched, so restore from there */
 #endif
 
 	/* This section keeps the processor in supervisor mode
@@ -126,16 +212,21 @@ ENTRY(__start)
 	[p0] = p1;
 	csync;
 
-	p0.l = lo(IMASK);
-	p0.h = hi(IMASK);
-	p1.l = IMASK_IVG15;
-	p1.h = 0x0;
-	[p0] = p1;
-	csync;
+#ifdef CONFIG_EARLY_PRINTK
+	r0 = (EVT_IVG15 | EVT_IVHW | EVT_IRPTEN | EVT_EVX | EVT_NMI | EVT_RST | EVT_EMU) (z);
+#else
+	r0 = EVT_IVG15 (z);
+#endif
+	sti r0;
 
 	raise 15;
+#ifdef CONFIG_EARLY_PRINTK
+	p0.l = _early_trap;
+	p0.h = _early_trap;
+#else
 	p0.l = .LWAIT_HERE;
 	p0.h = .LWAIT_HERE;
+#endif
 	reti = p0;
 #if ANOMALY_05000281
 	nop; nop; nop;
@@ -162,45 +253,18 @@ ENTRY(_real_start)
 	w[p0] = r0;
 	ssync;
 
-	/* Zero out the bss region
-	 * Note: this will fail if bss is 0 bytes ...
-	 */
-	r0 = 0 (z);
-	r1.l = ___bss_start;
-	r1.h = ___bss_start;
-	r2.l = ___bss_stop;
-	r2.h = ___bss_stop;
-	r2 = r2 - r1;
-	r2 >>= 2;
-	p1 = r1;
-	p2 = r2;
-	lsetup (.L_clear_bss, .L_clear_bss) lc0 = p2;
-.L_clear_bss:
-	[p1++] = r0;
-
-	/* In case there is a NULL pointer reference,
-	 * zero out region before stext
-	 */
-	p1 = r0;
-	r2.l = __stext;
-	r2.h = __stext;
-	r2 >>= 2;
-	p2 = r2;
-	lsetup (.L_clear_zero, .L_clear_zero) lc0 = p2;
-.L_clear_zero:
-	[p1++] = r0;
-
 	/* Pass the u-boot arguments to the global value command line */
 	R0 = R7;
 	call _cmdline_init;
 
 	/* Load the current thread pointer and stack */
-	sp.l = _init_thread_union;
-	sp.h = _init_thread_union;
-	p1 = THREAD_SIZE (z);
+	p1 = THREAD_SIZE + 4 (z);	/* +4 is for reti loading */
 	sp = sp + p1;
 	usp = sp;
 	fp = sp;
+	sp += -12;
+	call _init_pda
+	sp += 12;
 	jump.l _start_kernel;
 ENDPROC(_real_start)
 

@@ -478,6 +478,21 @@ void cleanup_module(void)
 
 #endif /* MODULE */
 
+static const struct net_device_ops mac8390_netdev_ops = {
+	.ndo_open 		= mac8390_open,
+	.ndo_stop		= mac8390_close,
+	.ndo_start_xmit		= __ei_start_xmit,
+	.ndo_tx_timeout		= __ei_tx_timeout,
+	.ndo_get_stats		= __ei_get_stats,
+	.ndo_set_multicast_list = __ei_set_multicast_list,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_change_mtu		= eth_change_mtu,
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	.ndo_poll_controller	= __ei_poll,
+#endif
+};
+
 static int __init mac8390_initdev(struct net_device * dev, struct nubus_dev * ndev,
 			    enum mac8390_type type)
 {
@@ -503,11 +518,7 @@ static int __init mac8390_initdev(struct net_device * dev, struct nubus_dev * nd
 	int access_bitmode = 0;
 
 	/* Now fill in our stuff */
-	dev->open = &mac8390_open;
-	dev->stop = &mac8390_close;
-#ifdef CONFIG_NET_POLL_CONTROLLER
-	dev->poll_controller = __ei_poll;
-#endif
+	dev->netdev_ops = &mac8390_netdev_ops;
 
 	/* GAR, ei_status is actually a macro even though it looks global */
 	ei_status.name = cardname[type];
@@ -609,19 +620,12 @@ static int __init mac8390_initdev(struct net_device * dev, struct nubus_dev * nd
 
 	/* Good, done, now spit out some messages */
 	printk(KERN_INFO "%s: %s in slot %X (type %s)\n",
-		   dev->name, ndev->board->name, ndev->board->slot, cardname[type]);
-	printk(KERN_INFO "MAC ");
-	{
-		int i;
-		for (i = 0; i < 6; i++) {
-			printk("%2.2x", dev->dev_addr[i]);
-			if (i < 5)
-				printk(":");
-		}
-	}
-	printk(" IRQ %d, %d KB shared memory at %#lx,  %d-bit access.\n",
-		   dev->irq, (int)((dev->mem_end - dev->mem_start)/0x1000) * 4,
-		   dev->mem_start, access_bitmode?32:16);
+	       dev->name, ndev->board->name, ndev->board->slot, cardname[type]);
+	printk(KERN_INFO
+	       "MAC %pM IRQ %d, %d KB shared memory at %#lx, %d-bit access.\n",
+	       dev->dev_addr, dev->irq,
+	       (unsigned int)(dev->mem_end - dev->mem_start) >> 10,
+	       dev->mem_start, access_bitmode ? 32 : 16);
 	return 0;
 }
 

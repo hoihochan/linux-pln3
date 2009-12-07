@@ -100,7 +100,6 @@
 #define MAX_SRBS		MAX_CMDS_TO_RISC
 #define MBOX_AEN_REG_COUNT	5
 #define MAX_INIT_RETRIES	5
-#define IOCB_HIWAT_CUSHION	16
 
 /*
  * Buffer sizes
@@ -184,6 +183,11 @@ struct srb {
 	uint16_t cc_stat;
 	u_long r_start;		/* Time we recieve a cmd from OS */
 	u_long u_start;		/* Time when we handed the cmd to F/W */
+
+	/* Used for extended sense / status continuation */
+	uint8_t *req_sense_ptr;
+	uint16_t req_sense_len;
+	uint16_t reserved2;
 };
 
 /*
@@ -244,6 +248,7 @@ struct ddb_entry {
 	uint8_t ip_addr[ISCSI_IPADDR_SIZE];
 	uint8_t iscsi_name[ISCSI_NAME_SIZE];	/* 72 x48 */
 	uint8_t iscsi_alias[0x20];
+	uint8_t isid[6];
 };
 
 /*
@@ -301,7 +306,6 @@ struct scsi_qla_host {
 	uint32_t tot_ddbs;
 
 	uint16_t	iocb_cnt;
-	uint16_t	iocb_hiwat;
 
 	/* SRB cache. */
 #define SRB_MIN_REQ	128
@@ -435,6 +439,8 @@ struct scsi_qla_host {
 	/* Map ddb_list entry by FW ddb index */
 	struct ddb_entry *fw_ddb_index_map[MAX_DDB_ENTRIES];
 
+	/* Saved srb for status continuation entry processing */
+	struct srb *status_srb;
 };
 
 static inline int is_qla4010(struct scsi_qla_host *ha)

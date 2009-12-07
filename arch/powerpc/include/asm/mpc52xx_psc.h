@@ -28,6 +28,10 @@
 #define MPC52xx_PSC_MAXNUM	6
 
 /* Programmable Serial Controller (PSC) status register bits */
+#define MPC52xx_PSC_SR_UNEX_RX	0x0001
+#define MPC52xx_PSC_SR_DATA_VAL	0x0002
+#define MPC52xx_PSC_SR_DATA_OVR	0x0004
+#define MPC52xx_PSC_SR_CMDSEND	0x0008
 #define MPC52xx_PSC_SR_CDE	0x0080
 #define MPC52xx_PSC_SR_RXRDY	0x0100
 #define MPC52xx_PSC_SR_RXFULL	0x0200
@@ -61,6 +65,12 @@
 #define MPC52xx_PSC_RXTX_FIFO_EMPTY	0x0001
 
 /* PSC interrupt status/mask bits */
+#define MPC52xx_PSC_IMR_UNEX_RX_SLOT 0x0001
+#define MPC52xx_PSC_IMR_DATA_VALID	0x0002
+#define MPC52xx_PSC_IMR_DATA_OVR	0x0004
+#define MPC52xx_PSC_IMR_CMD_SEND	0x0008
+#define MPC52xx_PSC_IMR_ERROR		0x0040
+#define MPC52xx_PSC_IMR_DEOF		0x0080
 #define MPC52xx_PSC_IMR_TXRDY		0x0100
 #define MPC52xx_PSC_IMR_RXRDY		0x0200
 #define MPC52xx_PSC_IMR_DB		0x0400
@@ -68,11 +78,19 @@
 #define MPC52xx_PSC_IMR_ORERR		0x1000
 #define MPC52xx_PSC_IMR_IPC		0x8000
 
-/* PSC input port change bit */
+/* PSC input port change bits */
 #define MPC52xx_PSC_CTS			0x01
 #define MPC52xx_PSC_DCD			0x02
 #define MPC52xx_PSC_D_CTS		0x10
 #define MPC52xx_PSC_D_DCD		0x20
+
+/* PSC acr bits */
+#define MPC52xx_PSC_IEC_CTS		0x01
+#define MPC52xx_PSC_IEC_DCD		0x02
+
+/* PSC output port bits */
+#define MPC52xx_PSC_OP_RTS		0x01
+#define MPC52xx_PSC_OP_RES		0x02
 
 /* PSC mode fields */
 #define MPC52xx_PSC_MODE_5_BITS			0x00
@@ -91,6 +109,7 @@
 #define MPC52xx_PSC_MODE_ONE_STOP_5_BITS	0x00
 #define MPC52xx_PSC_MODE_ONE_STOP		0x07
 #define MPC52xx_PSC_MODE_TWO_STOP		0x0f
+#define MPC52xx_PSC_MODE_TXCTS			0x10
 
 #define MPC52xx_PSC_RFNUM_MASK	0x01ff
 
@@ -108,6 +127,7 @@
 #define MPC52xx_PSC_SICR_SIM_FIR		(0x6 << 24)
 #define MPC52xx_PSC_SICR_SIM_CODEC_24		(0x7 << 24)
 #define MPC52xx_PSC_SICR_SIM_CODEC_32		(0xf << 24)
+#define MPC52xx_PSC_SICR_AWR			(1 << 30)
 #define MPC52xx_PSC_SICR_GENCLK			(1 << 23)
 #define MPC52xx_PSC_SICR_I2S			(1 << 22)
 #define MPC52xx_PSC_SICR_CLKPOL			(1 << 21)

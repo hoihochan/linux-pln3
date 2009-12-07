@@ -271,7 +271,7 @@ static void ibm_handle_events(acpi_handle handle, u32 event, void *context)
 		dbg("%s: generationg bus event\n", __func__);
 		acpi_bus_generate_proc_event(note->device, note->event, detail);
 		acpi_bus_generate_netlink_event(note->device->pnp.device_class,
-						  note->device->dev.bus_id,
+						  dev_name(&note->device->dev),
 						  note->event, detail);
 	} else
 		note->event = event;
@@ -398,23 +398,20 @@ static acpi_status __init ibm_find_acpi_device(acpi_handle handle,
 	acpi_handle *phandle = (acpi_handle *)context;
 	acpi_status status; 
 	struct acpi_device_info *info;
-	struct acpi_buffer info_buffer = { ACPI_ALLOCATE_BUFFER, NULL };
 	int retval = 0;
 
-	status = acpi_get_object_info(handle, &info_buffer);
+	status = acpi_get_object_info(handle, &info);
 	if (ACPI_FAILURE(status)) {
 		err("%s:  Failed to get device information status=0x%x\n",
 			__func__, status);
 		return retval;
 	}
-	info = info_buffer.pointer;
-	info->hardware_id.value[sizeof(info->hardware_id.value) - 1] = '\0';
 
 	if (info->current_status && (info->valid & ACPI_VALID_HID) &&
-			(!strcmp(info->hardware_id.value, IBM_HARDWARE_ID1) ||
-			 !strcmp(info->hardware_id.value, IBM_HARDWARE_ID2))) {
+			(!strcmp(info->hardware_id.string, IBM_HARDWARE_ID1) ||
+			 !strcmp(info->hardware_id.string, IBM_HARDWARE_ID2))) {
 		dbg("found hardware: %s, handle: %p\n",
-			info->hardware_id.value, handle);
+			info->hardware_id.string, handle);
 		*phandle = handle;
 		/* returning non-zero causes the search to stop
 		 * and returns this value to the caller of 

@@ -57,6 +57,7 @@ struct rtc_plat_data {
 	size_t size;
 	resource_size_t baseaddr;
 	unsigned long last_jiffies;
+	struct bin_attribute nvram_attr;
 };
 
 static int ds1742_rtc_set_time(struct device *dev, struct rtc_time *tm)
@@ -66,17 +67,17 @@ static int ds1742_rtc_set_time(struct device *dev, struct rtc_time *tm)
 	void __iomem *ioaddr = pdata->ioaddr_rtc;
 	u8 century;
 
-	century = BIN2BCD((tm->tm_year + 1900) / 100);
+	century = bin2bcd((tm->tm_year + 1900) / 100);
 
 	writeb(RTC_WRITE, ioaddr + RTC_CONTROL);
 
-	writeb(BIN2BCD(tm->tm_year % 100), ioaddr + RTC_YEAR);
-	writeb(BIN2BCD(tm->tm_mon + 1), ioaddr + RTC_MONTH);
-	writeb(BIN2BCD(tm->tm_wday) & RTC_DAY_MASK, ioaddr + RTC_DAY);
-	writeb(BIN2BCD(tm->tm_mday), ioaddr + RTC_DATE);
-	writeb(BIN2BCD(tm->tm_hour), ioaddr + RTC_HOURS);
-	writeb(BIN2BCD(tm->tm_min), ioaddr + RTC_MINUTES);
-	writeb(BIN2BCD(tm->tm_sec) & RTC_SECONDS_MASK, ioaddr + RTC_SECONDS);
+	writeb(bin2bcd(tm->tm_year % 100), ioaddr + RTC_YEAR);
+	writeb(bin2bcd(tm->tm_mon + 1), ioaddr + RTC_MONTH);
+	writeb(bin2bcd(tm->tm_wday) & RTC_DAY_MASK, ioaddr + RTC_DAY);
+	writeb(bin2bcd(tm->tm_mday), ioaddr + RTC_DATE);
+	writeb(bin2bcd(tm->tm_hour), ioaddr + RTC_HOURS);
+	writeb(bin2bcd(tm->tm_min), ioaddr + RTC_MINUTES);
+	writeb(bin2bcd(tm->tm_sec) & RTC_SECONDS_MASK, ioaddr + RTC_SECONDS);
 
 	/* RTC_CENTURY and RTC_CONTROL share same register */
 	writeb(RTC_WRITE | (century & RTC_CENTURY_MASK), ioaddr + RTC_CENTURY);
@@ -106,14 +107,14 @@ static int ds1742_rtc_read_time(struct device *dev, struct rtc_time *tm)
 	year = readb(ioaddr + RTC_YEAR);
 	century = readb(ioaddr + RTC_CENTURY) & RTC_CENTURY_MASK;
 	writeb(0, ioaddr + RTC_CONTROL);
-	tm->tm_sec = BCD2BIN(second);
-	tm->tm_min = BCD2BIN(minute);
-	tm->tm_hour = BCD2BIN(hour);
-	tm->tm_mday = BCD2BIN(day);
-	tm->tm_wday = BCD2BIN(week);
-	tm->tm_mon = BCD2BIN(month) - 1;
+	tm->tm_sec = bcd2bin(second);
+	tm->tm_min = bcd2bin(minute);
+	tm->tm_hour = bcd2bin(hour);
+	tm->tm_mday = bcd2bin(day);
+	tm->tm_wday = bcd2bin(week);
+	tm->tm_mon = bcd2bin(month) - 1;
 	/* year is 1900 + tm->tm_year */
-	tm->tm_year = BCD2BIN(year) + BCD2BIN(century) * 100 - 1900;
+	tm->tm_year = bcd2bin(year) + bcd2bin(century) * 100 - 1900;
 
 	if (rtc_valid_tm(tm) < 0) {
 		dev_err(dev, "retrieved date/time is not valid.\n");
@@ -157,18 +158,6 @@ static ssize_t ds1742_nvram_write(struct kobject *kobj,
 	return count;
 }
 
-static struct bin_attribute ds1742_nvram_attr = {
-	.attr = {
-		.name = "nvram",
-		.mode = S_IRUGO | S_IWUSR,
-	},
-	.read = ds1742_nvram_read,
-	.write = ds1742_nvram_write,
-	/* REVISIT: size in sysfs won't match actual size... if it's
-	 * not a constant, each RTC should have its own attribute.
-	 */
-};
-
 static int __devinit ds1742_rtc_probe(struct platform_device *pdev)
 {
 	struct rtc_device *rtc;
@@ -199,6 +188,12 @@ static int __devinit ds1742_rtc_probe(struct platform_device *pdev)
 	pdata->size_nvram = pdata->size - RTC_SIZE;
 	pdata->ioaddr_rtc = ioaddr + pdata->size_nvram;
 
+	pdata->nvram_attr.attr.name = "nvram";
+	pdata->nvram_attr.attr.mode = S_IRUGO | S_IWUSR;
+	pdata->nvram_attr.read = ds1742_nvram_read;
+	pdata->nvram_attr.write = ds1742_nvram_write;
+	pdata->nvram_attr.size = pdata->size_nvram;
+
 	/* turn RTC on if it was not on */
 	ioaddr = pdata->ioaddr_rtc;
 	sec = readb(ioaddr + RTC_SECONDS);
@@ -221,11 +216,13 @@ static int __devinit ds1742_rtc_probe(struct platform_device *pdev)
 	pdata->rtc = rtc;
 	pdata->last_jiffies = jiffies;
 	platform_set_drvdata(pdev, pdata);
-	ds1742_nvram_attr.size = max(ds1742_nvram_attr.size,
-				     pdata->size_nvram);
-	ret = sysfs_create_bin_file(&pdev->dev.kobj, &ds1742_nvram_attr);
-	if (ret)
+
+	ret = sysfs_create_bin_file(&pdev->dev.kobj, &pdata->nvram_attr);
+	if (ret) {
+		dev_err(&pdev->dev, "creating nvram file in sysfs failed\n");
 		goto out;
+	}
+
 	return 0;
  out:
 	if (pdata->rtc)
@@ -242,7 +239,7 @@ static int __devexit ds1742_rtc_remove(struct platform_device *pdev)
 {
 	struct rtc_plat_data *pdata = platform_get_drvdata(pdev);
 
-	sysfs_remove_bin_file(&pdev->dev.kobj, &ds1742_nvram_attr);
+	sysfs_remove_bin_file(&pdev->dev.kobj, &pdata->nvram_attr);
 	rtc_device_unregister(pdata->rtc);
 	iounmap(pdata->ioaddr_nvram);
 	release_mem_region(pdata->baseaddr, pdata->size);

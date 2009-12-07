@@ -26,7 +26,6 @@ STATIC int
 xfs_stats_clear_proc_handler(
 	ctl_table	*ctl,
 	int		write,
-	struct file	*filp,
 	void		__user *buffer,
 	size_t		*lenp,
 	loff_t		*ppos)
@@ -34,7 +33,7 @@ xfs_stats_clear_proc_handler(
 	int		c, ret, *valp = ctl->data;
 	__uint32_t	vn_active;
 
-	ret = proc_dointvec_minmax(ctl, write, filp, buffer, lenp, ppos);
+	ret = proc_dointvec_minmax(ctl, write, buffer, lenp, ppos);
 
 	if (!ret && write && *valp) {
 		printk("XFS Clearing xfsstats\n");
@@ -55,17 +54,6 @@ xfs_stats_clear_proc_handler(
 #endif /* CONFIG_PROC_FS */
 
 static ctl_table xfs_table[] = {
-	{
-		.ctl_name	= XFS_RESTRICT_CHOWN,
-		.procname	= "restrict_chown",
-		.data		= &xfs_params.restrict_chown.val,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= &proc_dointvec_minmax,
-		.strategy	= &sysctl_intvec,
-		.extra1		= &xfs_params.restrict_chown.min,
-		.extra2		= &xfs_params.restrict_chown.max
-	},
 	{
 		.ctl_name	= XFS_SGID_INHERIT,
 		.procname	= "irix_sgid_inherit",

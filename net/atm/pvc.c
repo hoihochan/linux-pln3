@@ -59,7 +59,7 @@ static int pvc_connect(struct socket *sock,struct sockaddr *sockaddr,
 }
 
 static int pvc_setsockopt(struct socket *sock, int level, int optname,
-			  char __user *optval, int optlen)
+			  char __user *optval, unsigned int optlen)
 {
 	struct sock *sk = sock->sk;
 	int error;
@@ -113,6 +113,9 @@ static const struct proto_ops pvc_proto_ops = {
 	.getname =	pvc_getname,
 	.poll =		vcc_poll,
 	.ioctl =	vcc_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl = vcc_compat_ioctl,
+#endif
 	.listen =	sock_no_listen,
 	.shutdown =	pvc_shutdown,
 	.setsockopt =	pvc_setsockopt,

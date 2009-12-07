@@ -192,8 +192,6 @@ static struct urb *simple_alloc_urb (
 {
 	struct urb		*urb;
 
-	if (bytes < 0)
-		return NULL;
 	urb = usb_alloc_urb (0, GFP_KERNEL);
 	if (!urb)
 		return urb;
@@ -1074,23 +1072,34 @@ static int unlink1 (struct usbtest_dev *dev, int pipe, int size, int async)
 	 */
 	msleep (jiffies % (2 * INTERRUPT_RATE));
 	if (async) {
-retry:
-		retval = usb_unlink_urb (urb);
-		if (retval == -EBUSY || retval == -EIDRM) {
-			/* we can't unlink urbs while they're completing.
-			 * or if they've completed, and we haven't resubmitted.
-			 * "normal" drivers would prevent resubmission, but
-			 * since we're testing unlink paths, we can't.
-			 */
-			ERROR(dev,  "unlink retry\n");
-			goto retry;
+		while (!completion_done(&completion)) {
+			retval = usb_unlink_urb(urb);
+
+			switch (retval) {
+			case -EBUSY:
+			case -EIDRM:
+				/* we can't unlink urbs while they're completing
+				 * or if they've completed, and we haven't
+				 * resubmitted. "normal" drivers would prevent
+				 * resubmission, but since we're testing unlink
+				 * paths, we can't.
+				 */
+				ERROR(dev, "unlink retry\n");
+				continue;
+			case 0:
+			case -EINPROGRESS:
+				break;
+
+			default:
+				dev_err(&dev->intf->dev,
+					"unlink fail %d\n", retval);
+				return retval;
+			}
+
+			break;
 		}
 	} else
 		usb_kill_urb (urb);
-	if (!(retval == 0 || retval == -EINPROGRESS)) {
-		dev_err(&dev->intf->dev, "unlink fail %d\n", retval);
-		return retval;
-	}
 
 	wait_for_completion (&completion);
 	retval = urb->status;
@@ -1561,8 +1570,7 @@ usbtest_ioctl (struct usb_interface *intf, unsigned int code, void *buf)
 	if (code != USBTEST_REQUEST)
 		return -EOPNOTSUPP;
 
-	if (param->iterations <= 0 || param->length < 0
-			|| param->sglen < 0 || param->vary < 0)
+	if (param->iterations <= 0)
 		return -EINVAL;
 
 	if (mutex_lock_interruptible(&dev->lock))

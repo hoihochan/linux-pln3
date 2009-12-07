@@ -126,13 +126,13 @@ static int parse_addr(__le16 *addr, char *str)
 	if (INVALID_END_CHAR(*str))
 		return -1;
 
-	*addr = dn_htons((area << 10) | node);
+	*addr = cpu_to_le16((area << 10) | node);
 
 	return 0;
 }
 
 
-static int dn_node_address_strategy(ctl_table *table, int __user *name, int nlen,
+static int dn_node_address_strategy(ctl_table *table,
 				void __user *oldval, size_t __user *oldlenp,
 				void __user *newval, size_t newlen)
 {
@@ -165,7 +165,6 @@ static int dn_node_address_strategy(ctl_table *table, int __user *name, int nlen
 }
 
 static int dn_node_address_handler(ctl_table *table, int write,
-				struct file *filp,
 				void __user *buffer,
 				size_t *lenp, loff_t *ppos)
 {
@@ -179,7 +178,7 @@ static int dn_node_address_handler(ctl_table *table, int write,
 	}
 
 	if (write) {
-		int len = (*lenp < DN_ASCBUF_LEN) ? *lenp : (DN_ASCBUF_LEN-1);
+		len = (*lenp < DN_ASCBUF_LEN) ? *lenp : (DN_ASCBUF_LEN-1);
 
 		if (copy_from_user(addr, buffer, len))
 			return -EFAULT;
@@ -201,7 +200,7 @@ static int dn_node_address_handler(ctl_table *table, int write,
 		return 0;
 	}
 
-	dn_addr2asc(dn_ntohs(decnet_address), addr);
+	dn_addr2asc(le16_to_cpu(decnet_address), addr);
 	len = strlen(addr);
 	addr[len++] = '\n';
 
@@ -217,7 +216,7 @@ static int dn_node_address_handler(ctl_table *table, int write,
 }
 
 
-static int dn_def_dev_strategy(ctl_table *table, int __user *name, int nlen,
+static int dn_def_dev_strategy(ctl_table *table,
 				void __user *oldval, size_t __user *oldlenp,
 				void __user *newval, size_t newlen)
 {
@@ -264,11 +263,10 @@ static int dn_def_dev_strategy(ctl_table *table, int __user *name, int nlen,
 			return -ENODEV;
 
 		rv = -ENODEV;
-		if (dev->dn_ptr != NULL) {
+		if (dev->dn_ptr != NULL)
 			rv = dn_dev_set_default(dev, 1);
-			if (rv)
-				dev_put(dev);
-		}
+		if (rv)
+			dev_put(dev);
 	}
 
 	return rv;
@@ -276,7 +274,6 @@ static int dn_def_dev_strategy(ctl_table *table, int __user *name, int nlen,
 
 
 static int dn_def_dev_handler(ctl_table *table, int write,
-				struct file * filp,
 				void __user *buffer,
 				size_t *lenp, loff_t *ppos)
 {
@@ -354,8 +351,8 @@ static ctl_table dn_table[] = {
 		.data = node_name,
 		.maxlen = 7,
 		.mode = 0644,
-		.proc_handler = &proc_dostring,
-		.strategy = &sysctl_string,
+		.proc_handler = proc_dostring,
+		.strategy = sysctl_string,
 	},
 	{
 		.ctl_name = NET_DECNET_DEFAULT_DEVICE,
@@ -371,8 +368,8 @@ static ctl_table dn_table[] = {
 		.data = &decnet_time_wait,
 		.maxlen = sizeof(int),
 		.mode = 0644,
-		.proc_handler = &proc_dointvec_minmax,
-		.strategy = &sysctl_intvec,
+		.proc_handler = proc_dointvec_minmax,
+		.strategy = sysctl_intvec,
 		.extra1 = &min_decnet_time_wait,
 		.extra2 = &max_decnet_time_wait
 	},
@@ -382,8 +379,8 @@ static ctl_table dn_table[] = {
 		.data = &decnet_dn_count,
 		.maxlen = sizeof(int),
 		.mode = 0644,
-		.proc_handler = &proc_dointvec_minmax,
-		.strategy = &sysctl_intvec,
+		.proc_handler = proc_dointvec_minmax,
+		.strategy = sysctl_intvec,
 		.extra1 = &min_state_count,
 		.extra2 = &max_state_count
 	},
@@ -393,8 +390,8 @@ static ctl_table dn_table[] = {
 		.data = &decnet_di_count,
 		.maxlen = sizeof(int),
 		.mode = 0644,
-		.proc_handler = &proc_dointvec_minmax,
-		.strategy = &sysctl_intvec,
+		.proc_handler = proc_dointvec_minmax,
+		.strategy = sysctl_intvec,
 		.extra1 = &min_state_count,
 		.extra2 = &max_state_count
 	},
@@ -404,8 +401,8 @@ static ctl_table dn_table[] = {
 		.data = &decnet_dr_count,
 		.maxlen = sizeof(int),
 		.mode = 0644,
-		.proc_handler = &proc_dointvec_minmax,
-		.strategy = &sysctl_intvec,
+		.proc_handler = proc_dointvec_minmax,
+		.strategy = sysctl_intvec,
 		.extra1 = &min_state_count,
 		.extra2 = &max_state_count
 	},
@@ -415,8 +412,8 @@ static ctl_table dn_table[] = {
 		.data = &decnet_dst_gc_interval,
 		.maxlen = sizeof(int),
 		.mode = 0644,
-		.proc_handler = &proc_dointvec_minmax,
-		.strategy = &sysctl_intvec,
+		.proc_handler = proc_dointvec_minmax,
+		.strategy = sysctl_intvec,
 		.extra1 = &min_decnet_dst_gc_interval,
 		.extra2 = &max_decnet_dst_gc_interval
 	},
@@ -426,8 +423,8 @@ static ctl_table dn_table[] = {
 		.data = &decnet_no_fc_max_cwnd,
 		.maxlen = sizeof(int),
 		.mode = 0644,
-		.proc_handler = &proc_dointvec_minmax,
-		.strategy = &sysctl_intvec,
+		.proc_handler = proc_dointvec_minmax,
+		.strategy = sysctl_intvec,
 		.extra1 = &min_decnet_no_fc_max_cwnd,
 		.extra2 = &max_decnet_no_fc_max_cwnd
 	},
@@ -437,8 +434,8 @@ static ctl_table dn_table[] = {
 		.data = &sysctl_decnet_mem,
 		.maxlen = sizeof(sysctl_decnet_mem),
 		.mode = 0644,
-		.proc_handler = &proc_dointvec,
-		.strategy = &sysctl_intvec,
+		.proc_handler = proc_dointvec,
+		.strategy = sysctl_intvec,
 	},
 	{
 		.ctl_name = NET_DECNET_RMEM,
@@ -446,8 +443,8 @@ static ctl_table dn_table[] = {
 		.data = &sysctl_decnet_rmem,
 		.maxlen = sizeof(sysctl_decnet_rmem),
 		.mode = 0644,
-		.proc_handler = &proc_dointvec,
-		.strategy = &sysctl_intvec,
+		.proc_handler = proc_dointvec,
+		.strategy = sysctl_intvec,
 	},
 	{
 		.ctl_name = NET_DECNET_WMEM,
@@ -455,8 +452,8 @@ static ctl_table dn_table[] = {
 		.data = &sysctl_decnet_wmem,
 		.maxlen = sizeof(sysctl_decnet_wmem),
 		.mode = 0644,
-		.proc_handler = &proc_dointvec,
-		.strategy = &sysctl_intvec,
+		.proc_handler = proc_dointvec,
+		.strategy = sysctl_intvec,
 	},
 	{
 		.ctl_name = NET_DECNET_DEBUG_LEVEL,
@@ -464,8 +461,8 @@ static ctl_table dn_table[] = {
 		.data = &decnet_debug_level,
 		.maxlen = sizeof(int),
 		.mode = 0644,
-		.proc_handler = &proc_dointvec,
-		.strategy = &sysctl_intvec,
+		.proc_handler = proc_dointvec,
+		.strategy = sysctl_intvec,
 	},
 	{0}
 };

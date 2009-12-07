@@ -67,6 +67,7 @@
 #include <asm/system.h>
 #include <asm/uaccess.h>
 #include <linux/bitops.h>
+#include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
@@ -365,7 +366,6 @@ static void sl_bump(struct slip *sl)
 	skb_reset_mac_header(skb);
 	skb->protocol = htons(ETH_P_IP);
 	netif_rx(skb);
-	sl->dev->last_rx = jiffies;
 	sl->rx_packets++;
 }
 
@@ -402,7 +402,7 @@ static void sl_encaps(struct slip *sl, unsigned char *icp, int len)
 	 * if we did not request it before write operation.
 	 *       14 Oct 1994  Dmitry Gorodchanin.
 	 */
-	sl->tty->flags |= (1 << TTY_DO_WRITE_WAKEUP);
+	set_bit(TTY_DO_WRITE_WAKEUP, &sl->tty->flags);
 	actual = sl->tty->ops->write(sl->tty, sl->xbuff, count);
 #ifdef SL_CHECK_TRANSMIT
 	sl->dev->trans_start = jiffies;
@@ -432,7 +432,7 @@ static void slip_write_wakeup(struct tty_struct *tty)
 		/* Now serial buffer is almost free & we can start
 		 * transmission of another packet */
 		sl->tx_packets++;
-		tty->flags &= ~(1 << TTY_DO_WRITE_WAKEUP);
+		clear_bit(TTY_DO_WRITE_WAKEUP, &tty->flags);
 		sl_unlock(sl);
 		return;
 	}
@@ -465,7 +465,7 @@ static void sl_tx_timeout(struct net_device *dev)
 			(tty_chars_in_buffer(sl->tty) || sl->xleft) ?
 				"bad line quality" : "driver error");
 		sl->xleft = 0;
-		sl->tty->flags &= ~(1 << TTY_DO_WRITE_WAKEUP);
+		clear_bit(TTY_DO_WRITE_WAKEUP, &sl->tty->flags);
 		sl_unlock(sl);
 #endif
 	}
@@ -475,7 +475,7 @@ out:
 
 
 /* Encapsulate an IP datagram and kick it into a TTY queue. */
-static int
+static netdev_tx_t
 sl_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct slip *sl = netdev_priv(dev);
@@ -485,12 +485,12 @@ sl_xmit(struct sk_buff *skb, struct net_device *dev)
 		spin_unlock(&sl->lock);
 		printk(KERN_WARNING "%s: xmit call when iface is down\n", dev->name);
 		dev_kfree_skb(skb);
-		return 0;
+		return NETDEV_TX_OK;
 	}
 	if (sl->tty == NULL) {
 		spin_unlock(&sl->lock);
 		dev_kfree_skb(skb);
-		return 0;
+		return NETDEV_TX_OK;
 	}
 
 	sl_lock(sl);
@@ -499,7 +499,7 @@ sl_xmit(struct sk_buff *skb, struct net_device *dev)
 	spin_unlock(&sl->lock);
 
 	dev_kfree_skb(skb);
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 
@@ -515,10 +515,9 @@ sl_close(struct net_device *dev)
 	struct slip *sl = netdev_priv(dev);
 
 	spin_lock_bh(&sl->lock);
-	if (sl->tty) {
+	if (sl->tty)
 		/* TTY discipline is running. */
-		sl->tty->flags &= ~(1 << TTY_DO_WRITE_WAKEUP);
-	}
+		clear_bit(TTY_DO_WRITE_WAKEUP, &sl->tty->flags);
 	netif_stop_queue(dev);
 	sl->rcount   = 0;
 	sl->xleft    = 0;
@@ -605,7 +604,6 @@ static int sl_init(struct net_device *dev)
 	dev->mtu		= sl->mtu;
 	dev->type		= ARPHRD_SLIP + sl->mode;
 #ifdef SL_CHECK_TRANSMIT
-	dev->tx_timeout		= sl_tx_timeout;
 	dev->watchdog_timeo	= 20*HZ;
 #endif
 	return 0;
@@ -619,19 +617,34 @@ static void sl_uninit(struct net_device *dev)
 	sl_free_bufs(sl);
 }
 
+/* Hook the destructor so we can free slip devices at the right point in time */
+static void sl_free_netdev(struct net_device *dev)
+{
+	int i = dev->base_addr;
+	free_netdev(dev);
+	slip_devs[i] = NULL;
+}
+
+static const struct net_device_ops sl_netdev_ops = {
+	.ndo_init		= sl_init,
+	.ndo_uninit	  	= sl_uninit,
+	.ndo_open		= sl_open,
+	.ndo_stop		= sl_close,
+	.ndo_start_xmit		= sl_xmit,
+	.ndo_get_stats	        = sl_get_stats,
+	.ndo_change_mtu		= sl_change_mtu,
+	.ndo_tx_timeout		= sl_tx_timeout,
+#ifdef CONFIG_SLIP_SMART
+	.ndo_do_ioctl		= sl_ioctl,
+#endif
+};
+
+
 static void sl_setup(struct net_device *dev)
 {
-	dev->init		= sl_init;
-	dev->uninit	  	= sl_uninit;
-	dev->open		= sl_open;
-	dev->destructor		= free_netdev;
-	dev->stop		= sl_close;
-	dev->get_stats	        = sl_get_stats;
-	dev->change_mtu		= sl_change_mtu;
-	dev->hard_start_xmit	= sl_xmit;
-#ifdef CONFIG_SLIP_SMART
-	dev->do_ioctl		= sl_ioctl;
-#endif
+	dev->netdev_ops		= &sl_netdev_ops;
+	dev->destructor		= sl_free_netdev;
+
 	dev->hard_header_len	= 0;
 	dev->addr_len		= 0;
 	dev->tx_queue_len	= 10;
@@ -708,8 +721,6 @@ static void sl_sync(void)
 static struct slip *sl_alloc(dev_t line)
 {
 	int i;
-	int sel = -1;
-	int score = -1;
 	struct net_device *dev = NULL;
 	struct slip       *sl;
 
@@ -720,55 +731,7 @@ static struct slip *sl_alloc(dev_t line)
 		dev = slip_devs[i];
 		if (dev == NULL)
 			break;
-
-		sl = netdev_priv(dev);
-		if (sl->leased) {
-			if (sl->line != line)
-				continue;
-			if (sl->tty)
-				return NULL;
-
-			/* Clear ESCAPE & ERROR flags */
-			sl->flags &= (1 << SLF_INUSE);
-			return sl;
-		}
-
-		if (sl->tty)
-			continue;
-
-		if (current->pid == sl->pid) {
-			if (sl->line == line && score < 3) {
-				sel = i;
-				score = 3;
-				continue;
-			}
-			if (score < 2) {
-				sel = i;
-				score = 2;
-			}
-			continue;
-		}
-		if (sl->line == line && score < 1) {
-			sel = i;
-			score = 1;
-			continue;
-		}
-		if (score < 0) {
-			sel = i;
-			score = 0;
-		}
 	}
-
-	if (sel >= 0) {
-		i = sel;
-		dev = slip_devs[i];
-		if (score > 1) {
-			sl = netdev_priv(dev);
-			sl->flags &= (1 << SLF_INUSE);
-			return sl;
-		}
-	}
-
 	/* Sorry, too many, all slots in use */
 	if (i >= slip_maxdev)
 		return NULL;
@@ -905,30 +868,13 @@ err_exit:
 }
 
 /*
-
-  FIXME: 1,2 are fixed 3 was never true anyway.
-
-   Let me to blame a bit.
-   1. TTY module calls this funstion on soft interrupt.
-   2. TTY module calls this function WITH MASKED INTERRUPTS!
-   3. TTY module does not notify us about line discipline
-      shutdown,
-
-   Seems, now it is clean. The solution is to consider netdevice and
-   line discipline sides as two independent threads.
-
-   By-product (not desired): sl? does not feel hangups and remains open.
-   It is supposed, that user level program (dip, diald, slattach...)
-   will catch SIGHUP and make the rest of work.
-
-   I see no way to make more with current tty code. --ANK
- */
-
-/*
  * Close down a SLIP channel.
  * This means flushing out any pending queues, and then returning. This
  * call is serialized against other ldisc functions.
+ *
+ * We also use this method fo a hangup event
  */
+
 static void slip_close(struct tty_struct *tty)
 {
 	struct slip *sl = tty->disc_data;
@@ -947,10 +893,16 @@ static void slip_close(struct tty_struct *tty)
 	del_timer_sync(&sl->keepalive_timer);
 	del_timer_sync(&sl->outfill_timer);
 #endif
-
-	/* Count references from TTY module */
+	/* Flush network side */
+	unregister_netdev(sl->dev);
+	/* This will complete via sl_free_netdev */
 }
 
+static int slip_hangup(struct tty_struct *tty)
+{
+	slip_close(tty);
+	return 0;
+}
  /************************************************************************
   *			STANDARD SLIP ENCAPSULATION		  	 *
   ************************************************************************/
@@ -1307,6 +1259,7 @@ static struct tty_ldisc_ops sl_ldisc = {
 	.name 		= "slip",
 	.open 		= slip_open,
 	.close	 	= slip_close,
+	.hangup	 	= slip_hangup,
 	.ioctl		= slip_ioctl,
 	.receive_buf	= slip_receive_buf,
 	.write_wakeup	= slip_write_wakeup,
@@ -1380,6 +1333,8 @@ static void __exit slip_exit(void)
 		}
 	} while (busy && time_before(jiffies, timeout));
 
+	/* FIXME: hangup is async so we should wait when doing this second
+	   phase */
 
 	for (i = 0; i < slip_maxdev; i++) {
 		dev = slip_devs[i];

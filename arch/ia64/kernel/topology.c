@@ -53,10 +53,12 @@ int __ref arch_register_cpu(int num)
 }
 EXPORT_SYMBOL(arch_register_cpu);
 
-void arch_unregister_cpu(int num)
+void __ref arch_unregister_cpu(int num)
 {
 	unregister_cpu(&sysfs_cpus[num].cpu);
+#ifdef CONFIG_ACPI
 	unmap_cpu_from_node(num, cpu_to_node(num));
+#endif
 }
 EXPORT_SYMBOL(arch_unregister_cpu);
 #else
@@ -217,7 +219,7 @@ static ssize_t show_shared_cpu_map(struct cache_info *this_leaf, char *buf)
 	cpumask_t shared_cpu_map;
 
 	cpus_and(shared_cpu_map, this_leaf->shared_cpu_map, cpu_online_map);
-	len = cpumask_scnprintf(buf, NR_CPUS+1, shared_cpu_map);
+	len = cpumask_scnprintf(buf, NR_CPUS+1, &shared_cpu_map);
 	len += sprintf(buf+len, "\n");
 	return len;
 }
@@ -304,10 +306,10 @@ static void __cpuinit cpu_cache_sysfs_exit(unsigned int cpu)
 
 static int __cpuinit cpu_cache_sysfs_init(unsigned int cpu)
 {
-	u64 i, levels, unique_caches;
+	unsigned long i, levels, unique_caches;
 	pal_cache_config_info_t cci;
 	int j;
-	s64 status;
+	long status;
 	struct cache_info *this_cache;
 	int num_cache_leaves = 0;
 
@@ -370,6 +372,10 @@ static int __cpuinit cache_add_dev(struct sys_device * sys_dev)
 	retval = kobject_init_and_add(&all_cpu_cache_info[cpu].kobj,
 				      &cache_ktype_percpu_entry, &sys_dev->kobj,
 				      "%s", "cache");
+	if (unlikely(retval < 0)) {
+		cpu_cache_sysfs_exit(cpu);
+		return retval;
+	}
 
 	for (i = 0; i < all_cpu_cache_info[cpu].num_cache_leaves; i++) {
 		this_object = LEAF_KOBJECT_PTR(cpu,i);
@@ -383,7 +389,7 @@ static int __cpuinit cache_add_dev(struct sys_device * sys_dev)
 			}
 			kobject_put(&all_cpu_cache_info[cpu].kobj);
 			cpu_cache_sysfs_exit(cpu);
-			break;
+			return retval;
 		}
 		kobject_uevent(&(this_object->kobj), KOBJ_ADD);
 	}

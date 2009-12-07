@@ -126,7 +126,7 @@ xfs_growfs_data_private(
 	xfs_extlen_t		agsize;
 	xfs_extlen_t		tmpsize;
 	xfs_alloc_rec_t		*arec;
-	xfs_btree_sblock_t	*block;
+	struct xfs_btree_block	*block;
 	xfs_buf_t		*bp;
 	int			bucket;
 	int			dpct;
@@ -160,24 +160,32 @@ xfs_growfs_data_private(
 	nagcount = new + (nb_mod != 0);
 	if (nb_mod && nb_mod < XFS_MIN_AG_BLOCKS) {
 		nagcount--;
-		nb = nagcount * mp->m_sb.sb_agblocks;
+		nb = (xfs_rfsblock_t)nagcount * mp->m_sb.sb_agblocks;
 		if (nb < mp->m_sb.sb_dblocks)
 			return XFS_ERROR(EINVAL);
 	}
 	new = nb - mp->m_sb.sb_dblocks;
 	oagcount = mp->m_sb.sb_agcount;
 	if (nagcount > oagcount) {
+		void *new_perag, *old_perag;
+
 		xfs_filestream_flush(mp);
+
+		new_perag = kmem_zalloc(sizeof(xfs_perag_t) * nagcount,
+					KM_MAYFAIL);
+		if (!new_perag)
+			return XFS_ERROR(ENOMEM);
+
 		down_write(&mp->m_peraglock);
-		mp->m_perag = kmem_realloc(mp->m_perag,
-			sizeof(xfs_perag_t) * nagcount,
-			sizeof(xfs_perag_t) * oagcount,
-			KM_SLEEP);
-		memset(&mp->m_perag[oagcount], 0,
-			(nagcount - oagcount) * sizeof(xfs_perag_t));
+		memcpy(new_perag, mp->m_perag, sizeof(xfs_perag_t) * oagcount);
+		old_perag = mp->m_perag;
+		mp->m_perag = new_perag;
+
 		mp->m_flags |= XFS_MOUNT_32BITINODES;
 		nagimax = xfs_initialize_perag(mp, nagcount);
 		up_write(&mp->m_peraglock);
+
+		kmem_free(old_perag);
 	}
 	tp = xfs_trans_alloc(mp, XFS_TRANS_GROWFS);
 	tp->t_flags |= XFS_TRANS_RESERVE;
@@ -251,14 +259,14 @@ xfs_growfs_data_private(
 		bp = xfs_buf_get(mp->m_ddev_targp,
 			XFS_AGB_TO_DADDR(mp, agno, XFS_BNO_BLOCK(mp)),
 			BTOBB(mp->m_sb.sb_blocksize), 0);
-		block = XFS_BUF_TO_SBLOCK(bp);
+		block = XFS_BUF_TO_BLOCK(bp);
 		memset(block, 0, mp->m_sb.sb_blocksize);
 		block->bb_magic = cpu_to_be32(XFS_ABTB_MAGIC);
 		block->bb_level = 0;
 		block->bb_numrecs = cpu_to_be16(1);
-		block->bb_leftsib = cpu_to_be32(NULLAGBLOCK);
-		block->bb_rightsib = cpu_to_be32(NULLAGBLOCK);
-		arec = XFS_BTREE_REC_ADDR(xfs_alloc, block, 1);
+		block->bb_u.s.bb_leftsib = cpu_to_be32(NULLAGBLOCK);
+		block->bb_u.s.bb_rightsib = cpu_to_be32(NULLAGBLOCK);
+		arec = XFS_ALLOC_REC_ADDR(mp, block, 1);
 		arec->ar_startblock = cpu_to_be32(XFS_PREALLOC_BLOCKS(mp));
 		arec->ar_blockcount = cpu_to_be32(
 			agsize - be32_to_cpu(arec->ar_startblock));
@@ -272,14 +280,14 @@ xfs_growfs_data_private(
 		bp = xfs_buf_get(mp->m_ddev_targp,
 			XFS_AGB_TO_DADDR(mp, agno, XFS_CNT_BLOCK(mp)),
 			BTOBB(mp->m_sb.sb_blocksize), 0);
-		block = XFS_BUF_TO_SBLOCK(bp);
+		block = XFS_BUF_TO_BLOCK(bp);
 		memset(block, 0, mp->m_sb.sb_blocksize);
 		block->bb_magic = cpu_to_be32(XFS_ABTC_MAGIC);
 		block->bb_level = 0;
 		block->bb_numrecs = cpu_to_be16(1);
-		block->bb_leftsib = cpu_to_be32(NULLAGBLOCK);
-		block->bb_rightsib = cpu_to_be32(NULLAGBLOCK);
-		arec = XFS_BTREE_REC_ADDR(xfs_alloc, block, 1);
+		block->bb_u.s.bb_leftsib = cpu_to_be32(NULLAGBLOCK);
+		block->bb_u.s.bb_rightsib = cpu_to_be32(NULLAGBLOCK);
+		arec = XFS_ALLOC_REC_ADDR(mp, block, 1);
 		arec->ar_startblock = cpu_to_be32(XFS_PREALLOC_BLOCKS(mp));
 		arec->ar_blockcount = cpu_to_be32(
 			agsize - be32_to_cpu(arec->ar_startblock));
@@ -294,13 +302,13 @@ xfs_growfs_data_private(
 		bp = xfs_buf_get(mp->m_ddev_targp,
 			XFS_AGB_TO_DADDR(mp, agno, XFS_IBT_BLOCK(mp)),
 			BTOBB(mp->m_sb.sb_blocksize), 0);
-		block = XFS_BUF_TO_SBLOCK(bp);
+		block = XFS_BUF_TO_BLOCK(bp);
 		memset(block, 0, mp->m_sb.sb_blocksize);
 		block->bb_magic = cpu_to_be32(XFS_IBT_MAGIC);
 		block->bb_level = 0;
 		block->bb_numrecs = 0;
-		block->bb_leftsib = cpu_to_be32(NULLAGBLOCK);
-		block->bb_rightsib = cpu_to_be32(NULLAGBLOCK);
+		block->bb_u.s.bb_leftsib = cpu_to_be32(NULLAGBLOCK);
+		block->bb_u.s.bb_rightsib = cpu_to_be32(NULLAGBLOCK);
 		error = xfs_bwrite(mp, bp);
 		if (error) {
 			goto error0;
@@ -435,6 +443,9 @@ xfs_growfs_data(
 	xfs_growfs_data_t	*in)
 {
 	int error;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return XFS_ERROR(EPERM);
 	if (!mutex_trylock(&mp->m_growlock))
 		return XFS_ERROR(EWOULDBLOCK);
 	error = xfs_growfs_data_private(mp, in);
@@ -448,6 +459,9 @@ xfs_growfs_log(
 	xfs_growfs_log_t	*in)
 {
 	int error;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return XFS_ERROR(EPERM);
 	if (!mutex_trylock(&mp->m_growlock))
 		return XFS_ERROR(EWOULDBLOCK);
 	error = xfs_growfs_log_private(mp, in);
@@ -570,7 +584,7 @@ out:
 	if (fdblks_delta) {
 		/*
 		 * If we are putting blocks back here, m_resblks_avail is
-		 * already at it's max so this will put it in the free pool.
+		 * already at its max so this will put it in the free pool.
 		 *
 		 * If we need space, we'll either succeed in getting it
 		 * from the free block count or we'll get an enospc. If
@@ -589,17 +603,19 @@ out:
 	return 0;
 }
 
-void
+int
 xfs_fs_log_dummy(
 	xfs_mount_t	*mp)
 {
 	xfs_trans_t	*tp;
 	xfs_inode_t	*ip;
+	int		error;
 
 	tp = _xfs_trans_alloc(mp, XFS_TRANS_DUMMY1);
-	if (xfs_trans_reserve(tp, 0, XFS_ICHANGE_LOG_RES(mp), 0, 0, 0)) {
+	error = xfs_trans_reserve(tp, 0, XFS_ICHANGE_LOG_RES(mp), 0, 0, 0);
+	if (error) {
 		xfs_trans_cancel(tp, 0);
-		return;
+		return error;
 	}
 
 	ip = mp->m_rootip;
@@ -609,9 +625,10 @@ xfs_fs_log_dummy(
 	xfs_trans_ihold(tp, ip);
 	xfs_trans_log_inode(tp, ip, XFS_ILOG_CORE);
 	xfs_trans_set_sync(tp);
-	xfs_trans_commit(tp, 0);
+	error = xfs_trans_commit(tp, 0);
 
 	xfs_iunlock(ip, XFS_ILOCK_EXCL);
+	return error;
 }
 
 int

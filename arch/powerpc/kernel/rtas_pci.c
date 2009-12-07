@@ -93,10 +93,7 @@ static int rtas_pci_read_config(struct pci_bus *bus,
 {
 	struct device_node *busdn, *dn;
 
-	if (bus->self)
-		busdn = pci_device_to_OF_node(bus->self);
-	else
-		busdn = bus->sysdata;	/* must be a phb */
+	busdn = pci_bus_to_OF_node(bus);
 
 	/* Search only direct children of the bus */
 	for (dn = busdn->child; dn; dn = dn->sibling) {
@@ -140,10 +137,7 @@ static int rtas_pci_write_config(struct pci_bus *bus,
 {
 	struct device_node *busdn, *dn;
 
-	if (bus->self)
-		busdn = pci_device_to_OF_node(bus->self);
-	else
-		busdn = bus->sysdata;	/* must be a phb */
+	busdn = pci_bus_to_OF_node(bus);
 
 	/* Search only direct children of the bus */
 	for (dn = busdn->child; dn; dn = dn->sibling) {
@@ -301,51 +295,3 @@ void __init find_and_init_phbs(void)
 #endif /* CONFIG_PPC32 */
 	}
 }
-
-/* RPA-specific bits for removing PHBs */
-int pcibios_remove_root_bus(struct pci_controller *phb)
-{
-	struct pci_bus *b = phb->bus;
-	struct resource *res;
-	int rc, i;
-
-	res = b->resource[0];
-	if (!res->flags) {
-		printk(KERN_ERR "%s: no IO resource for PHB %s\n", __func__,
-				b->name);
-		return 1;
-	}
-
-	rc = pcibios_unmap_io_space(b);
-	if (rc) {
-		printk(KERN_ERR "%s: failed to unmap IO on bus %s\n",
-			__func__, b->name);
-		return 1;
-	}
-
-	if (release_resource(res)) {
-		printk(KERN_ERR "%s: failed to release IO on bus %s\n",
-				__func__, b->name);
-		return 1;
-	}
-
-	for (i = 1; i < 3; ++i) {
-		res = b->resource[i];
-		if (!res->flags && i == 0) {
-			printk(KERN_ERR "%s: no MEM resource for PHB %s\n",
-				__func__, b->name);
-			return 1;
-		}
-		if (res->flags && release_resource(res)) {
-			printk(KERN_ERR
-			       "%s: failed to release IO %d on bus %s\n",
-				__func__, i, b->name);
-			return 1;
-		}
-	}
-
-	pcibios_free_controller(phb);
-
-	return 0;
-}
-EXPORT_SYMBOL(pcibios_remove_root_bus);

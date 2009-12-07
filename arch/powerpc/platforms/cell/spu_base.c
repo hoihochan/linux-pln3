@@ -114,7 +114,7 @@ static inline void mm_needs_global_tlbie(struct mm_struct *mm)
 	int nr = (NR_CPUS > 1) ? NR_CPUS : NR_CPUS + 1;
 
 	/* Global TLBIE broadcast required with SPEs. */
-	__cpus_setall(&mm->cpu_vm_mask, nr);
+	bitmap_fill(cpumask_bits(mm_cpumask(mm)), nr);
 }
 
 void spu_associate_mm(struct spu *spu, struct mm_struct *mm)
@@ -151,7 +151,7 @@ static inline void spu_load_slb(struct spu *spu, int slbe, struct spu_slb *slb)
 {
 	struct spu_priv2 __iomem *priv2 = spu->priv2;
 
-	pr_debug("%s: adding SLB[%d] 0x%016lx 0x%016lx\n",
+	pr_debug("%s: adding SLB[%d] 0x%016llx 0x%016llx\n",
 			__func__, slbe, slb->vsid, slb->esid);
 
 	out_be64(&priv2->slb_index_W, slbe);
@@ -221,7 +221,7 @@ static int __spu_trap_data_map(struct spu *spu, unsigned long ea, u64 dsisr)
 {
 	int ret;
 
-	pr_debug("%s, %lx, %lx\n", __func__, dsisr, ea);
+	pr_debug("%s, %llx, %lx\n", __func__, dsisr, ea);
 
 	/*
 	 * Handle kernel space hash faults immediately. User hash
@@ -752,17 +752,8 @@ static int __init init_spu_base(void)
 		goto out_unregister_sysdev_class;
 	}
 
-	if (ret > 0) {
-		/*
-		 * We cannot put the forward declaration in
-		 * <linux/linux_logo.h> because of conflicting session type
-		 * conflicts for const and __initdata with different compiler
-		 * versions
-		 */
-		extern const struct linux_logo logo_spe_clut224;
-
+	if (ret > 0)
 		fb_append_extra_logo(&logo_spe_clut224, ret);
-	}
 
 	mutex_lock(&spu_full_list_mutex);
 	xmon_register_spus(&spu_full_list);

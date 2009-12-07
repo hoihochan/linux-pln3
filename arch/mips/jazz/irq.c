@@ -10,6 +10,7 @@
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
+#include <linux/smp.h>
 #include <linux/spinlock.h>
 
 #include <asm/irq_cpu.h>
@@ -133,8 +134,7 @@ static irqreturn_t r4030_timer_interrupt(int irq, void *dev_id)
 
 static struct irqaction r4030_timer_irqaction = {
 	.handler	= r4030_timer_interrupt,
-	.flags		= IRQF_DISABLED,
-	.mask		= CPU_MASK_CPU0,
+	.flags		= IRQF_DISABLED | IRQF_TIMER,
 	.name		= "R4030 timer",
 };
 
@@ -146,7 +146,7 @@ void __init plat_time_init(void)
 
 	BUG_ON(HZ != 100);
 
-	cd->cpumask             = cpumask_of_cpu(cpu);
+	cd->cpumask             = cpumask_of(cpu);
 	clockevents_register_device(cd);
 	action->dev_id = cd;
 	setup_irq(JAZZ_TIMER_IRQ, action);

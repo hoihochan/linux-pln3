@@ -21,6 +21,7 @@
  *
  */
 
+#include <linux/init.h>
 #include <asm/reg.h>
 #include <asm/page.h>
 #include <asm/mmu.h>
@@ -31,6 +32,7 @@
 #include <asm/ppc_asm.h>
 #include <asm/asm-offsets.h>
 #include <asm/ptrace.h>
+#include <asm/bug.h>
 
 /* 601 only have IBAT; cr0.eq is set on 601 when using this macro */
 #define LOAD_BAT(n, reg, RA, RB)	\
@@ -49,7 +51,7 @@
 	mtspr	SPRN_DBAT##n##L,RB;	\
 1:
 
-	.section	.text.head, "ax"
+	__HEAD
 	.stabs	"arch/powerpc/kernel/",N_SO,0,0,0f
 	.stabs	"head_32.S",N_SO,0,0,0f
 0:
@@ -107,12 +109,21 @@ __start:
  * because OF may have I/O devices mapped into that area
  * (particularly on CHRP).
  */
-#ifdef CONFIG_PPC_MULTIPLATFORM
 	cmpwi	0,r5,0
 	beq	1f
+
+#ifdef CONFIG_PPC_OF_BOOT_TRAMPOLINE
+	/* find out where we are now */
+	bcl	20,31,$+4
+0:	mflr	r8			/* r8 = runtime addr here */
+	addis	r8,r8,(_stext - 0b)@ha
+	addi	r8,r8,(_stext - 0b)@l	/* current runtime base addr */
 	bl	prom_init
+#endif /* CONFIG_PPC_OF_BOOT_TRAMPOLINE */
+
+	/* We never return. We also hit that trap if trying to boot
+	 * from OF while CONFIG_PPC_OF_BOOT_TRAMPOLINE isn't selected */
 	trap
-#endif
 
 /*
  * Check for BootX signature when supporting PowerMac and branch to
@@ -176,7 +187,8 @@ __after_mmu_off:
 	bl	reloc_offset
 	mr	r26,r3
 	addis	r4,r3,KERNELBASE@h	/* current address of _start */
-	cmpwi	0,r4,0			/* are we already running at 0? */
+	lis	r5,PHYSICAL_START@h
+	cmplw	0,r4,r5			/* already running at PHYSICAL_START? */
 	bne	relocate_kernel
 /*
  * we now have the 1st 16M of ram mapped with the bats.
@@ -232,8 +244,8 @@ __secondary_hold_acknowledge:
  * task's thread_struct.
  */
 #define EXCEPTION_PROLOG	\
-	mtspr	SPRN_SPRG0,r10;	\
-	mtspr	SPRN_SPRG1,r11;	\
+	mtspr	SPRN_SPRG_SCRATCH0,r10;	\
+	mtspr	SPRN_SPRG_SCRATCH1,r11;	\
 	mfcr	r10;		\
 	EXCEPTION_PROLOG_1;	\
 	EXCEPTION_PROLOG_2
@@ -243,7 +255,7 @@ __secondary_hold_acknowledge:
 	andi.	r11,r11,MSR_PR;	\
 	tophys(r11,r1);			/* use tophys(r1) if kernel */ \
 	beq	1f;		\
-	mfspr	r11,SPRN_SPRG3;	\
+	mfspr	r11,SPRN_SPRG_THREAD;	\
 	lwz	r11,THREAD_INFO-THREAD(r11);	\
 	addi	r11,r11,THREAD_SIZE;	\
 	tophys(r11,r11);	\
@@ -255,9 +267,9 @@ __secondary_hold_acknowledge:
 	stw	r10,_CCR(r11);		/* save registers */ \
 	stw	r12,GPR12(r11);	\
 	stw	r9,GPR9(r11);	\
-	mfspr	r10,SPRN_SPRG0;	\
+	mfspr	r10,SPRN_SPRG_SCRATCH0;	\
 	stw	r10,GPR10(r11);	\
-	mfspr	r12,SPRN_SPRG1;	\
+	mfspr	r12,SPRN_SPRG_SCRATCH1;	\
 	stw	r12,GPR11(r11);	\
 	mflr	r10;		\
 	stw	r10,_LINK(r11);	\
@@ -343,11 +355,11 @@ i##n:								\
  *	-- paulus.
  */
 	. = 0x200
-	mtspr	SPRN_SPRG0,r10
-	mtspr	SPRN_SPRG1,r11
+	mtspr	SPRN_SPRG_SCRATCH0,r10
+	mtspr	SPRN_SPRG_SCRATCH1,r11
 	mfcr	r10
 #ifdef CONFIG_PPC_CHRP
-	mfspr	r11,SPRN_SPRG2
+	mfspr	r11,SPRN_SPRG_RTAS
 	cmpwi	0,r11,0
 	bne	7f
 #endif /* CONFIG_PPC_CHRP */
@@ -355,7 +367,7 @@ i##n:								\
 7:	EXCEPTION_PROLOG_2
 	addi	r3,r1,STACK_FRAME_OVERHEAD
 #ifdef CONFIG_PPC_CHRP
-	mfspr	r4,SPRN_SPRG2
+	mfspr	r4,SPRN_SPRG_RTAS
 	cmpwi	cr1,r4,0
 	bne	cr1,1f
 #endif
@@ -369,13 +381,13 @@ i##n:								\
 DataAccess:
 	EXCEPTION_PROLOG
 	mfspr	r10,SPRN_DSISR
+	stw	r10,_DSISR(r11)
 	andis.	r0,r10,0xa470		/* weird error? */
 	bne	1f			/* if not, try to put a PTE */
 	mfspr	r4,SPRN_DAR		/* into the hash table */
 	rlwinm	r3,r10,32-15,21,21	/* DSISR_STORE -> _PAGE_RW */
 	bl	hash_page
-1:	stw	r10,_DSISR(r11)
-	mr	r5,r10
+1:	lwz	r5,_DSISR(r11)		/* get DSISR value */
 	mfspr	r4,SPRN_DAR
 	EXC_XFER_EE_LITE(0x300, handle_page_fault)
 
@@ -464,17 +476,16 @@ SystemCall:
 	. = 0x1000
 InstructionTLBMiss:
 /*
- * r0:	stored ctr
+ * r0:	scratch
  * r1:	linux style pte ( later becomes ppc hardware pte )
  * r2:	ptr to linux-style pte
  * r3:	scratch
  */
-	mfctr	r0
 	/* Get PTE (linux-style) and check access */
 	mfspr	r3,SPRN_IMISS
 	lis	r1,PAGE_OFFSET@h		/* check if kernel address */
 	cmplw	0,r1,r3
-	mfspr	r2,SPRN_SPRG3
+	mfspr	r2,SPRN_SPRG_THREAD
 	li	r1,_PAGE_USER|_PAGE_PRESENT /* low addresses tested as user */
 	lwz	r2,PGDIR(r2)
 	bge-	112f
@@ -488,25 +499,27 @@ InstructionTLBMiss:
 	rlwinm.	r2,r2,0,0,19		/* extract address of pte page */
 	beq-	InstructionAddressInvalid	/* return if no mapping */
 	rlwimi	r2,r3,22,20,29		/* insert next 10 bits of address */
-	lwz	r3,0(r2)		/* get linux-style pte */
-	andc.	r1,r1,r3		/* check access & ~permission */
+	lwz	r0,0(r2)		/* get linux-style pte */
+	andc.	r1,r1,r0		/* check access & ~permission */
 	bne-	InstructionAddressInvalid /* return if access not permitted */
-	ori	r3,r3,_PAGE_ACCESSED	/* set _PAGE_ACCESSED in pte */
+	ori	r0,r0,_PAGE_ACCESSED	/* set _PAGE_ACCESSED in pte */
 	/*
 	 * NOTE! We are assuming this is not an SMP system, otherwise
 	 * we would need to update the pte atomically with lwarx/stwcx.
 	 */
-	stw	r3,0(r2)		/* update PTE (accessed bit) */
+	stw	r0,0(r2)		/* update PTE (accessed bit) */
 	/* Convert linux-style PTE to low word of PPC-style PTE */
-	rlwinm	r1,r3,32-10,31,31	/* _PAGE_RW -> PP lsb */
-	rlwinm	r2,r3,32-7,31,31	/* _PAGE_DIRTY -> PP lsb */
+	rlwinm	r1,r0,32-10,31,31	/* _PAGE_RW -> PP lsb */
+	rlwinm	r2,r0,32-7,31,31	/* _PAGE_DIRTY -> PP lsb */
 	and	r1,r1,r2		/* writable if _RW and _DIRTY */
-	rlwimi	r3,r3,32-1,30,30	/* _PAGE_USER -> PP msb */
-	rlwimi	r3,r3,32-1,31,31	/* _PAGE_USER -> PP lsb */
-	ori	r1,r1,0xe14		/* clear out reserved bits and M */
-	andc	r1,r3,r1		/* PP = user? (rw&dirty? 2: 3): 0 */
+	rlwimi	r0,r0,32-1,30,30	/* _PAGE_USER -> PP msb */
+	rlwimi	r0,r0,32-1,31,31	/* _PAGE_USER -> PP lsb */
+	ori	r1,r1,0xe04		/* clear out reserved bits */
+	andc	r1,r0,r1		/* PP = user? (rw&dirty? 2: 3): 0 */
+BEGIN_FTR_SECTION
+	rlwinm	r1,r1,0,~_PAGE_COHERENT	/* clear M (coherence not required) */
+END_FTR_SECTION_IFCLR(CPU_FTR_NEED_COHERENT)
 	mtspr	SPRN_RPA,r1
-	mfspr	r3,SPRN_IMISS
 	tlbli	r3
 	mfspr	r3,SPRN_SRR1		/* Need to restore CR0 */
 	mtcrf	0x80,r3
@@ -517,7 +530,6 @@ InstructionAddressInvalid:
 
 	addis	r1,r1,0x2000
 	mtspr	SPRN_DSISR,r1	/* (shouldn't be needed) */
-	mtctr	r0		/* Restore CTR */
 	andi.	r2,r3,0xFFFF	/* Clear upper bits of SRR1 */
 	or	r2,r2,r1
 	mtspr	SPRN_SRR1,r2
@@ -538,17 +550,16 @@ InstructionAddressInvalid:
 	. = 0x1100
 DataLoadTLBMiss:
 /*
- * r0:	stored ctr
+ * r0:	scratch
  * r1:	linux style pte ( later becomes ppc hardware pte )
  * r2:	ptr to linux-style pte
  * r3:	scratch
  */
-	mfctr	r0
 	/* Get PTE (linux-style) and check access */
 	mfspr	r3,SPRN_DMISS
 	lis	r1,PAGE_OFFSET@h		/* check if kernel address */
 	cmplw	0,r1,r3
-	mfspr	r2,SPRN_SPRG3
+	mfspr	r2,SPRN_SPRG_THREAD
 	li	r1,_PAGE_USER|_PAGE_PRESENT /* low addresses tested as user */
 	lwz	r2,PGDIR(r2)
 	bge-	112f
@@ -562,35 +573,48 @@ DataLoadTLBMiss:
 	rlwinm.	r2,r2,0,0,19		/* extract address of pte page */
 	beq-	DataAddressInvalid	/* return if no mapping */
 	rlwimi	r2,r3,22,20,29		/* insert next 10 bits of address */
-	lwz	r3,0(r2)		/* get linux-style pte */
-	andc.	r1,r1,r3		/* check access & ~permission */
+	lwz	r0,0(r2)		/* get linux-style pte */
+	andc.	r1,r1,r0		/* check access & ~permission */
 	bne-	DataAddressInvalid	/* return if access not permitted */
-	ori	r3,r3,_PAGE_ACCESSED	/* set _PAGE_ACCESSED in pte */
+	ori	r0,r0,_PAGE_ACCESSED	/* set _PAGE_ACCESSED in pte */
 	/*
 	 * NOTE! We are assuming this is not an SMP system, otherwise
 	 * we would need to update the pte atomically with lwarx/stwcx.
 	 */
-	stw	r3,0(r2)		/* update PTE (accessed bit) */
+	stw	r0,0(r2)		/* update PTE (accessed bit) */
 	/* Convert linux-style PTE to low word of PPC-style PTE */
-	rlwinm	r1,r3,32-10,31,31	/* _PAGE_RW -> PP lsb */
-	rlwinm	r2,r3,32-7,31,31	/* _PAGE_DIRTY -> PP lsb */
+	rlwinm	r1,r0,32-10,31,31	/* _PAGE_RW -> PP lsb */
+	rlwinm	r2,r0,32-7,31,31	/* _PAGE_DIRTY -> PP lsb */
 	and	r1,r1,r2		/* writable if _RW and _DIRTY */
-	rlwimi	r3,r3,32-1,30,30	/* _PAGE_USER -> PP msb */
-	rlwimi	r3,r3,32-1,31,31	/* _PAGE_USER -> PP lsb */
-	ori	r1,r1,0xe14		/* clear out reserved bits and M */
-	andc	r1,r3,r1		/* PP = user? (rw&dirty? 2: 3): 0 */
+	rlwimi	r0,r0,32-1,30,30	/* _PAGE_USER -> PP msb */
+	rlwimi	r0,r0,32-1,31,31	/* _PAGE_USER -> PP lsb */
+	ori	r1,r1,0xe04		/* clear out reserved bits */
+	andc	r1,r0,r1		/* PP = user? (rw&dirty? 2: 3): 0 */
+BEGIN_FTR_SECTION
+	rlwinm	r1,r1,0,~_PAGE_COHERENT	/* clear M (coherence not required) */
+END_FTR_SECTION_IFCLR(CPU_FTR_NEED_COHERENT)
 	mtspr	SPRN_RPA,r1
-	mfspr	r3,SPRN_DMISS
+	mfspr	r2,SPRN_SRR1		/* Need to restore CR0 */
+	mtcrf	0x80,r2
+BEGIN_MMU_FTR_SECTION
+	li	r0,1
+	mfspr	r1,SPRN_SPRG_603_LRU
+	rlwinm	r2,r3,20,27,31		/* Get Address bits 15:19 */
+	slw	r0,r0,r2
+	xor	r1,r0,r1
+	srw	r0,r1,r2
+	mtspr   SPRN_SPRG_603_LRU,r1
+	mfspr	r2,SPRN_SRR1
+	rlwimi	r2,r0,31-14,14,14
+	mtspr   SPRN_SRR1,r2
+END_MMU_FTR_SECTION_IFSET(MMU_FTR_NEED_DTLB_SW_LRU)
 	tlbld	r3
-	mfspr	r3,SPRN_SRR1		/* Need to restore CR0 */
-	mtcrf	0x80,r3
 	rfi
 DataAddressInvalid:
 	mfspr	r3,SPRN_SRR1
 	rlwinm	r1,r3,9,6,6	/* Get load/store bit */
 	addis	r1,r1,0x2000
 	mtspr	SPRN_DSISR,r1
-	mtctr	r0		/* Restore CTR */
 	andi.	r2,r3,0xFFFF	/* Clear upper bits of SRR1 */
 	mtspr	SPRN_SRR1,r2
 	mfspr	r1,SPRN_DMISS	/* Get failing address */
@@ -610,17 +634,16 @@ DataAddressInvalid:
 	. = 0x1200
 DataStoreTLBMiss:
 /*
- * r0:	stored ctr
+ * r0:	scratch
  * r1:	linux style pte ( later becomes ppc hardware pte )
  * r2:	ptr to linux-style pte
  * r3:	scratch
  */
-	mfctr	r0
 	/* Get PTE (linux-style) and check access */
 	mfspr	r3,SPRN_DMISS
 	lis	r1,PAGE_OFFSET@h		/* check if kernel address */
 	cmplw	0,r1,r3
-	mfspr	r2,SPRN_SPRG3
+	mfspr	r2,SPRN_SPRG_THREAD
 	li	r1,_PAGE_RW|_PAGE_USER|_PAGE_PRESENT /* access flags */
 	lwz	r2,PGDIR(r2)
 	bge-	112f
@@ -634,24 +657,38 @@ DataStoreTLBMiss:
 	rlwinm.	r2,r2,0,0,19		/* extract address of pte page */
 	beq-	DataAddressInvalid	/* return if no mapping */
 	rlwimi	r2,r3,22,20,29		/* insert next 10 bits of address */
-	lwz	r3,0(r2)		/* get linux-style pte */
-	andc.	r1,r1,r3		/* check access & ~permission */
+	lwz	r0,0(r2)		/* get linux-style pte */
+	andc.	r1,r1,r0		/* check access & ~permission */
 	bne-	DataAddressInvalid	/* return if access not permitted */
-	ori	r3,r3,_PAGE_ACCESSED|_PAGE_DIRTY
+	ori	r0,r0,_PAGE_ACCESSED|_PAGE_DIRTY
 	/*
 	 * NOTE! We are assuming this is not an SMP system, otherwise
 	 * we would need to update the pte atomically with lwarx/stwcx.
 	 */
-	stw	r3,0(r2)		/* update PTE (accessed/dirty bits) */
+	stw	r0,0(r2)		/* update PTE (accessed/dirty bits) */
 	/* Convert linux-style PTE to low word of PPC-style PTE */
-	rlwimi	r3,r3,32-1,30,30	/* _PAGE_USER -> PP msb */
-	li	r1,0xe15		/* clear out reserved bits and M */
-	andc	r1,r3,r1		/* PP = user? 2: 0 */
+	rlwimi	r0,r0,32-1,30,30	/* _PAGE_USER -> PP msb */
+	li	r1,0xe05		/* clear out reserved bits & PP lsb */
+	andc	r1,r0,r1		/* PP = user? 2: 0 */
+BEGIN_FTR_SECTION
+	rlwinm	r1,r1,0,~_PAGE_COHERENT	/* clear M (coherence not required) */
+END_FTR_SECTION_IFCLR(CPU_FTR_NEED_COHERENT)
 	mtspr	SPRN_RPA,r1
-	mfspr	r3,SPRN_DMISS
+	mfspr	r2,SPRN_SRR1		/* Need to restore CR0 */
+	mtcrf	0x80,r2
+BEGIN_MMU_FTR_SECTION
+	li	r0,1
+	mfspr	r1,SPRN_SPRG_603_LRU
+	rlwinm	r2,r3,20,27,31		/* Get Address bits 15:19 */
+	slw	r0,r0,r2
+	xor	r1,r0,r1
+	srw	r0,r1,r2
+	mtspr   SPRN_SPRG_603_LRU,r1
+	mfspr	r2,SPRN_SRR1
+	rlwimi	r2,r0,31-14,14,14
+	mtspr   SPRN_SRR1,r2
+END_MMU_FTR_SECTION_IFSET(MMU_FTR_NEED_DTLB_SW_LRU)
 	tlbld	r3
-	mfspr	r3,SPRN_SRR1		/* Need to restore CR0 */
-	mtcrf	0x80,r3
 	rfi
 
 #ifndef CONFIG_ALTIVEC
@@ -696,9 +733,11 @@ DataStoreTLBMiss:
 AltiVecUnavailable:
 	EXCEPTION_PROLOG
 #ifdef CONFIG_ALTIVEC
-	bne	load_up_altivec		/* if from user, just load it up */
+	beq	1f
+	bl	load_up_altivec		/* if from user, just load it up */
+	b	fast_exception_return
 #endif /* CONFIG_ALTIVEC */
-	addi	r3,r1,STACK_FRAME_OVERHEAD
+1:	addi	r3,r1,STACK_FRAME_OVERHEAD
 	EXC_XFER_EE_LITE(0xf20, altivec_unavailable_exception)
 
 PerformanceMonitor:
@@ -706,111 +745,16 @@ PerformanceMonitor:
 	addi	r3,r1,STACK_FRAME_OVERHEAD
 	EXC_XFER_STD(0xf00, performance_monitor_exception)
 
-#ifdef CONFIG_ALTIVEC
-/* Note that the AltiVec support is closely modeled after the FP
- * support.  Changes to one are likely to be applicable to the
- * other!  */
-load_up_altivec:
-/*
- * Disable AltiVec for the task which had AltiVec previously,
- * and save its AltiVec registers in its thread_struct.
- * Enables AltiVec for use in the kernel on return.
- * On SMP we know the AltiVec units are free, since we give it up every
- * switch.  -- Kumar
- */
-	mfmsr	r5
-	oris	r5,r5,MSR_VEC@h
-	MTMSRD(r5)			/* enable use of AltiVec now */
-	isync
-/*
- * For SMP, we don't do lazy AltiVec switching because it just gets too
- * horrendously complex, especially when a task switches from one CPU
- * to another.  Instead we call giveup_altivec in switch_to.
- */
-#ifndef CONFIG_SMP
-	tophys(r6,0)
-	addis	r3,r6,last_task_used_altivec@ha
-	lwz	r4,last_task_used_altivec@l(r3)
-	cmpwi	0,r4,0
-	beq	1f
-	add	r4,r4,r6
-	addi	r4,r4,THREAD	/* want THREAD of last_task_used_altivec */
-	SAVE_32VRS(0,r10,r4)
-	mfvscr	vr0
-	li	r10,THREAD_VSCR
-	stvx	vr0,r10,r4
-	lwz	r5,PT_REGS(r4)
-	add	r5,r5,r6
-	lwz	r4,_MSR-STACK_FRAME_OVERHEAD(r5)
-	lis	r10,MSR_VEC@h
-	andc	r4,r4,r10	/* disable altivec for previous task */
-	stw	r4,_MSR-STACK_FRAME_OVERHEAD(r5)
-1:
-#endif /* CONFIG_SMP */
-	/* enable use of AltiVec after return */
-	oris	r9,r9,MSR_VEC@h
-	mfspr	r5,SPRN_SPRG3		/* current task's THREAD (phys) */
-	li	r4,1
-	li	r10,THREAD_VSCR
-	stw	r4,THREAD_USED_VR(r5)
-	lvx	vr0,r10,r5
-	mtvscr	vr0
-	REST_32VRS(0,r10,r5)
-#ifndef CONFIG_SMP
-	subi	r4,r5,THREAD
-	sub	r4,r4,r6
-	stw	r4,last_task_used_altivec@l(r3)
-#endif /* CONFIG_SMP */
-	/* restore registers and return */
-	/* we haven't used ctr or xer or lr */
-	b	fast_exception_return
-
-/*
- * giveup_altivec(tsk)
- * Disable AltiVec for the task given as the argument,
- * and save the AltiVec registers in its thread_struct.
- * Enables AltiVec for use in the kernel on return.
- */
-
-	.globl	giveup_altivec
-giveup_altivec:
-	mfmsr	r5
-	oris	r5,r5,MSR_VEC@h
-	SYNC
-	MTMSRD(r5)			/* enable use of AltiVec now */
-	isync
-	cmpwi	0,r3,0
-	beqlr-				/* if no previous owner, done */
-	addi	r3,r3,THREAD		/* want THREAD of task */
-	lwz	r5,PT_REGS(r3)
-	cmpwi	0,r5,0
-	SAVE_32VRS(0, r4, r3)
-	mfvscr	vr0
-	li	r4,THREAD_VSCR
-	stvx	vr0,r4,r3
-	beq	1f
-	lwz	r4,_MSR-STACK_FRAME_OVERHEAD(r5)
-	lis	r3,MSR_VEC@h
-	andc	r4,r4,r3		/* disable AltiVec for previous task */
-	stw	r4,_MSR-STACK_FRAME_OVERHEAD(r5)
-1:
-#ifndef CONFIG_SMP
-	li	r5,0
-	lis	r4,last_task_used_altivec@ha
-	stw	r5,last_task_used_altivec@l(r4)
-#endif /* CONFIG_SMP */
-	blr
-#endif /* CONFIG_ALTIVEC */
 
 /*
  * This code is jumped to from the startup code to copy
- * the kernel image to physical address 0.
+ * the kernel image to physical address PHYSICAL_START.
  */
 relocate_kernel:
 	addis	r9,r26,klimit@ha	/* fetch klimit */
 	lwz	r25,klimit@l(r9)
 	addis	r25,r25,-KERNELBASE@h
-	li	r3,0			/* Destination base address */
+	lis	r3,PHYSICAL_START@h	/* Destination base address */
 	li	r6,0			/* Destination offset */
 	li	r5,0x4000		/* # bytes of memory to copy */
 	bl	copy_and_flush		/* copy the first 0x4000 bytes */
@@ -920,9 +864,9 @@ __secondary_start:
 	tophys(r4,r2)
 	addi	r4,r4,THREAD	/* phys address of our thread_struct */
 	CLR_TOP32(r4)
-	mtspr	SPRN_SPRG3,r4
+	mtspr	SPRN_SPRG_THREAD,r4
 	li	r3,0
-	mtspr	SPRN_SPRG2,r3	/* 0 => not in RTAS */
+	mtspr	SPRN_SPRG_RTAS,r3	/* 0 => not in RTAS */
 
 	/* enable MMU and jump to start_secondary */
 	li	r4,MSR_KERNEL
@@ -983,12 +927,12 @@ load_up_mmu:
 	LOAD_BAT(1,r3,r4,r5)
 	LOAD_BAT(2,r3,r4,r5)
 	LOAD_BAT(3,r3,r4,r5)
-BEGIN_FTR_SECTION
+BEGIN_MMU_FTR_SECTION
 	LOAD_BAT(4,r3,r4,r5)
 	LOAD_BAT(5,r3,r4,r5)
 	LOAD_BAT(6,r3,r4,r5)
 	LOAD_BAT(7,r3,r4,r5)
-END_FTR_SECTION_IFSET(CPU_FTR_HAS_HIGH_BATS)
+END_MMU_FTR_SECTION_IFSET(MMU_FTR_USE_HIGH_BATS)
 	blr
 
 /*
@@ -1003,9 +947,9 @@ start_here:
 	tophys(r4,r2)
 	addi	r4,r4,THREAD	/* init task's THREAD */
 	CLR_TOP32(r4)
-	mtspr	SPRN_SPRG3,r4
+	mtspr	SPRN_SPRG_THREAD,r4
 	li	r3,0
-	mtspr	SPRN_SPRG2,r3	/* 0 => not in RTAS */
+	mtspr	SPRN_SPRG_RTAS,r3	/* 0 => not in RTAS */
 
 	/* stack */
 	lis	r1,init_thread_union@ha
@@ -1064,9 +1008,14 @@ start_here:
 	RFI
 
 /*
+ * void switch_mmu_context(struct mm_struct *prev, struct mm_struct *next);
+ *
  * Set up the segment registers for a new context.
  */
-_ENTRY(set_context)
+_ENTRY(switch_mmu_context)
+	lwz	r3,MMCONTEXTID(r4)
+	cmpwi	cr0,r3,0
+	blt-	4f
 	mulli	r3,r3,897	/* multiply context by skew factor */
 	rlwinm	r3,r3,4,8,27	/* VSID = (context & 0xfffff) << 4 */
 	addis	r3,r3,0x6000	/* Set Ks, Ku bits */
@@ -1077,6 +1026,7 @@ _ENTRY(set_context)
 	/* Context switch the PTE pointer for the Abatron BDI2000.
 	 * The PGDIR is passed as second argument.
 	 */
+	lwz	r4,MM_PGD(r4)
 	lis	r5, KERNELBASE@h
 	lwz	r5, 0xf0(r5)
 	stw	r4, 0x4(r5)
@@ -1091,6 +1041,9 @@ _ENTRY(set_context)
 	bdnz	3b
 	sync
 	isync
+	blr
+4:	trap
+	EMIT_BUG_ENTRY 4b,__FILE__,__LINE__,0
 	blr
 
 /*
@@ -1125,7 +1078,7 @@ clear_bats:
 	mtspr	SPRN_IBAT2L,r10
 	mtspr	SPRN_IBAT3U,r10
 	mtspr	SPRN_IBAT3L,r10
-BEGIN_FTR_SECTION
+BEGIN_MMU_FTR_SECTION
 	/* Here's a tweak: at this point, CPU setup have
 	 * not been called yet, so HIGH_BAT_EN may not be
 	 * set in HID0 for the 745x processors. However, it
@@ -1148,7 +1101,7 @@ BEGIN_FTR_SECTION
 	mtspr	SPRN_IBAT6L,r10
 	mtspr	SPRN_IBAT7U,r10
 	mtspr	SPRN_IBAT7L,r10
-END_FTR_SECTION_IFSET(CPU_FTR_HAS_HIGH_BATS)
+END_MMU_FTR_SECTION_IFSET(MMU_FTR_USE_HIGH_BATS)
 	blr
 
 flush_tlbs:
@@ -1171,24 +1124,27 @@ mmu_off:
 	RFI
 
 /*
- * Use the first pair of BAT registers to map the 1st 16MB
- * of RAM to KERNELBASE.  From this point on we can't safely
- * call OF any more.
+ * On 601, we use 3 BATs to map up to 24M of RAM at _PAGE_OFFSET
+ * (we keep one for debugging) and on others, we use one 256M BAT.
  */
 initial_bats:
-	lis	r11,KERNELBASE@h
+	lis	r11,PAGE_OFFSET@h
 	mfspr	r9,SPRN_PVR
 	rlwinm	r9,r9,16,16,31		/* r9 = 1 for 601, 4 for 604 */
 	cmpwi	0,r9,1
 	bne	4f
 	ori	r11,r11,4		/* set up BAT registers for 601 */
 	li	r8,0x7f			/* valid, block length = 8MB */
-	oris	r9,r11,0x800000@h	/* set up BAT reg for 2nd 8M */
-	oris	r10,r8,0x800000@h	/* set up BAT reg for 2nd 8M */
 	mtspr	SPRN_IBAT0U,r11		/* N.B. 601 has valid bit in */
 	mtspr	SPRN_IBAT0L,r8		/* lower BAT register */
-	mtspr	SPRN_IBAT1U,r9
-	mtspr	SPRN_IBAT1L,r10
+	addis	r11,r11,0x800000@h
+	addis	r8,r8,0x800000@h
+	mtspr	SPRN_IBAT1U,r11
+	mtspr	SPRN_IBAT1L,r8
+	addis	r11,r11,0x800000@h
+	addis	r8,r8,0x800000@h
+	mtspr	SPRN_IBAT2U,r11
+	mtspr	SPRN_IBAT2L,r8
 	isync
 	blr
 

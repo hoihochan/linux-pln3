@@ -2,7 +2,7 @@
 ** PARISC 1.1 Dynamic DMA mapping support.
 ** This implementation is for PA-RISC platforms that do not support
 ** I/O TLBs (aka DMA address translation hardware).
-** See Documentation/DMA-mapping.txt for interface definitions.
+** See Documentation/PCI/PCI-DMA-mapping.txt for interface definitions.
 **
 **      (c) Copyright 1999,2000 Hewlett-Packard Company
 **      (c) Copyright 2000 Grant Grundler
@@ -171,8 +171,8 @@ static inline void unmap_uncached_pte(pmd_t * pmd, unsigned long vaddr,
 		end = PMD_SIZE;
 	do {
 		unsigned long flags;
-
 		pte_t page = *pte;
+
 		pte_clear(&init_mm, vaddr, pte);
 		purge_tlb_start(flags);
 		pdtlb_kernel(orig_vaddr);
@@ -451,10 +451,7 @@ static void pa11_dma_free_consistent (struct device *dev, size_t size, void *vad
 
 static dma_addr_t pa11_dma_map_single(struct device *dev, void *addr, size_t size, enum dma_data_direction direction)
 {
-	if (direction == DMA_NONE) {
-		printk(KERN_ERR "pa11_dma_map_single(PCI_DMA_NONE) called by %p\n", __builtin_return_address(0));
-		BUG();
-	}
+	BUG_ON(direction == DMA_NONE);
 
 	flush_kernel_dcache_range((unsigned long) addr, size);
 	return virt_to_phys(addr);
@@ -462,10 +459,7 @@ static dma_addr_t pa11_dma_map_single(struct device *dev, void *addr, size_t siz
 
 static void pa11_dma_unmap_single(struct device *dev, dma_addr_t dma_handle, size_t size, enum dma_data_direction direction)
 {
-	if (direction == DMA_NONE) {
-		printk(KERN_ERR "pa11_dma_unmap_single(PCI_DMA_NONE) called by %p\n", __builtin_return_address(0));
-		BUG();
-	}
+	BUG_ON(direction == DMA_NONE);
 
 	if (direction == DMA_TO_DEVICE)
 	    return;
@@ -484,8 +478,7 @@ static int pa11_dma_map_sg(struct device *dev, struct scatterlist *sglist, int n
 {
 	int i;
 
-	if (direction == DMA_NONE)
-	    BUG();
+	BUG_ON(direction == DMA_NONE);
 
 	for (i = 0; i < nents; i++, sglist++ ) {
 		unsigned long vaddr = sg_virt_addr(sglist);
@@ -500,8 +493,7 @@ static void pa11_dma_unmap_sg(struct device *dev, struct scatterlist *sglist, in
 {
 	int i;
 
-	if (direction == DMA_NONE)
-	    BUG();
+	BUG_ON(direction == DMA_NONE);
 
 	if (direction == DMA_TO_DEVICE)
 	    return;
@@ -515,16 +507,14 @@ static void pa11_dma_unmap_sg(struct device *dev, struct scatterlist *sglist, in
 
 static void pa11_dma_sync_single_for_cpu(struct device *dev, dma_addr_t dma_handle, unsigned long offset, size_t size, enum dma_data_direction direction)
 {
-	if (direction == DMA_NONE)
-	    BUG();
+	BUG_ON(direction == DMA_NONE);
 
 	flush_kernel_dcache_range((unsigned long) phys_to_virt(dma_handle) + offset, size);
 }
 
 static void pa11_dma_sync_single_for_device(struct device *dev, dma_addr_t dma_handle, unsigned long offset, size_t size, enum dma_data_direction direction)
 {
-	if (direction == DMA_NONE)
-	    BUG();
+	BUG_ON(direction == DMA_NONE);
 
 	flush_kernel_dcache_range((unsigned long) phys_to_virt(dma_handle) + offset, size);
 }

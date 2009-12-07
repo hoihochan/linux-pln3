@@ -236,7 +236,7 @@ struct strip {
 	unsigned long tx_errors;	/* Planned stuff                */
 	unsigned long rx_dropped;	/* No memory for skb            */
 	unsigned long tx_dropped;	/* When MTU change              */
-	unsigned long rx_over_errors;	/* Frame bigger then STRIP buf. */
+	unsigned long rx_over_errors;	/* Frame bigger than STRIP buf. */
 
 	unsigned long pps_timer;	/* Timer to determine pps       */
 	unsigned long rx_pps_count;	/* Counter to determine pps     */
@@ -856,7 +856,6 @@ static int strip_change_mtu(struct net_device *dev, int new_mtu)
 	unsigned char *orbuff = strip_info->rx_buff;
 	unsigned char *osbuff = strip_info->sx_buff;
 	unsigned char *otbuff = strip_info->tx_buff;
-	unsigned long flags;
 
 	if (new_mtu > MAX_SEND_MTU) {
 		printk(KERN_ERR
@@ -865,11 +864,11 @@ static int strip_change_mtu(struct net_device *dev, int new_mtu)
 		return -EINVAL;
 	}
 
-	spin_lock_irqsave(&strip_lock, flags);
+	spin_lock_bh(&strip_lock);
 	if (!allocate_buffers(strip_info, new_mtu)) {
 		printk(KERN_ERR "%s: unable to grow strip buffers, MTU change cancelled.\n",
 		       strip_info->dev->name);
-		spin_unlock_irqrestore(&strip_lock, flags);
+		spin_unlock_bh(&strip_lock);
 		return -ENOMEM;
 	}
 
@@ -893,7 +892,7 @@ static int strip_change_mtu(struct net_device *dev, int new_mtu)
 		}
 	}
 	strip_info->tx_head = strip_info->tx_buff;
-	spin_unlock_irqrestore(&strip_lock, flags);
+	spin_unlock_bh(&strip_lock);
 
 	printk(KERN_NOTICE "%s: strip MTU changed fom %d to %d.\n",
 	       strip_info->dev->name, old_mtu, strip_info->mtu);
@@ -951,6 +950,7 @@ static struct strip *strip_get_idx(loff_t pos)
 }
 
 static void *strip_seq_start(struct seq_file *seq, loff_t *pos)
+	__acquires(RCU)
 {
 	rcu_read_lock();
 	return *pos ? strip_get_idx(*pos - 1) : SEQ_START_TOKEN;
@@ -974,6 +974,7 @@ static void *strip_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 }
 
 static void strip_seq_stop(struct seq_file *seq, void *v)
+	__releases(RCU)
 {
 	rcu_read_unlock();
 }
@@ -982,13 +983,10 @@ static void strip_seq_neighbours(struct seq_file *seq,
 			   const MetricomNodeTable * table,
 			   const char *title)
 {
-	unsigned long flags;
+	/* We wrap this in a do/while loop, so if the table changes */
+	/* while we're reading it, we just go around and try again. */
 	struct timeval t;
 
-	/*
-	 * We wrap this in a do/while loop, so if the table changes
-	 * while we're reading it, we just go around and try again.
-	 */
 	do {
 		int i;
 		t = table->timestamp;
@@ -997,9 +995,9 @@ static void strip_seq_neighbours(struct seq_file *seq,
 		for (i = 0; i < table->num_nodes; i++) {
 			MetricomNode node;
 
-			spin_lock_irqsave(&strip_lock, flags);
+			spin_lock_bh(&strip_lock);
 			node = table->node[i];
-			spin_unlock_irqrestore(&strip_lock, flags);
+			spin_unlock_bh(&strip_lock);
 			seq_printf(seq, "  %s\n", node.c);
 		}
 	} while (table->timestamp.tv_sec != t.tv_sec
@@ -1129,7 +1127,7 @@ static int strip_seq_show(struct seq_file *seq, void *v)
 }
 
 
-static struct seq_operations strip_seq_ops = {
+static const struct seq_operations strip_seq_ops = {
 	.start = strip_seq_start,
 	.next  = strip_seq_next,
 	.stop  = strip_seq_stop,
@@ -1238,7 +1236,7 @@ static void ResetRadio(struct strip *strip_info)
 
 static void strip_write_some_more(struct tty_struct *tty)
 {
-	struct strip *strip_info = (struct strip *) tty->disc_data;
+	struct strip *strip_info = tty->disc_data;
 
 	/* First make sure we're connected. */
 	if (!strip_info || strip_info->magic != STRIP_MAGIC ||
@@ -1256,7 +1254,7 @@ static void strip_write_some_more(struct tty_struct *tty)
 #endif
 	} else {		/* Else start transmission of another packet */
 
-		tty->flags &= ~(1 << TTY_DO_WRITE_WAKEUP);
+		clear_bit(TTY_DO_WRITE_WAKEUP, &tty->flags);
 		strip_unlock(strip_info);
 	}
 }
@@ -1459,8 +1457,7 @@ static void strip_send(struct strip *strip_info, struct sk_buff *skb)
 	 */
 	strip_info->tx_head = strip_info->tx_buff;
 	strip_info->tx_left = ptr - strip_info->tx_buff;
-	strip_info->tty->flags |= (1 << TTY_DO_WRITE_WAKEUP);
-
+	set_bit(TTY_DO_WRITE_WAKEUP, &strip_info->tty->flags);
 	/*
 	 * 4. Debugging check to make sure we're not overflowing the buffer.
 	 */
@@ -1536,15 +1533,14 @@ static void strip_send(struct strip *strip_info, struct sk_buff *skb)
 }
 
 /* Encapsulate a datagram and kick it into a TTY queue. */
-static int strip_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t strip_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct strip *strip_info = netdev_priv(dev);
-	unsigned long flags;
 
 	if (!netif_running(dev)) {
 		printk(KERN_ERR "%s: xmit call when iface is down\n",
 		       dev->name);
-		return (1);
+		return NETDEV_TX_BUSY;
 	}
 
 	netif_stop_queue(dev);
@@ -1554,9 +1550,12 @@ static int strip_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	if (time_after(jiffies, strip_info->pps_timer + HZ)) {
 		unsigned long t = jiffies - strip_info->pps_timer;
-		unsigned long rx_pps_count = (strip_info->rx_pps_count * HZ * 8 + t / 2) / t;
-		unsigned long tx_pps_count = (strip_info->tx_pps_count * HZ * 8 + t / 2) / t;
-		unsigned long sx_pps_count = (strip_info->sx_pps_count * HZ * 8 + t / 2) / t;
+		unsigned long rx_pps_count =
+			DIV_ROUND_CLOSEST(strip_info->rx_pps_count*HZ*8, t);
+		unsigned long tx_pps_count =
+			DIV_ROUND_CLOSEST(strip_info->tx_pps_count*HZ*8, t);
+		unsigned long sx_pps_count =
+			DIV_ROUND_CLOSEST(strip_info->sx_pps_count*HZ*8, t);
 
 		strip_info->pps_timer = jiffies;
 		strip_info->rx_pps_count = 0;
@@ -1578,15 +1577,15 @@ static int strip_xmit(struct sk_buff *skb, struct net_device *dev)
 			       strip_info->dev->name, sx_pps_count / 8);
 	}
 
-	spin_lock_irqsave(&strip_lock, flags);
+	spin_lock_bh(&strip_lock);
 
 	strip_send(strip_info, skb);
 
-	spin_unlock_irqrestore(&strip_lock, flags);
+	spin_unlock_bh(&strip_lock);
 
 	if (skb)
 		dev_kfree_skb(skb);
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /*
@@ -2002,7 +2001,6 @@ static void deliver_packet(struct strip *strip_info, STRIP_Header * header,
 #ifdef EXT_COUNTERS
 		strip_info->rx_bytes += packetlen;
 #endif
-		skb->dev->last_rx = jiffies;
 		netif_rx(skb);
 	}
 }
@@ -2266,15 +2264,14 @@ static void process_message(struct strip *strip_info)
 static void strip_receive_buf(struct tty_struct *tty, const unsigned char *cp,
 		  char *fp, int count)
 {
-	struct strip *strip_info = (struct strip *) tty->disc_data;
+	struct strip *strip_info = tty->disc_data;
 	const unsigned char *end = cp + count;
-	unsigned long flags;
 
 	if (!strip_info || strip_info->magic != STRIP_MAGIC
 	    || !netif_running(strip_info->dev))
 		return;
 
-	spin_lock_irqsave(&strip_lock, flags);
+	spin_lock_bh(&strip_lock);
 #if 0
 	{
 		struct timeval tv;
@@ -2341,7 +2338,7 @@ static void strip_receive_buf(struct tty_struct *tty, const unsigned char *cp,
 		}
 		cp++;
 	}
-	spin_unlock_irqrestore(&strip_lock, flags);
+	spin_unlock_bh(&strip_lock);
 }
 
 
@@ -2461,8 +2458,7 @@ static int strip_close_low(struct net_device *dev)
 
 	if (strip_info->tty == NULL)
 		return -EBUSY;
-	strip_info->tty->flags &= ~(1 << TTY_DO_WRITE_WAKEUP);
-
+	clear_bit(TTY_DO_WRITE_WAKEUP, &strip_info->tty->flags);
 	netif_stop_queue(dev);
 
 	/*
@@ -2484,6 +2480,16 @@ static const struct header_ops strip_header_ops = {
 	.rebuild = strip_rebuild_header,
 };
 
+
+static const struct net_device_ops strip_netdev_ops = {
+	.ndo_open 	= strip_open_low,
+	.ndo_stop 	= strip_close_low,
+	.ndo_start_xmit = strip_xmit,
+	.ndo_set_mac_address = strip_set_mac_address,
+	.ndo_get_stats	= strip_get_stats,
+	.ndo_change_mtu = strip_change_mtu,
+};
+
 /*
  * This routine is called by DDI when the
  * (dynamically assigned) device is registered
@@ -2496,7 +2502,6 @@ static void strip_dev_setup(struct net_device *dev)
 	 */
 
 	dev->trans_start = 0;
-	dev->last_rx = 0;
 	dev->tx_queue_len = 30;	/* Drop after 30 frames queued */
 
 	dev->flags = 0;
@@ -2504,25 +2509,15 @@ static void strip_dev_setup(struct net_device *dev)
 	dev->type = ARPHRD_METRICOM;	/* dtang */
 	dev->hard_header_len = sizeof(STRIP_Header);
 	/*
-	 *  dev->priv             Already holds a pointer to our struct strip
+	 *  netdev_priv(dev) Already holds a pointer to our struct strip
 	 */
 
-	*(MetricomAddress *) & dev->broadcast = broadcast_address;
+	*(MetricomAddress *)dev->broadcast = broadcast_address;
 	dev->dev_addr[0] = 0;
 	dev->addr_len = sizeof(MetricomAddress);
 
-	/*
-	 * Pointers to interface service routines.
-	 */
-
-	dev->open = strip_open_low;
-	dev->stop = strip_close_low;
-	dev->hard_start_xmit = strip_xmit;
-	dev->header_ops = &strip_header_ops;
-
-	dev->set_mac_address = strip_set_mac_address;
-	dev->get_stats = strip_get_stats;
-	dev->change_mtu = strip_change_mtu;
+	dev->header_ops = &strip_header_ops,
+	dev->netdev_ops = &strip_netdev_ops;
 }
 
 /*
@@ -2531,11 +2526,9 @@ static void strip_dev_setup(struct net_device *dev)
 
 static void strip_free(struct strip *strip_info)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&strip_lock, flags);
+	spin_lock_bh(&strip_lock);
 	list_del_rcu(&strip_info->list);
-	spin_unlock_irqrestore(&strip_lock, flags);
+	spin_unlock_bh(&strip_lock);
 
 	strip_info->magic = 0;
 
@@ -2549,7 +2542,6 @@ static void strip_free(struct strip *strip_info)
 static struct strip *strip_alloc(void)
 {
 	struct list_head *n;
-	unsigned long flags;
 	struct net_device *dev;
 	struct strip *strip_info;
 
@@ -2573,7 +2565,7 @@ static struct strip *strip_alloc(void)
 	strip_info->idle_timer.function = strip_IdleTask;
 
 
-	spin_lock_irqsave(&strip_lock, flags);
+	spin_lock_bh(&strip_lock);
  rescan:
 	/*
 	 * Search the list to find where to put our new entry
@@ -2592,7 +2584,7 @@ static struct strip *strip_alloc(void)
 	sprintf(dev->name, "st%ld", dev->base_addr);
 
 	list_add_tail_rcu(&strip_info->list, &strip_list);
-	spin_unlock_irqrestore(&strip_lock, flags);
+	spin_unlock_bh(&strip_lock);
 
 	return strip_info;
 }
@@ -2607,7 +2599,7 @@ static struct strip *strip_alloc(void)
 
 static int strip_open(struct tty_struct *tty)
 {
-	struct strip *strip_info = (struct strip *) tty->disc_data;
+	struct strip *strip_info = tty->disc_data;
 
 	/*
 	 * First make sure we're not already connected.
@@ -2678,7 +2670,7 @@ static int strip_open(struct tty_struct *tty)
 
 static void strip_close(struct tty_struct *tty)
 {
-	struct strip *strip_info = (struct strip *) tty->disc_data;
+	struct strip *strip_info = tty->disc_data;
 
 	/*
 	 * First make sure we're connected.
@@ -2704,7 +2696,7 @@ static void strip_close(struct tty_struct *tty)
 static int strip_ioctl(struct tty_struct *tty, struct file *file,
 		       unsigned int cmd, unsigned long arg)
 {
-	struct strip *strip_info = (struct strip *) tty->disc_data;
+	struct strip *strip_info = tty->disc_data;
 
 	/*
 	 * First make sure we're connected.

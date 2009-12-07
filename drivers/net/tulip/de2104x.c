@@ -82,6 +82,13 @@ MODULE_PARM_DESC (rx_copybreak, "de2104x Breakpoint at which Rx packets are copi
 				 NETIF_MSG_RX_ERR	| \
 				 NETIF_MSG_TX_ERR)
 
+/* Descriptor skip length in 32 bit longwords. */
+#ifndef CONFIG_DE2104X_DSL
+#define DSL			0
+#else
+#define DSL			CONFIG_DE2104X_DSL
+#endif
+
 #define DE_RX_RING_SIZE		64
 #define DE_TX_RING_SIZE		64
 #define DE_RING_BYTES		\
@@ -153,6 +160,7 @@ enum {
 	CmdReset		= (1 << 0),
 	CacheAlign16		= 0x00008000,
 	BurstLen4		= 0x00000400,
+	DescSkipLen		= (DSL << 2),
 
 	/* Rx/TxPoll bits */
 	NormalTxPoll		= (1 << 0),
@@ -246,7 +254,7 @@ static const u32 de_intr_mask =
  * Set the programmable burst length to 4 longwords for all:
  * DMA errors result without these values. Cache align 16 long.
  */
-static const u32 de_bus_mode = CacheAlign16 | BurstLen4;
+static const u32 de_bus_mode = CacheAlign16 | BurstLen4 | DescSkipLen;
 
 struct de_srom_media_block {
 	u8			opts;
@@ -266,6 +274,9 @@ struct de_desc {
 	__le32			opts2;
 	__le32			addr1;
 	__le32			addr2;
+#if DSL
+	__le32			skip[DSL];
+#endif
 };
 
 struct media_info {
@@ -392,7 +403,7 @@ static void de_rx (struct de_private *de)
 	unsigned drop = 0;
 	int rc;
 
-	while (rx_work--) {
+	while (--rx_work) {
 		u32 status, len;
 		dma_addr_t mapping;
 		struct sk_buff *skb, *copy_skb;
@@ -459,19 +470,19 @@ static void de_rx (struct de_private *de)
 
 		de->net_stats.rx_packets++;
 		de->net_stats.rx_bytes += skb->len;
-		de->dev->last_rx = jiffies;
 		rc = netif_rx (skb);
 		if (rc == NET_RX_DROP)
 			drop = 1;
 
 rx_next:
-		de->rx_ring[rx_tail].opts1 = cpu_to_le32(DescOwn);
 		if (rx_tail == (DE_RX_RING_SIZE - 1))
 			de->rx_ring[rx_tail].opts2 =
 				cpu_to_le32(RingEnd | de->rx_buf_sz);
 		else
 			de->rx_ring[rx_tail].opts2 = cpu_to_le32(de->rx_buf_sz);
 		de->rx_ring[rx_tail].addr1 = cpu_to_le32(mapping);
+		wmb();
+		de->rx_ring[rx_tail].opts1 = cpu_to_le32(DescOwn);
 		rx_tail = NEXT_RX(rx_tail);
 	}
 
@@ -484,7 +495,7 @@ rx_next:
 static irqreturn_t de_interrupt (int irq, void *dev_instance)
 {
 	struct net_device *dev = dev_instance;
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 	u32 status;
 
 	status = dr32(MacStatus);
@@ -588,9 +599,10 @@ next:
 		netif_wake_queue(de->dev);
 }
 
-static int de_start_xmit (struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t de_start_xmit (struct sk_buff *skb,
+					struct net_device *dev)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 	unsigned int entry, tx_free;
 	u32 mapping, len, flags = FirstFrag | LastFrag;
 	struct de_desc *txd;
@@ -601,7 +613,7 @@ static int de_start_xmit (struct sk_buff *skb, struct net_device *dev)
 	if (tx_free == 0) {
 		netif_stop_queue(dev);
 		spin_unlock_irq(&de->lock);
-		return 1;
+		return NETDEV_TX_BUSY;
 	}
 	tx_free--;
 
@@ -640,7 +652,7 @@ static int de_start_xmit (struct sk_buff *skb, struct net_device *dev)
 	dw32(TxPoll, NormalTxPoll);
 	dev->trans_start = jiffies;
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /* Set or clear the multicast filter for this adaptor.
@@ -653,7 +665,7 @@ static int de_start_xmit (struct sk_buff *skb, struct net_device *dev)
 
 static void build_setup_frame_hash(u16 *setup_frm, struct net_device *dev)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 	u16 hash_table[32];
 	struct dev_mc_list *mclist;
 	int i;
@@ -684,7 +696,7 @@ static void build_setup_frame_hash(u16 *setup_frm, struct net_device *dev)
 
 static void build_setup_frame_perfect(u16 *setup_frm, struct net_device *dev)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 	struct dev_mc_list *mclist;
 	int i;
 	u16 *eaddrs;
@@ -712,7 +724,7 @@ static void build_setup_frame_perfect(u16 *setup_frm, struct net_device *dev)
 
 static void __de_set_rx_mode (struct net_device *dev)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 	u32 macmode;
 	unsigned int entry;
 	u32 mapping;
@@ -797,7 +809,7 @@ out:
 static void de_set_rx_mode (struct net_device *dev)
 {
 	unsigned long flags;
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 
 	spin_lock_irqsave (&de->lock, flags);
 	__de_set_rx_mode(dev);
@@ -821,7 +833,7 @@ static void __de_get_stats(struct de_private *de)
 
 static struct net_device_stats *de_get_stats(struct net_device *dev)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 
 	/* The chip only need report frame silently dropped. */
 	spin_lock_irq(&de->lock);
@@ -933,9 +945,10 @@ static void de_set_media (struct de_private *de)
 		macmode &= ~FullDuplex;
 
 	if (netif_msg_link(de)) {
-		printk(KERN_INFO "%s: set link %s\n"
-		       KERN_INFO "%s:    mode 0x%x, sia 0x%x,0x%x,0x%x,0x%x\n"
-		       KERN_INFO "%s:    set mode 0x%x, set sia 0x%x,0x%x,0x%x\n",
+		printk(KERN_INFO
+		       "%s: set link %s\n"
+		       "%s:    mode 0x%x, sia 0x%x,0x%x,0x%x,0x%x\n"
+		       "%s:    set mode 0x%x, set sia 0x%x,0x%x,0x%x\n",
 		       de->dev->name, media_name[media],
 		       de->dev->name, dr32(MacMode), dr32(SIAStatus),
 		       dr32(CSR13), dr32(CSR14), dr32(CSR15),
@@ -1355,7 +1368,7 @@ static void de_free_rings (struct de_private *de)
 
 static int de_open (struct net_device *dev)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 	int rc;
 
 	if (netif_msg_ifup(de))
@@ -1400,7 +1413,7 @@ err_out_free:
 
 static int de_close (struct net_device *dev)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 	unsigned long flags;
 
 	if (netif_msg_ifdown(de))
@@ -1418,13 +1431,12 @@ static int de_close (struct net_device *dev)
 
 	de_free_rings(de);
 	de_adapter_sleep(de);
-	pci_disable_device(de->pdev);
 	return 0;
 }
 
 static void de_tx_timeout (struct net_device *dev)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 
 	printk(KERN_DEBUG "%s: NIC status %08x mode %08x sia %08x desc %u/%u/%u\n",
 	       dev->name, dr32(MacStatus), dr32(MacMode), dr32(SIAStatus),
@@ -1575,7 +1587,7 @@ static int __de_set_settings(struct de_private *de, struct ethtool_cmd *ecmd)
 
 static void de_get_drvinfo (struct net_device *dev,struct ethtool_drvinfo *info)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 
 	strcpy (info->driver, DRV_NAME);
 	strcpy (info->version, DRV_VERSION);
@@ -1590,7 +1602,7 @@ static int de_get_regs_len(struct net_device *dev)
 
 static int de_get_settings(struct net_device *dev, struct ethtool_cmd *ecmd)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 	int rc;
 
 	spin_lock_irq(&de->lock);
@@ -1602,7 +1614,7 @@ static int de_get_settings(struct net_device *dev, struct ethtool_cmd *ecmd)
 
 static int de_set_settings(struct net_device *dev, struct ethtool_cmd *ecmd)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 	int rc;
 
 	spin_lock_irq(&de->lock);
@@ -1614,14 +1626,14 @@ static int de_set_settings(struct net_device *dev, struct ethtool_cmd *ecmd)
 
 static u32 de_get_msglevel(struct net_device *dev)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 
 	return de->msg_enable;
 }
 
 static void de_set_msglevel(struct net_device *dev, u32 msglvl)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 
 	de->msg_enable = msglvl;
 }
@@ -1629,7 +1641,7 @@ static void de_set_msglevel(struct net_device *dev, u32 msglvl)
 static int de_get_eeprom(struct net_device *dev,
 			 struct ethtool_eeprom *eeprom, u8 *data)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 
 	if (!de->ee_data)
 		return -EOPNOTSUPP;
@@ -1643,7 +1655,7 @@ static int de_get_eeprom(struct net_device *dev,
 
 static int de_nway_reset(struct net_device *dev)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 	u32 status;
 
 	if (de->media_type != DE_MEDIA_TP_AUTO)
@@ -1662,7 +1674,7 @@ static int de_nway_reset(struct net_device *dev)
 static void de_get_regs(struct net_device *dev, struct ethtool_regs *regs,
 			void *data)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 
 	regs->version = (DE_REGS_VER << 2) | de->de21040;
 
@@ -1689,12 +1701,13 @@ static void __devinit de21040_get_mac_address (struct de_private *de)
 	unsigned i;
 
 	dw32 (ROMCmd, 0);	/* Reset the pointer with a dummy write. */
+	udelay(5);
 
 	for (i = 0; i < 6; i++) {
 		int value, boguscnt = 100000;
-		do
+		do {
 			value = dr32(ROMCmd);
-		while (value < 0 && --boguscnt > 0);
+		} while (value < 0 && --boguscnt > 0);
 		de->dev->dev_addr[i] = value;
 		udelay(1);
 		if (boguscnt <= 0)
@@ -1923,6 +1936,18 @@ bad_srom:
 	goto fill_defaults;
 }
 
+static const struct net_device_ops de_netdev_ops = {
+	.ndo_open		= de_open,
+	.ndo_stop		= de_close,
+	.ndo_set_multicast_list = de_set_rx_mode,
+	.ndo_start_xmit		= de_start_xmit,
+	.ndo_get_stats		= de_get_stats,
+	.ndo_tx_timeout 	= de_tx_timeout,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+};
+
 static int __devinit de_init_one (struct pci_dev *pdev,
 				  const struct pci_device_id *ent)
 {
@@ -1932,7 +1957,6 @@ static int __devinit de_init_one (struct pci_dev *pdev,
 	void __iomem *regs;
 	unsigned long pciaddr;
 	static int board_idx = -1;
-	DECLARE_MAC_BUF(mac);
 
 	board_idx++;
 
@@ -1946,17 +1970,12 @@ static int __devinit de_init_one (struct pci_dev *pdev,
 	if (!dev)
 		return -ENOMEM;
 
+	dev->netdev_ops = &de_netdev_ops;
 	SET_NETDEV_DEV(dev, &pdev->dev);
-	dev->open = de_open;
-	dev->stop = de_close;
-	dev->set_multicast_list = de_set_rx_mode;
-	dev->hard_start_xmit = de_start_xmit;
-	dev->get_stats = de_get_stats;
 	dev->ethtool_ops = &de_ethtool_ops;
-	dev->tx_timeout = de_tx_timeout;
 	dev->watchdog_timeo = TX_TIMEOUT;
 
-	de = dev->priv;
+	de = netdev_priv(dev);
 	de->de21040 = ent->driver_data == 0 ? 1 : 0;
 	de->pdev = pdev;
 	de->dev = dev;
@@ -2046,11 +2065,11 @@ static int __devinit de_init_one (struct pci_dev *pdev,
 		goto err_out_iomap;
 
 	/* print info about board and interface just registered */
-	printk (KERN_INFO "%s: %s at 0x%lx, %s, IRQ %d\n",
+	printk (KERN_INFO "%s: %s at 0x%lx, %pM, IRQ %d\n",
 		dev->name,
 		de->de21040 ? "21040" : "21041",
 		dev->base_addr,
-		print_mac(mac, dev->dev_addr),
+		dev->dev_addr,
 		dev->irq);
 
 	pci_set_drvdata(pdev, dev);
@@ -2078,7 +2097,7 @@ err_out_free:
 static void __devexit de_remove_one (struct pci_dev *pdev)
 {
 	struct net_device *dev = pci_get_drvdata(pdev);
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 
 	BUG_ON(!dev);
 	unregister_netdev(dev);
@@ -2095,7 +2114,7 @@ static void __devexit de_remove_one (struct pci_dev *pdev)
 static int de_suspend (struct pci_dev *pdev, pm_message_t state)
 {
 	struct net_device *dev = pci_get_drvdata (pdev);
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 
 	rtnl_lock();
 	if (netif_running (dev)) {
@@ -2130,7 +2149,7 @@ static int de_suspend (struct pci_dev *pdev, pm_message_t state)
 static int de_resume (struct pci_dev *pdev)
 {
 	struct net_device *dev = pci_get_drvdata (pdev);
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 	int retval = 0;
 
 	rtnl_lock();

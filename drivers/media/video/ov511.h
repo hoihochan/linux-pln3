@@ -12,7 +12,8 @@
 
 #ifdef OV511_DEBUG
 	#define PDEBUG(level, fmt, args...) \
-		if (debug >= (level)) info("[%s:%d] " fmt, \
+		if (debug >= (level))	\
+			printk(KERN_INFO KBUILD_MODNAME "[%s:%d] \n" fmt, \
 		__func__, __LINE__ , ## args)
 #else
 	#define PDEBUG(level, fmt, args...) do {} while(0)
@@ -492,6 +493,9 @@ struct usb_ov511 {
 	int norm; 		/* NTSC / PAL / SECAM */
 	int has_decoder;	/* Device has a video decoder */
 	int pal;		/* Device is designed for PAL resolution */
+
+	/* ov511 device number ID */
+	int nr;			/* Stores a device number */
 
 	/* I2C interface */
 	struct mutex i2c_lock;	  /* Protect I2C controller regs */

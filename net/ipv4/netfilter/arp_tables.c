@@ -8,7 +8,7 @@
  * Copyright (C) 2002 David S. Miller (davem@redhat.com)
  *
  */
-
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/kernel.h>
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
@@ -73,6 +73,28 @@ static inline int arp_devaddr_compare(const struct arpt_devaddr_info *ap,
 	return (ret != 0);
 }
 
+/*
+ * Unfortunatly, _b and _mask are not aligned to an int (or long int)
+ * Some arches dont care, unrolling the loop is a win on them.
+ * For other arches, we only have a 16bit alignement.
+ */
+static unsigned long ifname_compare(const char *_a, const char *_b, const char *_mask)
+{
+#ifdef CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS
+	unsigned long ret = ifname_compare_aligned(_a, _b, _mask);
+#else
+	unsigned long ret = 0;
+	const u16 *a = (const u16 *)_a;
+	const u16 *b = (const u16 *)_b;
+	const u16 *mask = (const u16 *)_mask;
+	int i;
+
+	for (i = 0; i < IFNAMSIZ/sizeof(u16); i++)
+		ret |= (a[i] ^ b[i]) & mask[i];
+#endif
+	return ret;
+}
+
 /* Returns whether packet matches rule or not. */
 static inline int arp_packet_match(const struct arphdr *arphdr,
 				   struct net_device *dev,
@@ -83,7 +105,7 @@ static inline int arp_packet_match(const struct arphdr *arphdr,
 	const char *arpptr = (char *)(arphdr + 1);
 	const char *src_devaddr, *tgt_devaddr;
 	__be32 src_ipaddr, tgt_ipaddr;
-	int i, ret;
+	long ret;
 
 #define FWINV(bool, invflg) ((bool) ^ !!(arpinfo->invflags & (invflg)))
 
@@ -142,24 +164,21 @@ static inline int arp_packet_match(const struct arphdr *arphdr,
 		  ARPT_INV_TGTIP)) {
 		dprintf("Source or target IP address mismatch.\n");
 
-		dprintf("SRC: %u.%u.%u.%u. Mask: %u.%u.%u.%u. Target: %u.%u.%u.%u.%s\n",
-			NIPQUAD(src_ipaddr),
-			NIPQUAD(arpinfo->smsk.s_addr),
-			NIPQUAD(arpinfo->src.s_addr),
+		dprintf("SRC: %pI4. Mask: %pI4. Target: %pI4.%s\n",
+			&src_ipaddr,
+			&arpinfo->smsk.s_addr,
+			&arpinfo->src.s_addr,
 			arpinfo->invflags & ARPT_INV_SRCIP ? " (INV)" : "");
-		dprintf("TGT: %u.%u.%u.%u Mask: %u.%u.%u.%u Target: %u.%u.%u.%u.%s\n",
-			NIPQUAD(tgt_ipaddr),
-			NIPQUAD(arpinfo->tmsk.s_addr),
-			NIPQUAD(arpinfo->tgt.s_addr),
+		dprintf("TGT: %pI4 Mask: %pI4 Target: %pI4.%s\n",
+			&tgt_ipaddr,
+			&arpinfo->tmsk.s_addr,
+			&arpinfo->tgt.s_addr,
 			arpinfo->invflags & ARPT_INV_TGTIP ? " (INV)" : "");
 		return 0;
 	}
 
 	/* Look for ifname matches.  */
-	for (i = 0, ret = 0; i < IFNAMSIZ; i++) {
-		ret |= (indev[i] ^ arpinfo->iniface[i])
-			& arpinfo->iniface_mask[i];
-	}
+	ret = ifname_compare(indev, arpinfo->iniface, arpinfo->iniface_mask);
 
 	if (FWINV(ret != 0, ARPT_INV_VIA_IN)) {
 		dprintf("VIA in mismatch (%s vs %s).%s\n",
@@ -168,10 +187,7 @@ static inline int arp_packet_match(const struct arphdr *arphdr,
 		return 0;
 	}
 
-	for (i = 0, ret = 0; i < IFNAMSIZ; i++) {
-		ret |= (outdev[i] ^ arpinfo->outiface[i])
-			& arpinfo->outiface_mask[i];
-	}
+	ret = ifname_compare(outdev, arpinfo->outiface, arpinfo->outiface_mask);
 
 	if (FWINV(ret != 0, ARPT_INV_VIA_OUT)) {
 		dprintf("VIA out mismatch (%s vs %s).%s\n",
@@ -200,15 +216,12 @@ static inline int arp_checkentry(const struct arpt_arp *arp)
 	return 1;
 }
 
-static unsigned int arpt_error(struct sk_buff *skb,
-			       const struct net_device *in,
-			       const struct net_device *out,
-			       unsigned int hooknum,
-			       const struct xt_target *target,
-			       const void *targinfo)
+static unsigned int
+arpt_error(struct sk_buff *skb, const struct xt_target_param *par)
 {
 	if (net_ratelimit())
-		printk("arp_tables: error: '%s'\n", (char *)targinfo);
+		printk("arp_tables: error: '%s'\n",
+		       (const char *)par->targinfo);
 
 	return NF_DROP;
 }
@@ -218,13 +231,19 @@ static inline struct arpt_entry *get_entry(void *base, unsigned int offset)
 	return (struct arpt_entry *)(base + offset);
 }
 
+static inline __pure
+struct arpt_entry *arpt_next_entry(const struct arpt_entry *entry)
+{
+	return (void *)entry + entry->next_offset;
+}
+
 unsigned int arpt_do_table(struct sk_buff *skb,
 			   unsigned int hook,
 			   const struct net_device *in,
 			   const struct net_device *out,
 			   struct xt_table *table)
 {
-	static const char nulldevname[IFNAMSIZ];
+	static const char nulldevname[IFNAMSIZ] __attribute__((aligned(sizeof(long))));
 	unsigned int verdict = NF_DROP;
 	const struct arphdr *arp;
 	bool hotdrop = false;
@@ -232,6 +251,7 @@ unsigned int arpt_do_table(struct sk_buff *skb,
 	const char *indev, *outdev;
 	void *table_base;
 	const struct xt_table_info *private;
+	struct xt_target_param tgpar;
 
 	if (!pskb_may_pull(skb, arp_hdr_len(skb->dev)))
 		return NF_DROP;
@@ -239,77 +259,80 @@ unsigned int arpt_do_table(struct sk_buff *skb,
 	indev = in ? in->name : nulldevname;
 	outdev = out ? out->name : nulldevname;
 
-	read_lock_bh(&table->lock);
+	xt_info_rdlock_bh();
 	private = table->private;
-	table_base = (void *)private->entries[smp_processor_id()];
+	table_base = private->entries[smp_processor_id()];
+
 	e = get_entry(table_base, private->hook_entry[hook]);
 	back = get_entry(table_base, private->underflow[hook]);
 
+	tgpar.in      = in;
+	tgpar.out     = out;
+	tgpar.hooknum = hook;
+	tgpar.family  = NFPROTO_ARP;
+
 	arp = arp_hdr(skb);
 	do {
-		if (arp_packet_match(arp, skb->dev, indev, outdev, &e->arp)) {
-			struct arpt_entry_target *t;
-			int hdr_len;
+		struct arpt_entry_target *t;
+		int hdr_len;
 
-			hdr_len = sizeof(*arp) + (2 * sizeof(struct in_addr)) +
-				(2 * skb->dev->addr_len);
-			ADD_COUNTER(e->counters, hdr_len, 1);
-
-			t = arpt_get_target(e);
-
-			/* Standard target? */
-			if (!t->u.kernel.target->target) {
-				int v;
-
-				v = ((struct arpt_standard_target *)t)->verdict;
-				if (v < 0) {
-					/* Pop from stack? */
-					if (v != ARPT_RETURN) {
-						verdict = (unsigned)(-v) - 1;
-						break;
-					}
-					e = back;
-					back = get_entry(table_base,
-							 back->comefrom);
-					continue;
-				}
-				if (table_base + v
-				    != (void *)e + e->next_offset) {
-					/* Save old back ptr in next entry */
-					struct arpt_entry *next
-						= (void *)e + e->next_offset;
-					next->comefrom =
-						(void *)back - table_base;
-
-					/* set back pointer to next entry */
-					back = next;
-				}
-
-				e = get_entry(table_base, v);
-			} else {
-				/* Targets which reenter must return
-				 * abs. verdicts
-				 */
-				verdict = t->u.kernel.target->target(skb,
-								     in, out,
-								     hook,
-								     t->u.kernel.target,
-								     t->data);
-
-				/* Target might have changed stuff. */
-				arp = arp_hdr(skb);
-
-				if (verdict == ARPT_CONTINUE)
-					e = (void *)e + e->next_offset;
-				else
-					/* Verdict */
-					break;
-			}
-		} else {
-			e = (void *)e + e->next_offset;
+		if (!arp_packet_match(arp, skb->dev, indev, outdev, &e->arp)) {
+			e = arpt_next_entry(e);
+			continue;
 		}
+
+		hdr_len = sizeof(*arp) + (2 * sizeof(struct in_addr)) +
+			(2 * skb->dev->addr_len);
+		ADD_COUNTER(e->counters, hdr_len, 1);
+
+		t = arpt_get_target(e);
+
+		/* Standard target? */
+		if (!t->u.kernel.target->target) {
+			int v;
+
+			v = ((struct arpt_standard_target *)t)->verdict;
+			if (v < 0) {
+				/* Pop from stack? */
+				if (v != ARPT_RETURN) {
+					verdict = (unsigned)(-v) - 1;
+					break;
+				}
+				e = back;
+				back = get_entry(table_base, back->comefrom);
+				continue;
+			}
+			if (table_base + v
+			    != arpt_next_entry(e)) {
+				/* Save old back ptr in next entry */
+				struct arpt_entry *next = arpt_next_entry(e);
+				next->comefrom = (void *)back - table_base;
+
+				/* set back pointer to next entry */
+				back = next;
+			}
+
+			e = get_entry(table_base, v);
+			continue;
+		}
+
+		/* Targets which reenter must return
+		 * abs. verdicts
+		 */
+		tgpar.target   = t->u.kernel.target;
+		tgpar.targinfo = t->data;
+		verdict = t->u.kernel.target->target(skb, &tgpar);
+
+		/* Target might have changed stuff. */
+		arp = arp_hdr(skb);
+
+		if (verdict == ARPT_CONTINUE)
+			e = arpt_next_entry(e);
+		else
+			/* Verdict */
+			break;
 	} while (!hotdrop);
-	read_unlock_bh(&table->lock);
+	xt_info_rdunlock_bh();
 
 	if (hotdrop)
 		return NF_DROP;
@@ -318,15 +341,11 @@ unsigned int arpt_do_table(struct sk_buff *skb,
 }
 
 /* All zeroes == unconditional rule. */
-static inline int unconditional(const struct arpt_arp *arp)
+static inline bool unconditional(const struct arpt_arp *arp)
 {
-	unsigned int i;
+	static const struct arpt_arp uncond;
 
-	for (i = 0; i < sizeof(*arp)/sizeof(__u32); i++)
-		if (((__u32 *)arp)[i])
-			return 0;
-
-	return 1;
+	return memcmp(arp, &uncond, sizeof(uncond)) == 0;
 }
 
 /* Figures out from what hook each rule can be called: returns 0 if
@@ -458,23 +477,24 @@ static inline int check_entry(struct arpt_entry *e, const char *name)
 
 static inline int check_target(struct arpt_entry *e, const char *name)
 {
-	struct arpt_entry_target *t;
-	struct xt_target *target;
+	struct arpt_entry_target *t = arpt_get_target(e);
 	int ret;
+	struct xt_tgchk_param par = {
+		.table     = name,
+		.entryinfo = e,
+		.target    = t->u.kernel.target,
+		.targinfo  = t->data,
+		.hook_mask = e->comefrom,
+		.family    = NFPROTO_ARP,
+	};
 
-	t = arpt_get_target(e);
-	target = t->u.kernel.target;
-
-	ret = xt_check_target(target, NF_ARP, t->u.target_size - sizeof(*t),
-			      name, e->comefrom, 0, 0);
-	if (!ret && t->u.kernel.target->checkentry
-	    && !t->u.kernel.target->checkentry(name, e, target, t->data,
-					       e->comefrom)) {
+	ret = xt_check_target(&par, t->u.target_size - sizeof(*t), 0, false);
+	if (ret < 0) {
 		duprintf("arp_tables: check failed for `%s'.\n",
 			 t->u.kernel.target->name);
-		ret = -EINVAL;
+		return ret;
 	}
-	return ret;
+	return 0;
 }
 
 static inline int
@@ -490,7 +510,8 @@ find_check_entry(struct arpt_entry *e, const char *name, unsigned int size,
 		return ret;
 
 	t = arpt_get_target(e);
-	target = try_then_request_module(xt_find_target(NF_ARP, t->u.user.name,
+	target = try_then_request_module(xt_find_target(NFPROTO_ARP,
+							t->u.user.name,
 							t->u.user.revision),
 					 "arpt_%s", t->u.user.name);
 	if (IS_ERR(target) || !target) {
@@ -512,12 +533,28 @@ out:
 	return ret;
 }
 
+static bool check_underflow(struct arpt_entry *e)
+{
+	const struct arpt_entry_target *t;
+	unsigned int verdict;
+
+	if (!unconditional(&e->arp))
+		return false;
+	t = arpt_get_target(e);
+	if (strcmp(t->u.user.name, XT_STANDARD_TARGET) != 0)
+		return false;
+	verdict = ((struct arpt_standard_target *)t)->verdict;
+	verdict = -verdict - 1;
+	return verdict == NF_DROP || verdict == NF_ACCEPT;
+}
+
 static inline int check_entry_size_and_hooks(struct arpt_entry *e,
 					     struct xt_table_info *newinfo,
 					     unsigned char *base,
 					     unsigned char *limit,
 					     const unsigned int *hook_entries,
 					     const unsigned int *underflows,
+					     unsigned int valid_hooks,
 					     unsigned int *i)
 {
 	unsigned int h;
@@ -537,14 +574,20 @@ static inline int check_entry_size_and_hooks(struct arpt_entry *e,
 
 	/* Check hooks & underflows */
 	for (h = 0; h < NF_ARP_NUMHOOKS; h++) {
+		if (!(valid_hooks & (1 << h)))
+			continue;
 		if ((unsigned char *)e - base == hook_entries[h])
 			newinfo->hook_entry[h] = hook_entries[h];
-		if ((unsigned char *)e - base == underflows[h])
+		if ((unsigned char *)e - base == underflows[h]) {
+			if (!check_underflow(e)) {
+				pr_err("Underflows must be unconditional and "
+				       "use the STANDARD target with "
+				       "ACCEPT/DROP\n");
+				return -EINVAL;
+			}
 			newinfo->underflow[h] = underflows[h];
+		}
 	}
-
-	/* FIXME: underflows must be unconditional, standard verdicts
-	   < 0 (not ARPT_RETURN). --RR */
 
 	/* Clear counters and comefrom */
 	e->counters = ((struct xt_counters) { 0, 0 });
@@ -556,15 +599,19 @@ static inline int check_entry_size_and_hooks(struct arpt_entry *e,
 
 static inline int cleanup_entry(struct arpt_entry *e, unsigned int *i)
 {
+	struct xt_tgdtor_param par;
 	struct arpt_entry_target *t;
 
 	if (i && (*i)-- == 0)
 		return 1;
 
 	t = arpt_get_target(e);
-	if (t->u.kernel.target->destroy)
-		t->u.kernel.target->destroy(t->u.kernel.target, t->data);
-	module_put(t->u.kernel.target->me);
+	par.target   = t->u.kernel.target;
+	par.targinfo = t->data;
+	par.family   = NFPROTO_ARP;
+	if (par.target->destroy != NULL)
+		par.target->destroy(&par);
+	module_put(par.target->me);
 	return 0;
 }
 
@@ -601,7 +648,7 @@ static int translate_table(const char *name,
 				 newinfo,
 				 entry0,
 				 entry0 + size,
-				 hook_entries, underflows, &i);
+				 hook_entries, underflows, valid_hooks, &i);
 	duprintf("translate_table: ARPT_ENTRY_ITERATE gives %d\n", ret);
 	if (ret != 0)
 		return ret;
@@ -685,9 +732,12 @@ static void get_counters(const struct xt_table_info *t,
 	/* Instead of clearing (by a previous call to memset())
 	 * the counters and using adds, we set the counters
 	 * with data used by 'current' CPU
-	 * We dont care about preemption here.
+	 *
+	 * Bottom half has to be disabled to prevent deadlock
+	 * if new softirq were to run and call ipt_do_table
 	 */
-	curcpu = raw_smp_processor_id();
+	local_bh_disable();
+	curcpu = smp_processor_id();
 
 	i = 0;
 	ARPT_ENTRY_ITERATE(t->entries[curcpu],
@@ -700,19 +750,22 @@ static void get_counters(const struct xt_table_info *t,
 		if (cpu == curcpu)
 			continue;
 		i = 0;
+		xt_info_wrlock(cpu);
 		ARPT_ENTRY_ITERATE(t->entries[cpu],
 				   t->size,
 				   add_entry_to_counter,
 				   counters,
 				   &i);
+		xt_info_wrunlock(cpu);
 	}
+	local_bh_enable();
 }
 
-static inline struct xt_counters *alloc_counters(struct xt_table *table)
+static struct xt_counters *alloc_counters(struct xt_table *table)
 {
 	unsigned int countersize;
 	struct xt_counters *counters;
-	const struct xt_table_info *private = table->private;
+	struct xt_table_info *private = table->private;
 
 	/* We need atomic snapshot of counters: rest doesn't change
 	 * (other than comefrom, which userspace doesn't care
@@ -724,10 +777,7 @@ static inline struct xt_counters *alloc_counters(struct xt_table *table)
 	if (counters == NULL)
 		return ERR_PTR(-ENOMEM);
 
-	/* First, sum counters... */
-	write_lock_bh(&table->lock);
 	get_counters(private, counters);
-	write_unlock_bh(&table->lock);
 
 	return counters;
 }
@@ -790,7 +840,7 @@ static void compat_standard_from_user(void *dst, void *src)
 	int v = *(compat_int_t *)src;
 
 	if (v > 0)
-		v += xt_compat_calc_jump(NF_ARP, v);
+		v += xt_compat_calc_jump(NFPROTO_ARP, v);
 	memcpy(dst, &v, sizeof(v));
 }
 
@@ -799,7 +849,7 @@ static int compat_standard_to_user(void __user *dst, void *src)
 	compat_int_t cv = *(int *)src;
 
 	if (cv > 0)
-		cv -= xt_compat_calc_jump(NF_ARP, cv);
+		cv -= xt_compat_calc_jump(NFPROTO_ARP, cv);
 	return copy_to_user(dst, &cv, sizeof(cv)) ? -EFAULT : 0;
 }
 
@@ -817,7 +867,7 @@ static int compat_calc_entry(struct arpt_entry *e,
 	t = arpt_get_target(e);
 	off += xt_compat_target_offset(t->u.kernel.target);
 	newinfo->size -= off;
-	ret = xt_compat_add_offset(NF_ARP, entry_offset, off);
+	ret = xt_compat_add_offset(NFPROTO_ARP, entry_offset, off);
 	if (ret)
 		return ret;
 
@@ -868,9 +918,9 @@ static int get_info(struct net *net, void __user *user, int *len, int compat)
 	name[ARPT_TABLE_MAXNAMELEN-1] = '\0';
 #ifdef CONFIG_COMPAT
 	if (compat)
-		xt_compat_lock(NF_ARP);
+		xt_compat_lock(NFPROTO_ARP);
 #endif
-	t = try_then_request_module(xt_find_table_lock(net, NF_ARP, name),
+	t = try_then_request_module(xt_find_table_lock(net, NFPROTO_ARP, name),
 				    "arptable_%s", name);
 	if (t && !IS_ERR(t)) {
 		struct arpt_getinfo info;
@@ -880,7 +930,7 @@ static int get_info(struct net *net, void __user *user, int *len, int compat)
 		if (compat) {
 			struct xt_table_info tmp;
 			ret = compat_table_info(private, &tmp);
-			xt_compat_flush_offsets(NF_ARP);
+			xt_compat_flush_offsets(NFPROTO_ARP);
 			private = &tmp;
 		}
 #endif
@@ -903,7 +953,7 @@ static int get_info(struct net *net, void __user *user, int *len, int compat)
 		ret = t ? PTR_ERR(t) : -ENOENT;
 #ifdef CONFIG_COMPAT
 	if (compat)
-		xt_compat_unlock(NF_ARP);
+		xt_compat_unlock(NFPROTO_ARP);
 #endif
 	return ret;
 }
@@ -927,7 +977,7 @@ static int get_entries(struct net *net, struct arpt_get_entries __user *uptr,
 		return -EINVAL;
 	}
 
-	t = xt_find_table_lock(net, NF_ARP, get.name);
+	t = xt_find_table_lock(net, NFPROTO_ARP, get.name);
 	if (t && !IS_ERR(t)) {
 		const struct xt_table_info *private = t->private;
 
@@ -969,7 +1019,7 @@ static int __do_replace(struct net *net, const char *name,
 		goto out;
 	}
 
-	t = try_then_request_module(xt_find_table_lock(net, NF_ARP, name),
+	t = try_then_request_module(xt_find_table_lock(net, NFPROTO_ARP, name),
 				    "arptable_%s", name);
 	if (!t || IS_ERR(t)) {
 		ret = t ? PTR_ERR(t) : -ENOENT;
@@ -998,8 +1048,9 @@ static int __do_replace(struct net *net, const char *name,
 	    (newinfo->number <= oldinfo->initial_entries))
 		module_put(t->me);
 
-	/* Get the old counters. */
+	/* Get the old counters, and synchronize with replace */
 	get_counters(oldinfo, counters);
+
 	/* Decrease module usage counts and free resource */
 	loc_cpu_old_entry = oldinfo->entries[raw_smp_processor_id()];
 	ARPT_ENTRY_ITERATE(loc_cpu_old_entry, oldinfo->size, cleanup_entry,
@@ -1070,13 +1121,12 @@ static int do_replace(struct net *net, void __user *user, unsigned int len)
 }
 
 /* We're lazy, and add to the first CPU; overflow works its fey magic
- * and everything is OK.
- */
-static inline int add_counter_to_entry(struct arpt_entry *e,
-				       const struct xt_counters addme[],
-				       unsigned int *i)
+ * and everything is OK. */
+static int
+add_counter_to_entry(struct arpt_entry *e,
+		     const struct xt_counters addme[],
+		     unsigned int *i)
 {
-
 	ADD_COUNTER(e->counters, addme[*i].bcnt, addme[*i].pcnt);
 
 	(*i)++;
@@ -1086,7 +1136,7 @@ static inline int add_counter_to_entry(struct arpt_entry *e,
 static int do_add_counters(struct net *net, void __user *user, unsigned int len,
 			   int compat)
 {
-	unsigned int i;
+	unsigned int i, curcpu;
 	struct xt_counters_info tmp;
 	struct xt_counters *paddc;
 	unsigned int num_counters;
@@ -1136,13 +1186,13 @@ static int do_add_counters(struct net *net, void __user *user, unsigned int len,
 		goto free;
 	}
 
-	t = xt_find_table_lock(net, NF_ARP, name);
+	t = xt_find_table_lock(net, NFPROTO_ARP, name);
 	if (!t || IS_ERR(t)) {
 		ret = t ? PTR_ERR(t) : -ENOENT;
 		goto free;
 	}
 
-	write_lock_bh(&t->lock);
+	local_bh_disable();
 	private = t->private;
 	if (private->number != num_counters) {
 		ret = -EINVAL;
@@ -1151,14 +1201,17 @@ static int do_add_counters(struct net *net, void __user *user, unsigned int len,
 
 	i = 0;
 	/* Choose the copy that is on our node */
-	loc_cpu_entry = private->entries[smp_processor_id()];
+	curcpu = smp_processor_id();
+	loc_cpu_entry = private->entries[curcpu];
+	xt_info_wrlock(curcpu);
 	ARPT_ENTRY_ITERATE(loc_cpu_entry,
 			   private->size,
 			   add_counter_to_entry,
 			   paddc,
 			   &i);
+	xt_info_wrunlock(curcpu);
  unlock_up_free:
-	write_unlock_bh(&t->lock);
+	local_bh_enable();
 	xt_table_unlock(t);
 	module_put(t->me);
  free:
@@ -1220,7 +1273,7 @@ check_compat_entry_size_and_hooks(struct compat_arpt_entry *e,
 	entry_offset = (void *)e - (void *)base;
 
 	t = compat_arpt_get_target(e);
-	target = try_then_request_module(xt_find_target(NF_ARP,
+	target = try_then_request_module(xt_find_target(NFPROTO_ARP,
 							t->u.user.name,
 							t->u.user.revision),
 					 "arpt_%s", t->u.user.name);
@@ -1234,7 +1287,7 @@ check_compat_entry_size_and_hooks(struct compat_arpt_entry *e,
 
 	off += xt_compat_target_offset(target);
 	*size += off;
-	ret = xt_compat_add_offset(NF_ARP, entry_offset, off);
+	ret = xt_compat_add_offset(NFPROTO_ARP, entry_offset, off);
 	if (ret)
 		goto release_target;
 
@@ -1335,7 +1388,7 @@ static int translate_compat_table(const char *name,
 
 	duprintf("translate_compat_table: size %u\n", info->size);
 	j = 0;
-	xt_compat_lock(NF_ARP);
+	xt_compat_lock(NFPROTO_ARP);
 	/* Walk through entries, checking offsets. */
 	ret = COMPAT_ARPT_ENTRY_ITERATE(entry0, total_size,
 					check_compat_entry_size_and_hooks,
@@ -1385,8 +1438,8 @@ static int translate_compat_table(const char *name,
 	ret = COMPAT_ARPT_ENTRY_ITERATE(entry0, total_size,
 					compat_copy_entry_from_user,
 					&pos, &size, name, newinfo, entry1);
-	xt_compat_flush_offsets(NF_ARP);
-	xt_compat_unlock(NF_ARP);
+	xt_compat_flush_offsets(NFPROTO_ARP);
+	xt_compat_unlock(NFPROTO_ARP);
 	if (ret)
 		goto free_newinfo;
 
@@ -1422,8 +1475,8 @@ out:
 	COMPAT_ARPT_ENTRY_ITERATE(entry0, total_size, compat_release_entry, &j);
 	return ret;
 out_unlock:
-	xt_compat_flush_offsets(NF_ARP);
-	xt_compat_unlock(NF_ARP);
+	xt_compat_flush_offsets(NFPROTO_ARP);
+	xt_compat_unlock(NFPROTO_ARP);
 	goto out;
 }
 
@@ -1609,8 +1662,8 @@ static int compat_get_entries(struct net *net,
 		return -EINVAL;
 	}
 
-	xt_compat_lock(NF_ARP);
-	t = xt_find_table_lock(net, NF_ARP, get.name);
+	xt_compat_lock(NFPROTO_ARP);
+	t = xt_find_table_lock(net, NFPROTO_ARP, get.name);
 	if (t && !IS_ERR(t)) {
 		const struct xt_table_info *private = t->private;
 		struct xt_table_info info;
@@ -1625,13 +1678,13 @@ static int compat_get_entries(struct net *net,
 				 private->size, get.size);
 			ret = -EAGAIN;
 		}
-		xt_compat_flush_offsets(NF_ARP);
+		xt_compat_flush_offsets(NFPROTO_ARP);
 		module_put(t->me);
 		xt_table_unlock(t);
 	} else
 		ret = t ? PTR_ERR(t) : -ENOENT;
 
-	xt_compat_unlock(NF_ARP);
+	xt_compat_unlock(NFPROTO_ARP);
 	return ret;
 }
 
@@ -1711,7 +1764,7 @@ static int do_arpt_get_ctl(struct sock *sk, int cmd, void __user *user, int *len
 			break;
 		}
 
-		try_then_request_module(xt_find_revision(NF_ARP, rev.name,
+		try_then_request_module(xt_find_revision(NFPROTO_ARP, rev.name,
 							 rev.revision, 1, &ret),
 					"arpt_%s", rev.name);
 		break;
@@ -1725,7 +1778,8 @@ static int do_arpt_get_ctl(struct sock *sk, int cmd, void __user *user, int *len
 	return ret;
 }
 
-struct xt_table *arpt_register_table(struct net *net, struct xt_table *table,
+struct xt_table *arpt_register_table(struct net *net,
+				     const struct xt_table *table,
 				     const struct arpt_replace *repl)
 {
 	int ret;
@@ -1789,7 +1843,7 @@ void arpt_unregister_table(struct xt_table *table)
 static struct xt_target arpt_standard_target __read_mostly = {
 	.name		= ARPT_STANDARD_TARGET,
 	.targetsize	= sizeof(int),
-	.family		= NF_ARP,
+	.family		= NFPROTO_ARP,
 #ifdef CONFIG_COMPAT
 	.compatsize	= sizeof(compat_int_t),
 	.compat_from_user = compat_standard_from_user,
@@ -1801,7 +1855,7 @@ static struct xt_target arpt_error_target __read_mostly = {
 	.name		= ARPT_ERROR_TARGET,
 	.target		= arpt_error,
 	.targetsize	= ARPT_FUNCTION_MAXNAMELEN,
-	.family		= NF_ARP,
+	.family		= NFPROTO_ARP,
 };
 
 static struct nf_sockopt_ops arpt_sockopts = {
@@ -1823,12 +1877,12 @@ static struct nf_sockopt_ops arpt_sockopts = {
 
 static int __net_init arp_tables_net_init(struct net *net)
 {
-	return xt_proto_init(net, NF_ARP);
+	return xt_proto_init(net, NFPROTO_ARP);
 }
 
 static void __net_exit arp_tables_net_exit(struct net *net)
 {
-	xt_proto_fini(net, NF_ARP);
+	xt_proto_fini(net, NFPROTO_ARP);
 }
 
 static struct pernet_operations arp_tables_net_ops = {

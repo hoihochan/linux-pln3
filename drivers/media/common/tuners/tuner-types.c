@@ -578,6 +578,31 @@ static struct tuner_params tuner_fm1216me_mk3_params[] = {
 	},
 };
 
+/* ------------ TUNER_PHILIPS_FM1216MK5 - Philips PAL ------------ */
+
+static struct tuner_range tuner_fm1216mk5_pal_ranges[] = {
+	{ 16 * 158.00 /*MHz*/, 0xce, 0x01, },
+	{ 16 * 441.00 /*MHz*/, 0xce, 0x02, },
+	{ 16 * 864.00        , 0xce, 0x04, },
+};
+
+static struct tuner_params tuner_fm1216mk5_params[] = {
+	{
+		.type   = TUNER_PARAM_TYPE_PAL,
+		.ranges = tuner_fm1216mk5_pal_ranges,
+		.count  = ARRAY_SIZE(tuner_fm1216mk5_pal_ranges),
+		.cb_first_if_lower_freq = 1,
+		.has_tda9887 = 1,
+		.port1_active = 1,
+		.port2_active = 1,
+		.port2_invert_for_secam_lc = 1,
+		.port1_fm_high_sensitivity = 1,
+		.default_top_mid = -2,
+		.default_top_secam_mid = -2,
+		.default_top_secam_high = -2,
+	},
+};
+
 /* ------------ TUNER_LG_NTSC_NEW_TAPC - LGINNOTEK NTSC ------------ */
 
 static struct tuner_params tuner_lg_ntsc_new_tapc_params[] = {
@@ -946,7 +971,7 @@ static struct tuner_params tuner_tena_9533_di_params[] = {
 	},
 };
 
-/* ------------ TUNER_PHILIPS_FMD1216ME_MK3 - Philips PAL ------------ */
+/* ------------ TUNER_PHILIPS_FMD1216ME(X)_MK3 - Philips PAL ------------ */
 
 static struct tuner_range tuner_philips_fmd1216me_mk3_pal_ranges[] = {
 	{ 16 * 160.00 /*MHz*/, 0x86, 0x51, },
@@ -984,6 +1009,27 @@ static struct tuner_params tuner_philips_fmd1216me_mk3_params[] = {
 	},
 };
 
+static struct tuner_params tuner_philips_fmd1216mex_mk3_params[] = {
+	{
+		.type   = TUNER_PARAM_TYPE_PAL,
+		.ranges = tuner_philips_fmd1216me_mk3_pal_ranges,
+		.count  = ARRAY_SIZE(tuner_philips_fmd1216me_mk3_pal_ranges),
+		.has_tda9887 = 1,
+		.port1_active = 1,
+		.port2_active = 1,
+		.port2_fm_high_sensitivity = 1,
+		.port2_invert_for_secam_lc = 1,
+		.port1_set_for_fm_mono = 1,
+		.radio_if = 1,
+		.fm_gain_normal = 1,
+	},
+	{
+		.type   = TUNER_PARAM_TYPE_DIGITAL,
+		.ranges = tuner_philips_fmd1216me_mk3_dvb_ranges,
+		.count  = ARRAY_SIZE(tuner_philips_fmd1216me_mk3_dvb_ranges),
+		.iffreq = 16 * 36.125, /*MHz*/
+	},
+};
 
 /* ------ TUNER_LG_TDVS_H06XF - LG INNOTEK / INFINEON ATSC ----- */
 
@@ -1213,6 +1259,81 @@ static struct tuner_params tuner_samsung_tcpg_6121p30a_params[] = {
 		.port1_active = 1,
 		.port2_active = 1,
 		.port2_invert_for_secam_lc = 1,
+	},
+};
+
+/* ------------ TUNER_TCL_MF02GIP-5N-E - TCL MF02GIP-5N ------------ */
+
+static struct tuner_range tuner_tcl_mf02gip_5n_ntsc_ranges[] = {
+	{ 16 * 172.00 /*MHz*/, 0x8e, 0x01, },
+	{ 16 * 448.00 /*MHz*/, 0x8e, 0x02, },
+	{ 16 * 999.99        , 0x8e, 0x04, },
+};
+
+static struct tuner_params tuner_tcl_mf02gip_5n_params[] = {
+	{
+		.type   = TUNER_PARAM_TYPE_NTSC,
+		.ranges = tuner_tcl_mf02gip_5n_ntsc_ranges,
+		.count  = ARRAY_SIZE(tuner_tcl_mf02gip_5n_ntsc_ranges),
+		.cb_first_if_lower_freq = 1,
+	},
+};
+
+/* 80-89 */
+/* --------- TUNER_PHILIPS_FQ1216LME_MK3 -- active loopthrough, no FM ------- */
+
+static struct tuner_params tuner_fq1216lme_mk3_params[] = {
+	{
+		.type   = TUNER_PARAM_TYPE_PAL,
+		.ranges = tuner_fm1216me_mk3_pal_ranges,
+		.count  = ARRAY_SIZE(tuner_fm1216me_mk3_pal_ranges),
+		.cb_first_if_lower_freq = 1, /* not specified, but safe to do */
+		.has_tda9887 = 1, /* TDA9886 */
+		.port1_active = 1,
+		.port2_active = 1,
+		.port2_invert_for_secam_lc = 1,
+		.default_top_low = 4,
+		.default_top_mid = 4,
+		.default_top_high = 4,
+		.default_top_secam_low = 4,
+		.default_top_secam_mid = 4,
+		.default_top_secam_high = 4,
+	},
+};
+
+/* ----- TUNER_PARTSNIC_PTI_5NF05 - Partsnic (Daewoo) PTI-5NF05 NTSC ----- */
+
+static struct tuner_range tuner_partsnic_pti_5nf05_ranges[] = {
+	/* The datasheet specified channel ranges and the bandswitch byte */
+	/* The control byte value of 0x8e is just a guess */
+	{ 16 * 133.25 /*MHz*/, 0x8e, 0x01, }, /* Channels    2 -    B */
+	{ 16 * 367.25 /*MHz*/, 0x8e, 0x02, }, /* Channels    C - W+11 */
+	{ 16 * 999.99        , 0x8e, 0x08, }, /* Channels W+12 -   69 */
+};
+
+static struct tuner_params tuner_partsnic_pti_5nf05_params[] = {
+	{
+		.type   = TUNER_PARAM_TYPE_NTSC,
+		.ranges = tuner_partsnic_pti_5nf05_ranges,
+		.count  = ARRAY_SIZE(tuner_partsnic_pti_5nf05_ranges),
+		.cb_first_if_lower_freq = 1, /* not specified but safe to do */
+	},
+};
+
+/* --------- TUNER_PHILIPS_CU1216L - DVB-C NIM ------------------------- */
+
+static struct tuner_range tuner_cu1216l_ranges[] = {
+	{ 16 * 160.25 /*MHz*/, 0xce, 0x01 },
+	{ 16 * 444.25 /*MHz*/, 0xce, 0x02 },
+	{ 16 * 999.99        , 0xce, 0x04 },
+};
+
+static struct tuner_params tuner_philips_cu1216l_params[] = {
+	{
+		.type   = TUNER_PARAM_TYPE_DIGITAL,
+		.ranges = tuner_cu1216l_ranges,
+		.count  = ARRAY_SIZE(tuner_cu1216l_ranges),
+		.iffreq = 16 * 36.125, /*MHz*/
 	},
 };
 
@@ -1640,6 +1761,49 @@ struct tunertype tuners[] = {
 	[TUNER_XC5000] = { /* Xceive 5000 */
 		.name   = "Xceive 5000 tuner",
 		/* see xc5000.c for details */
+	},
+	[TUNER_TCL_MF02GIP_5N] = { /* TCL tuner MF02GIP-5N-E */
+		.name   = "TCL tuner MF02GIP-5N-E",
+		.params = tuner_tcl_mf02gip_5n_params,
+		.count  = ARRAY_SIZE(tuner_tcl_mf02gip_5n_params),
+	},
+	[TUNER_PHILIPS_FMD1216MEX_MK3] = { /* Philips PAL */
+		.name   = "Philips FMD1216MEX MK3 Hybrid Tuner",
+		.params = tuner_philips_fmd1216mex_mk3_params,
+		.count  = ARRAY_SIZE(tuner_philips_fmd1216mex_mk3_params),
+		.min = 16 *  50.87,
+		.max = 16 * 858.00,
+		.stepsize = 166667,
+		.initdata = tua603x_agc112,
+		.sleepdata = (u8[]){ 4, 0x9c, 0x60, 0x85, 0x54 },
+	},
+		[TUNER_PHILIPS_FM1216MK5] = { /* Philips PAL */
+		.name   = "Philips PAL/SECAM multi (FM1216 MK5)",
+		.params = tuner_fm1216mk5_params,
+		.count  = ARRAY_SIZE(tuner_fm1216mk5_params),
+	},
+
+	/* 80-89 */
+	[TUNER_PHILIPS_FQ1216LME_MK3] = { /* PAL/SECAM, Loop-thru, no FM */
+		.name = "Philips FQ1216LME MK3 PAL/SECAM w/active loopthrough",
+		.params = tuner_fq1216lme_mk3_params,
+		.count  = ARRAY_SIZE(tuner_fq1216lme_mk3_params),
+	},
+
+	[TUNER_PARTSNIC_PTI_5NF05] = {
+		.name = "Partsnic (Daewoo) PTI-5NF05",
+		.params = tuner_partsnic_pti_5nf05_params,
+		.count  = ARRAY_SIZE(tuner_partsnic_pti_5nf05_params),
+	},
+	[TUNER_PHILIPS_CU1216L] = {
+		.name = "Philips CU1216L",
+		.params = tuner_philips_cu1216l_params,
+		.count  = ARRAY_SIZE(tuner_philips_cu1216l_params),
+		.stepsize = 62500,
+	},
+	[TUNER_NXP_TDA18271] = {
+		.name   = "NXP TDA18271",
+		/* see tda18271-fe.c for details */
 	},
 };
 EXPORT_SYMBOL(tuners);

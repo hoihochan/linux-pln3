@@ -41,13 +41,12 @@
 #include <asm/mach/irq.h>
 #include <asm/mach/flash.h>
 
-#include <mach/pxa-regs.h>
-#include <mach/pxa2xx-regs.h>
-#include <mach/mfp-pxa27x.h>
+#include <mach/pxa27x.h>
+#include <mach/gpio.h>
 #include <mach/mainstone.h>
 #include <mach/audio.h>
 #include <mach/pxafb.h>
-#include <mach/i2c.h>
+#include <plat/i2c.h>
 #include <mach/mmc.h>
 #include <mach/irda.h>
 #include <mach/ohci.h>
@@ -128,6 +127,10 @@ static unsigned long mainstone_pin_config[] = {
 	GPIO108_KP_MKOUT_5,
 	GPIO96_KP_MKOUT_6,
 
+	/* I2C */
+	GPIO117_I2C_SCL,
+	GPIO118_I2C_SDA,
+
 	/* GPIO */
 	GPIO1_GPIO | WAKEUP_ON_EDGE_BOTH,
 };
@@ -162,8 +165,7 @@ static void mainstone_irq_handler(unsigned int irq, struct irq_desc *desc)
 		GEDR(0) = GPIO_bit(0);  /* clear useless edge notification */
 		if (likely(pending)) {
 			irq = MAINSTONE_IRQ(0) + __ffs(pending);
-			desc = irq_desc + irq;
-			desc_handle_irq(irq, desc);
+			generic_handle_irq(irq);
 		}
 		pending = MST_INTSETCLR & mainstone_irq_enabled;
 	} while (pending);
@@ -448,10 +450,13 @@ static void mainstone_mci_exit(struct device *dev, void *data)
 }
 
 static struct pxamci_platform_data mainstone_mci_platform_data = {
-	.ocr_mask	= MMC_VDD_32_33|MMC_VDD_33_34,
-	.init 		= mainstone_mci_init,
-	.setpower 	= mainstone_mci_setpower,
-	.exit		= mainstone_mci_exit,
+	.ocr_mask		= MMC_VDD_32_33|MMC_VDD_33_34,
+	.init 			= mainstone_mci_init,
+	.setpower 		= mainstone_mci_setpower,
+	.exit			= mainstone_mci_exit,
+	.gpio_card_detect	= -1,
+	.gpio_card_ro		= -1,
+	.gpio_power		= -1,
 };
 
 static void mainstone_irda_transceiver_mode(struct device *dev, int mode)
@@ -474,8 +479,9 @@ static void mainstone_irda_transceiver_mode(struct device *dev, int mode)
 }
 
 static struct pxaficp_platform_data mainstone_ficp_platform_data = {
-	.transceiver_cap  = IR_SIRMODE | IR_FIRMODE | IR_OFF,
-	.transceiver_mode = mainstone_irda_transceiver_mode,
+	.gpio_pwdown		= -1,
+	.transceiver_cap	= IR_SIRMODE | IR_FIRMODE | IR_OFF,
+	.transceiver_mode	= mainstone_irda_transceiver_mode,
 };
 
 static struct gpio_keys_button gpio_keys_button[] = {
@@ -508,19 +514,9 @@ static struct platform_device *platform_devices[] __initdata = {
 	&mst_gpio_keys_device,
 };
 
-static int mainstone_ohci_init(struct device *dev)
-{
-	/* Set the Power Control Polarity Low and Power Sense
-	   Polarity Low to active low. */
-	UHCHR = (UHCHR | UHCHR_PCPL | UHCHR_PSPL) &
-		~(UHCHR_SSEP1 | UHCHR_SSEP2 | UHCHR_SSEP3 | UHCHR_SSE);
-
-	return 0;
-}
-
 static struct pxaohci_platform_data mainstone_ohci_platform_data = {
 	.port_mode	= PMM_PERPORT_MODE,
-	.init		= mainstone_ohci_init,
+	.flags		= ENABLE_PORT_ALL | POWER_CONTROL_LOW | POWER_SENSE_LOW,
 };
 
 #if defined(CONFIG_KEYBOARD_PXA27x) || defined(CONFIG_KEYBOARD_PXA27x_MODULE)

@@ -12,6 +12,7 @@
 /* route_me_harder function, used by iptable_nat, iptable_mangle + ip_queue */
 int ip_route_me_harder(struct sk_buff *skb, unsigned addr_type)
 {
+	struct net *net = dev_net(skb_dst(skb)->dev);
 	const struct iphdr *iph = ip_hdr(skb);
 	struct rtable *rt;
 	struct flowi fl = {};
@@ -19,7 +20,9 @@ int ip_route_me_harder(struct sk_buff *skb, unsigned addr_type)
 	unsigned int hh_len;
 	unsigned int type;
 
-	type = inet_addr_type(&init_net, iph->saddr);
+	type = inet_addr_type(net, iph->saddr);
+	if (skb->sk && inet_sk(skb->sk)->transparent)
+		type = RTN_LOCAL;
 	if (addr_type == RTN_UNSPEC)
 		addr_type = type;
 
@@ -33,20 +36,21 @@ int ip_route_me_harder(struct sk_buff *skb, unsigned addr_type)
 		fl.nl_u.ip4_u.tos = RT_TOS(iph->tos);
 		fl.oif = skb->sk ? skb->sk->sk_bound_dev_if : 0;
 		fl.mark = skb->mark;
-		if (ip_route_output_key(&init_net, &rt, &fl) != 0)
+		fl.flags = skb->sk ? inet_sk_flowi_flags(skb->sk) : 0;
+		if (ip_route_output_key(net, &rt, &fl) != 0)
 			return -1;
 
 		/* Drop old route. */
-		dst_release(skb->dst);
-		skb->dst = &rt->u.dst;
+		skb_dst_drop(skb);
+		skb_dst_set(skb, &rt->u.dst);
 	} else {
 		/* non-local src, find valid iif to satisfy
 		 * rp-filter when calling ip_route_input. */
 		fl.nl_u.ip4_u.daddr = iph->saddr;
-		if (ip_route_output_key(&init_net, &rt, &fl) != 0)
+		if (ip_route_output_key(net, &rt, &fl) != 0)
 			return -1;
 
-		odst = skb->dst;
+		odst = skb_dst(skb);
 		if (ip_route_input(skb, iph->daddr, iph->saddr,
 				   RT_TOS(iph->tos), rt->u.dst.dev) != 0) {
 			dst_release(&rt->u.dst);
@@ -56,18 +60,22 @@ int ip_route_me_harder(struct sk_buff *skb, unsigned addr_type)
 		dst_release(odst);
 	}
 
-	if (skb->dst->error)
+	if (skb_dst(skb)->error)
 		return -1;
 
 #ifdef CONFIG_XFRM
 	if (!(IPCB(skb)->flags & IPSKB_XFRM_TRANSFORMED) &&
-	    xfrm_decode_session(skb, &fl, AF_INET) == 0)
-		if (xfrm_lookup(&skb->dst, &fl, skb->sk, 0))
+	    xfrm_decode_session(skb, &fl, AF_INET) == 0) {
+		struct dst_entry *dst = skb_dst(skb);
+		skb_dst_set(skb, NULL);
+		if (xfrm_lookup(net, &dst, &fl, skb->sk, 0))
 			return -1;
+		skb_dst_set(skb, dst);
+	}
 #endif
 
 	/* Change in oif may mean change in hh_len. */
-	hh_len = skb->dst->dev->hard_header_len;
+	hh_len = skb_dst(skb)->dev->hard_header_len;
 	if (skb_headroom(skb) < hh_len &&
 	    pskb_expand_head(skb, hh_len - skb_headroom(skb), 0, GFP_ATOMIC))
 		return -1;
@@ -88,19 +96,19 @@ int ip_xfrm_me_harder(struct sk_buff *skb)
 	if (xfrm_decode_session(skb, &fl, AF_INET) < 0)
 		return -1;
 
-	dst = skb->dst;
+	dst = skb_dst(skb);
 	if (dst->xfrm)
 		dst = ((struct xfrm_dst *)dst)->route;
 	dst_hold(dst);
 
-	if (xfrm_lookup(&dst, &fl, skb->sk, 0) < 0)
+	if (xfrm_lookup(dev_net(dst->dev), &dst, &fl, skb->sk, 0) < 0)
 		return -1;
 
-	dst_release(skb->dst);
-	skb->dst = dst;
+	skb_dst_drop(skb);
+	skb_dst_set(skb, dst);
 
 	/* Change in oif may mean change in hh_len. */
-	hh_len = skb->dst->dev->hard_header_len;
+	hh_len = skb_dst(skb)->dev->hard_header_len;
 	if (skb_headroom(skb) < hh_len &&
 	    pskb_expand_head(skb, hh_len - skb_headroom(skb), 0, GFP_ATOMIC))
 		return -1;
@@ -121,6 +129,7 @@ struct ip_rt_info {
 	__be32 daddr;
 	__be32 saddr;
 	u_int8_t tos;
+	u_int32_t mark;
 };
 
 static void nf_ip_saveroute(const struct sk_buff *skb,
@@ -134,6 +143,7 @@ static void nf_ip_saveroute(const struct sk_buff *skb,
 		rt_info->tos = iph->tos;
 		rt_info->daddr = iph->daddr;
 		rt_info->saddr = iph->saddr;
+		rt_info->mark = skb->mark;
 	}
 }
 
@@ -146,6 +156,7 @@ static int nf_ip_reroute(struct sk_buff *skb,
 		const struct iphdr *iph = ip_hdr(skb);
 
 		if (!(iph->tos == rt_info->tos
+		      && skb->mark == rt_info->mark
 		      && iph->daddr == rt_info->daddr
 		      && iph->saddr == rt_info->saddr))
 			return ip_route_me_harder(skb, RTN_UNSPEC);

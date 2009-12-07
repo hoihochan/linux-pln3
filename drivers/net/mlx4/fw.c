@@ -33,6 +33,7 @@
  */
 
 #include <linux/mlx4/cmd.h>
+#include <linux/cache.h>
 
 #include "fw.h"
 #include "icm.h"
@@ -88,6 +89,7 @@ static void dump_dev_cap_flags(struct mlx4_dev *dev, u32 flags)
 		[ 8] = "P_Key violation counter",
 		[ 9] = "Q_Key violation counter",
 		[10] = "VMM",
+		[12] = "DPDP",
 		[16] = "MW support",
 		[17] = "APM support",
 		[18] = "Atomic ops support",
@@ -346,7 +348,7 @@ int mlx4_QUERY_DEV_CAP(struct mlx4_dev *dev, struct mlx4_dev_cap *dev_cap)
 			MLX4_GET(field, outbox, QUERY_DEV_CAP_VL_PORT_OFFSET);
 			dev_cap->max_vl[i]	   = field >> 4;
 			MLX4_GET(field, outbox, QUERY_DEV_CAP_MTU_WIDTH_OFFSET);
-			dev_cap->max_mtu[i]	   = field >> 4;
+			dev_cap->ib_mtu[i]	   = field >> 4;
 			dev_cap->max_port_width[i] = field & 0xf;
 			MLX4_GET(field, outbox, QUERY_DEV_CAP_MAX_GID_OFFSET);
 			dev_cap->max_gids[i]	   = 1 << (field & 0xf);
@@ -354,10 +356,14 @@ int mlx4_QUERY_DEV_CAP(struct mlx4_dev *dev, struct mlx4_dev_cap *dev_cap)
 			dev_cap->max_pkeys[i]	   = 1 << (field & 0xf);
 		}
 	} else {
+#define QUERY_PORT_SUPPORTED_TYPE_OFFSET	0x00
 #define QUERY_PORT_MTU_OFFSET			0x01
+#define QUERY_PORT_ETH_MTU_OFFSET		0x02
 #define QUERY_PORT_WIDTH_OFFSET			0x06
 #define QUERY_PORT_MAX_GID_PKEY_OFFSET		0x07
+#define QUERY_PORT_MAX_MACVLAN_OFFSET		0x0a
 #define QUERY_PORT_MAX_VL_OFFSET		0x0b
+#define QUERY_PORT_MAC_OFFSET			0x10
 
 		for (i = 1; i <= dev_cap->num_ports; ++i) {
 			err = mlx4_cmd_box(dev, 0, mailbox->dma, i, 0, MLX4_CMD_QUERY_PORT,
@@ -365,8 +371,10 @@ int mlx4_QUERY_DEV_CAP(struct mlx4_dev *dev, struct mlx4_dev_cap *dev_cap)
 			if (err)
 				goto out;
 
+			MLX4_GET(field, outbox, QUERY_PORT_SUPPORTED_TYPE_OFFSET);
+			dev_cap->supported_port_types[i] = field & 3;
 			MLX4_GET(field, outbox, QUERY_PORT_MTU_OFFSET);
-			dev_cap->max_mtu[i]	   = field & 0xf;
+			dev_cap->ib_mtu[i]	   = field & 0xf;
 			MLX4_GET(field, outbox, QUERY_PORT_WIDTH_OFFSET);
 			dev_cap->max_port_width[i] = field & 0xf;
 			MLX4_GET(field, outbox, QUERY_PORT_MAX_GID_PKEY_OFFSET);
@@ -374,6 +382,11 @@ int mlx4_QUERY_DEV_CAP(struct mlx4_dev *dev, struct mlx4_dev_cap *dev_cap)
 			dev_cap->max_pkeys[i]	   = 1 << (field & 0xf);
 			MLX4_GET(field, outbox, QUERY_PORT_MAX_VL_OFFSET);
 			dev_cap->max_vl[i]	   = field & 0xf;
+			MLX4_GET(field, outbox, QUERY_PORT_MAX_MACVLAN_OFFSET);
+			dev_cap->log_max_macs[i]  = field & 0xf;
+			dev_cap->log_max_vlans[i] = field >> 4;
+			MLX4_GET(dev_cap->eth_mtu[i], outbox, QUERY_PORT_ETH_MTU_OFFSET);
+			MLX4_GET(dev_cap->def_mac[i], outbox, QUERY_PORT_MAC_OFFSET);
 		}
 	}
 
@@ -407,7 +420,7 @@ int mlx4_QUERY_DEV_CAP(struct mlx4_dev *dev, struct mlx4_dev_cap *dev_cap)
 	mlx4_dbg(dev, "Max CQEs: %d, max WQEs: %d, max SRQ WQEs: %d\n",
 		 dev_cap->max_cq_sz, dev_cap->max_qp_sz, dev_cap->max_srq_sz);
 	mlx4_dbg(dev, "Local CA ACK delay: %d, max MTU: %d, port width cap: %d\n",
-		 dev_cap->local_ca_ack_delay, 128 << dev_cap->max_mtu[1],
+		 dev_cap->local_ca_ack_delay, 128 << dev_cap->ib_mtu[1],
 		 dev_cap->max_port_width[1]);
 	mlx4_dbg(dev, "Max SQ desc size: %d, max SQ S/G: %d\n",
 		 dev_cap->max_sq_desc_sz, dev_cap->max_sq_sg);
@@ -686,6 +699,7 @@ int mlx4_INIT_HCA(struct mlx4_dev *dev, struct mlx4_init_hca_param *param)
 #define INIT_HCA_IN_SIZE		 0x200
 #define INIT_HCA_VERSION_OFFSET		 0x000
 #define	 INIT_HCA_VERSION		 2
+#define INIT_HCA_CACHELINE_SZ_OFFSET	 0x0e
 #define INIT_HCA_FLAGS_OFFSET		 0x014
 #define INIT_HCA_QPC_OFFSET		 0x020
 #define	 INIT_HCA_QPC_BASE_OFFSET	 (INIT_HCA_QPC_OFFSET + 0x10)
@@ -722,6 +736,9 @@ int mlx4_INIT_HCA(struct mlx4_dev *dev, struct mlx4_init_hca_param *param)
 	memset(inbox, 0, INIT_HCA_IN_SIZE);
 
 	*((u8 *) mailbox->buf + INIT_HCA_VERSION_OFFSET) = INIT_HCA_VERSION;
+
+	*((u8 *) mailbox->buf + INIT_HCA_CACHELINE_SZ_OFFSET) =
+		(ilog2(cache_line_size()) - 4) << 5;
 
 #if defined(__LITTLE_ENDIAN)
 	*(inbox + INIT_HCA_FLAGS_OFFSET / 4) &= ~cpu_to_be32(1 << 1);
@@ -819,7 +836,7 @@ int mlx4_INIT_PORT(struct mlx4_dev *dev, int port)
 		flags |= (dev->caps.port_width_cap[port] & 0xf) << INIT_PORT_PORT_WIDTH_SHIFT;
 		MLX4_PUT(inbox, flags,		  INIT_PORT_FLAGS_OFFSET);
 
-		field = 128 << dev->caps.mtu_cap[port];
+		field = 128 << dev->caps.ib_mtu_cap[port];
 		MLX4_PUT(inbox, field, INIT_PORT_MTU_OFFSET);
 		field = dev->caps.gid_table_len[port];
 		MLX4_PUT(inbox, field, INIT_PORT_MAX_GID_OFFSET);

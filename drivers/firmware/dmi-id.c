@@ -139,7 +139,7 @@ static struct attribute_group sys_dmi_attribute_group = {
 	.attrs = sys_dmi_attributes,
 };
 
-static struct attribute_group* sys_dmi_attribute_groups[] = {
+static const struct attribute_group* sys_dmi_attribute_groups[] = {
 	&sys_dmi_attribute_group,
 	NULL
 };
@@ -223,7 +223,7 @@ static int __init dmi_id_init(void)
 	}
 
 	dmi_dev->class = &dmi_class;
-	strcpy(dmi_dev->bus_id, "id");
+	dev_set_name(dmi_dev, "id");
 	dmi_dev->groups = sys_dmi_attribute_groups;
 
 	ret = device_register(dmi_dev);

@@ -34,7 +34,7 @@
 #include <linux/hwmon.h>
 #include <linux/hwmon-sysfs.h>
 #include <linux/dmi.h>
-#include <asm/io.h>
+#include <linux/io.h>
 
 /* uGuru3 bank addresses */
 #define ABIT_UGURU3_SETTINGS_BANK		0x01
@@ -117,9 +117,12 @@ struct abituguru3_sensor_info {
 	int offset;
 };
 
+/* Avoid use of flexible array members */
+#define ABIT_UGURU3_MAX_DMI_NAMES 2
+
 struct abituguru3_motherboard_info {
 	u16 id;
-	const char *dmi_name;
+	const char *dmi_name[ABIT_UGURU3_MAX_DMI_NAMES + 1];
 	/* + 1 -> end of sensors indicated by a sensor with name == NULL */
 	struct abituguru3_sensor_info sensors[ABIT_UGURU3_MAX_NO_SENSORS + 1];
 };
@@ -164,7 +167,7 @@ struct abituguru3_data {
 
 /* Constants */
 static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
-	{ 0x000C, NULL /* Unknown, need DMI string */, {
+	{ 0x000C, { NULL } /* Unknown, need DMI string */, {
 		{ "CPU Core",		 0, 0, 10, 1, 0 },
 		{ "DDR",		 1, 0, 10, 1, 0 },
 		{ "DDR VTT",		 2, 0, 10, 1, 0 },
@@ -178,7 +181,7 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "+3.3V",		10, 0, 20, 1, 0 },
 		{ "5VSB",		11, 0, 30, 1, 0 },
 		{ "CPU",		24, 1, 1, 1, 0 },
-		{ "System ",		25, 1, 1, 1, 0 },
+		{ "System",		25, 1, 1, 1, 0 },
 		{ "PWM",		26, 1, 1, 1, 0 },
 		{ "CPU Fan",		32, 2, 60, 1, 0 },
 		{ "NB Fan",		33, 2, 60, 1, 0 },
@@ -186,7 +189,7 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "AUX1 Fan",		35, 2, 60, 1, 0 },
 		{ NULL, 0, 0, 0, 0, 0 } }
 	},
-	{ 0x000D, NULL /* Abit AW8, need DMI string */, {
+	{ 0x000D, { NULL } /* Abit AW8, need DMI string */, {
 		{ "CPU Core",		 0, 0, 10, 1, 0 },
 		{ "DDR",		 1, 0, 10, 1, 0 },
 		{ "DDR VTT",		 2, 0, 10, 1, 0 },
@@ -200,7 +203,7 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "+3.3V",		10, 0, 20, 1, 0 },
 		{ "5VSB",		11, 0, 30, 1, 0 },
 		{ "CPU",		24, 1, 1, 1, 0 },
-		{ "System ",		25, 1, 1, 1, 0 },
+		{ "System",		25, 1, 1, 1, 0 },
 		{ "PWM1",		26, 1, 1, 1, 0 },
 		{ "PWM2",		27, 1, 1, 1, 0 },
 		{ "PWM3",		28, 1, 1, 1, 0 },
@@ -215,7 +218,7 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "AUX5 Fan",		39, 2, 60, 1, 0 },
 		{ NULL, 0, 0, 0, 0, 0 } }
 	},
-	{ 0x000E, NULL /* AL-8, need DMI string */, {
+	{ 0x000E, { NULL } /* AL-8, need DMI string */, {
 		{ "CPU Core",		 0, 0, 10, 1, 0 },
 		{ "DDR",		 1, 0, 10, 1, 0 },
 		{ "DDR VTT",		 2, 0, 10, 1, 0 },
@@ -229,14 +232,15 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "+3.3V",		10, 0, 20, 1, 0 },
 		{ "5VSB",		11, 0, 30, 1, 0 },
 		{ "CPU",		24, 1, 1, 1, 0 },
-		{ "System ",		25, 1, 1, 1, 0 },
+		{ "System",		25, 1, 1, 1, 0 },
 		{ "PWM",		26, 1, 1, 1, 0 },
 		{ "CPU Fan",		32, 2, 60, 1, 0 },
 		{ "NB Fan",		33, 2, 60, 1, 0 },
 		{ "SYS Fan",		34, 2, 60, 1, 0 },
 		{ NULL, 0, 0, 0, 0, 0 } }
 	},
-	{ 0x000F, NULL /* Unknown, need DMI string */, {
+	{ 0x000F, { NULL } /* Unknown, need DMI string */, {
+
 		{ "CPU Core",		 0, 0, 10, 1, 0 },
 		{ "DDR",		 1, 0, 10, 1, 0 },
 		{ "DDR VTT",		 2, 0, 10, 1, 0 },
@@ -250,14 +254,14 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "+3.3V",		10, 0, 20, 1, 0 },
 		{ "5VSB",		11, 0, 30, 1, 0 },
 		{ "CPU",		24, 1, 1, 1, 0 },
-		{ "System ",		25, 1, 1, 1, 0 },
+		{ "System",		25, 1, 1, 1, 0 },
 		{ "PWM",		26, 1, 1, 1, 0 },
 		{ "CPU Fan",		32, 2, 60, 1, 0 },
 		{ "NB Fan",		33, 2, 60, 1, 0 },
 		{ "SYS Fan",		34, 2, 60, 1, 0 },
 		{ NULL, 0, 0, 0, 0, 0 } }
 	},
-	{ 0x0010, NULL /* Abit NI8 SLI GR, need DMI string */, {
+	{ 0x0010, { NULL } /* Abit NI8 SLI GR, need DMI string */, {
 		{ "CPU Core",		 0, 0, 10, 1, 0 },
 		{ "DDR",		 1, 0, 10, 1, 0 },
 		{ "DDR VTT",		 2, 0, 10, 1, 0 },
@@ -279,7 +283,7 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "OTES1 Fan",		36, 2, 60, 1, 0 },
 		{ NULL, 0, 0, 0, 0, 0 } }
 	},
-	{ 0x0011, "AT8 32X(ATI RD580-ULI M1575)", {
+	{ 0x0011, { "AT8 32X", NULL }, {
 		{ "CPU Core",		 0, 0, 10, 1, 0 },
 		{ "DDR",		 1, 0, 20, 1, 0 },
 		{ "DDR VTT",		 2, 0, 10, 1, 0 },
@@ -306,7 +310,7 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "AUX3 Fan",		37, 2, 60, 1, 0 },
 		{ NULL, 0, 0, 0, 0, 0 } }
 	},
-	{ 0x0012, NULL /* Abit AN8 32X, need DMI string */, {
+	{ 0x0012, { NULL } /* Abit AN8 32X, need DMI string */, {
 		{ "CPU Core",		 0, 0, 10, 1, 0 },
 		{ "DDR",		 1, 0, 20, 1, 0 },
 		{ "DDR VTT",		 2, 0, 10, 1, 0 },
@@ -328,7 +332,7 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "AUX1 Fan",		36, 2, 60, 1, 0 },
 		{ NULL, 0, 0, 0, 0, 0 } }
 	},
-	{ 0x0013, NULL /* Abit AW8D, need DMI string */, {
+	{ 0x0013, { NULL } /* Abit AW8D, need DMI string */, {
 		{ "CPU Core",		 0, 0, 10, 1, 0 },
 		{ "DDR",		 1, 0, 10, 1, 0 },
 		{ "DDR VTT",		 2, 0, 10, 1, 0 },
@@ -342,7 +346,7 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "+3.3V",		10, 0, 20, 1, 0 },
 		{ "5VSB",		11, 0, 30, 1, 0 },
 		{ "CPU",		24, 1, 1, 1, 0 },
-		{ "System ",		25, 1, 1, 1, 0 },
+		{ "System",		25, 1, 1, 1, 0 },
 		{ "PWM1",		26, 1, 1, 1, 0 },
 		{ "PWM2",		27, 1, 1, 1, 0 },
 		{ "PWM3",		28, 1, 1, 1, 0 },
@@ -357,7 +361,7 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "AUX5 Fan",		39, 2, 60, 1, 0 },
 		{ NULL, 0, 0, 0, 0, 0 } }
 	},
-	{ 0x0014, NULL /* Abit AB9 Pro, need DMI string */, {
+	{ 0x0014, { "AB9", "AB9 Pro", NULL }, {
 		{ "CPU Core",		 0, 0, 10, 1, 0 },
 		{ "DDR",		 1, 0, 10, 1, 0 },
 		{ "DDR VTT",		 2, 0, 10, 1, 0 },
@@ -371,14 +375,14 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "+3.3V",		10, 0, 20, 1, 0 },
 		{ "5VSB",		11, 0, 30, 1, 0 },
 		{ "CPU",		24, 1, 1, 1, 0 },
-		{ "System ",		25, 1, 1, 1, 0 },
+		{ "System",		25, 1, 1, 1, 0 },
 		{ "PWM",		26, 1, 1, 1, 0 },
 		{ "CPU Fan",		32, 2, 60, 1, 0 },
 		{ "NB Fan",		33, 2, 60, 1, 0 },
 		{ "SYS Fan",		34, 2, 60, 1, 0 },
 		{ NULL, 0, 0, 0, 0, 0 } }
 	},
-	{ 0x0015, NULL /* Unknown, need DMI string */, {
+	{ 0x0015, { NULL } /* Unknown, need DMI string */, {
 		{ "CPU Core",		 0, 0, 10, 1, 0 },
 		{ "DDR",		 1, 0, 20, 1, 0 },
 		{ "DDR VTT",		 2, 0, 10, 1, 0 },
@@ -402,7 +406,7 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "AUX3 Fan",		36, 2, 60, 1, 0 },
 		{ NULL, 0, 0, 0, 0, 0 } }
 	},
-	{ 0x0016, NULL /* AW9D-MAX, need DMI string */, {
+	{ 0x0016, { "AW9D-MAX", NULL }, {
 		{ "CPU Core",		 0, 0, 10, 1, 0 },
 		{ "DDR2",		 1, 0, 20, 1, 0 },
 		{ "DDR2 VTT",		 2, 0, 10, 1, 0 },
@@ -416,7 +420,7 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "+3.3V",		10, 0, 20, 1, 0 },
 		{ "5VSB",		11, 0, 30, 1, 0 },
 		{ "CPU",		24, 1, 1, 1, 0 },
-		{ "System ",		25, 1, 1, 1, 0 },
+		{ "System",		25, 1, 1, 1, 0 },
 		{ "PWM1",		26, 1, 1, 1, 0 },
 		{ "PWM2",		27, 1, 1, 1, 0 },
 		{ "PWM3",		28, 1, 1, 1, 0 },
@@ -430,7 +434,7 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "OTES1 Fan",		38, 2, 60, 1, 0 },
 		{ NULL, 0, 0, 0, 0, 0 } }
 	},
-	{ 0x0017, NULL /* Unknown, need DMI string */, {
+	{ 0x0017, { NULL } /* Unknown, need DMI string */, {
 		{ "CPU Core",		 0, 0, 10, 1, 0 },
 		{ "DDR2",		 1, 0, 20, 1, 0 },
 		{ "DDR2 VTT",		 2, 0, 10, 1, 0 },
@@ -446,7 +450,7 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "ATX +3.3V",		10, 0, 20, 1, 0 },
 		{ "ATX 5VSB",		11, 0, 30, 1, 0 },
 		{ "CPU",		24, 1, 1, 1, 0 },
-		{ "System ",		26, 1, 1, 1, 0 },
+		{ "System",		26, 1, 1, 1, 0 },
 		{ "PWM",		27, 1, 1, 1, 0 },
 		{ "CPU FAN",		32, 2, 60, 1, 0 },
 		{ "SYS FAN",		34, 2, 60, 1, 0 },
@@ -455,7 +459,7 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "AUX3 FAN",		37, 2, 60, 1, 0 },
 		{ NULL, 0, 0, 0, 0, 0 } }
 	},
-	{ 0x0018, NULL /* Unknown, need DMI string */, {
+	{ 0x0018, { "AB9 QuadGT", NULL }, {
 		{ "CPU Core",		 0, 0, 10, 1, 0 },
 		{ "DDR2",		 1, 0, 20, 1, 0 },
 		{ "DDR2 VTT",		 2, 0, 10, 1, 0 },
@@ -469,7 +473,7 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "+3.3V",		10, 0, 20, 1, 0 },
 		{ "5VSB",		11, 0, 30, 1, 0 },
 		{ "CPU",		24, 1, 1, 1, 0 },
-		{ "System ",		25, 1, 1, 1, 0 },
+		{ "System",		25, 1, 1, 1, 0 },
 		{ "PWM Phase1",		26, 1, 1, 1, 0 },
 		{ "PWM Phase2",		27, 1, 1, 1, 0 },
 		{ "PWM Phase3",		28, 1, 1, 1, 0 },
@@ -482,12 +486,12 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "AUX3 Fan",		36, 2, 60, 1, 0 },
 		{ NULL, 0, 0, 0, 0, 0 } }
 	},
-	{ 0x0019, NULL /* Unknown, need DMI string */, {
+	{ 0x0019, { "IN9 32X MAX", NULL }, {
 		{ "CPU Core",		 7, 0, 10, 1, 0 },
 		{ "DDR2",		13, 0, 20, 1, 0 },
 		{ "DDR2 VTT",		14, 0, 10, 1, 0 },
 		{ "CPU VTT",		 3, 0, 20, 1, 0 },
-		{ "NB 1.2V ",		 4, 0, 10, 1, 0 },
+		{ "NB 1.2V",		 4, 0, 10, 1, 0 },
 		{ "SB 1.5V",		 6, 0, 10, 1, 0 },
 		{ "HyperTransport",	 5, 0, 10, 1, 0 },
 		{ "ATX +12V (24-Pin)",	12, 0, 60, 1, 0 },
@@ -496,7 +500,7 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "ATX +3.3V",		10, 0, 20, 1, 0 },
 		{ "ATX 5VSB",		11, 0, 30, 1, 0 },
 		{ "CPU",		24, 1, 1, 1, 0 },
-		{ "System ",		25, 1, 1, 1, 0 },
+		{ "System",		25, 1, 1, 1, 0 },
 		{ "PWM Phase1",		26, 1, 1, 1, 0 },
 		{ "PWM Phase2",		27, 1, 1, 1, 0 },
 		{ "PWM Phase3",		28, 1, 1, 1, 0 },
@@ -509,7 +513,7 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "AUX3 FAN",		36, 2, 60, 1, 0 },
 		{ NULL, 0, 0, 0, 0, 0 } }
 	},
-	{ 0x001A, "IP35 Pro(Intel P35-ICH9R)", {
+	{ 0x001A, { "IP35 Pro", "IP35 Pro XE", NULL }, {
 		{ "CPU Core",		 0, 0, 10, 1, 0 },
 		{ "DDR2",		 1, 0, 20, 1, 0 },
 		{ "DDR2 VTT",		 2, 0, 10, 1, 0 },
@@ -523,8 +527,8 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "+3.3V",		10, 0, 20, 1, 0 },
 		{ "5VSB",		11, 0, 30, 1, 0 },
 		{ "CPU",		24, 1, 1, 1, 0 },
-		{ "System ",		25, 1, 1, 1, 0 },
-		{ "PWM ",		26, 1, 1, 1, 0 },
+		{ "System",		25, 1, 1, 1, 0 },
+		{ "PWM",		26, 1, 1, 1, 0 },
 		{ "PWM Phase2",		27, 1, 1, 1, 0 },
 		{ "PWM Phase3",		28, 1, 1, 1, 0 },
 		{ "PWM Phase4",		29, 1, 1, 1, 0 },
@@ -537,7 +541,7 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "AUX4 Fan",		37, 2, 60, 1, 0 },
 		{ NULL, 0, 0, 0, 0, 0 } }
 	},
-	{ 0x001B, NULL /* Unknown, need DMI string */, {
+	{ 0x001B, { NULL } /* Unknown, need DMI string */, {
 		{ "CPU Core",		 0, 0, 10, 1, 0 },
 		{ "DDR3",		 1, 0, 20, 1, 0 },
 		{ "DDR3 VTT",		 2, 0, 10, 1, 0 },
@@ -564,7 +568,7 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "AUX3 Fan",		36, 2, 60, 1, 0 },
 		{ NULL, 0, 0, 0, 0, 0 } }
 	},
-	{ 0x001C, NULL /* Unknown, need DMI string */, {
+	{ 0x001C, { "IX38 QuadGT", NULL }, {
 		{ "CPU Core",		 0, 0, 10, 1, 0 },
 		{ "DDR2",		 1, 0, 20, 1, 0 },
 		{ "DDR2 VTT",		 2, 0, 10, 1, 0 },
@@ -591,7 +595,7 @@ static const struct abituguru3_motherboard_info abituguru3_motherboards[] = {
 		{ "AUX3 Fan",		36, 2, 60, 1, 0 },
 		{ NULL, 0, 0, 0, 0, 0 } }
 	},
-	{ 0x0000, NULL, { { NULL, 0, 0, 0, 0, 0 } } }
+	{ 0x0000, { NULL }, { { NULL, 0, 0, 0, 0, 0 } } }
 };
 
 
@@ -760,8 +764,11 @@ static int abituguru3_read_increment_offset(struct abituguru3_data *data,
 
 	for (i = 0; i < offset_count; i++)
 		if ((x = abituguru3_read(data, bank, offset + i, count,
-				buf + i * count)) != count)
-			return i * count + (i && (x < 0)) ? 0 : x;
+				buf + i * count)) != count) {
+			if (x < 0)
+				return x;
+			return i * count + x;
+		}
 
 	return i * count;
 }
@@ -943,15 +950,6 @@ static int __devinit abituguru3_probe(struct platform_device *pdev)
 	printk(KERN_INFO ABIT_UGURU3_NAME ": found Abit uGuru3, motherboard "
 		"ID: %04X\n", (unsigned int)id);
 
-#ifdef CONFIG_DMI
-	if (!abituguru3_motherboards[i].dmi_name) {
-		printk(KERN_WARNING ABIT_UGURU3_NAME ": this motherboard was "
-			"not detected using DMI. Please send the output of "
-			"\"dmidecode\" to the abituguru3 maintainer"
-			"(see MAINTAINERS)\n");
-	}
-#endif
-
 	/* Fill the sysfs attr array */
 	sysfs_attr_i = 0;
 	sysfs_filename = data->sysfs_names;
@@ -1128,6 +1126,8 @@ static int __init abituguru3_dmi_detect(void)
 {
 	const char *board_vendor, *board_name;
 	int i, err = (force) ? 1 : -ENODEV;
+	const char *const *dmi_name;
+	size_t sublen;
 
 	board_vendor = dmi_get_system_info(DMI_BOARD_VENDOR);
 	if (!board_vendor || strcmp(board_vendor, "http://www.abit.com.tw/"))
@@ -1137,16 +1137,27 @@ static int __init abituguru3_dmi_detect(void)
 	if (!board_name)
 		return err;
 
+	/* At the moment, we don't care about the part of the vendor
+	 * DMI string contained in brackets. Truncate the string at
+	 * the first occurrence of a bracket. Trim any trailing space
+	 * from the substring.
+	 */
+	sublen = strcspn(board_name, "(");
+	while (sublen > 0 && board_name[sublen - 1] == ' ')
+		sublen--;
+
 	for (i = 0; abituguru3_motherboards[i].id; i++) {
-		const char *dmi_name = abituguru3_motherboards[i].dmi_name;
-		if (dmi_name && !strcmp(dmi_name, board_name))
-			break;
+		dmi_name = abituguru3_motherboards[i].dmi_name;
+		for ( ; *dmi_name; dmi_name++) {
+			if (strlen(*dmi_name) != sublen)
+				continue;
+			if (!strncasecmp(board_name, *dmi_name, sublen))
+				return 0;
+		}
 	}
 
-	if (!abituguru3_motherboards[i].id)
-		return 1;
-
-	return 0;
+	/* No match found */
+	return 1;
 }
 
 #else /* !CONFIG_DMI */
@@ -1206,6 +1217,13 @@ static int __init abituguru3_init(void)
 		err = abituguru3_detect();
 		if (err)
 			return err;
+
+#ifdef CONFIG_DMI
+		printk(KERN_WARNING ABIT_UGURU3_NAME ": this motherboard was "
+			"not detected using DMI. Please send the output of "
+			"\"dmidecode\" to the abituguru3 maintainer "
+			"(see MAINTAINERS)\n");
+#endif
 	}
 
 	err = platform_driver_register(&abituguru3_driver);

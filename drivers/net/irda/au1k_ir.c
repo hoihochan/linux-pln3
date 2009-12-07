@@ -53,7 +53,6 @@ static int au1k_irda_hard_xmit(struct sk_buff *, struct net_device *);
 static int au1k_irda_rx(struct net_device *);
 static void au1k_irda_interrupt(int, void *);
 static void au1k_tx_timeout(struct net_device *);
-static struct net_device_stats *au1k_irda_stats(struct net_device *);
 static int au1k_irda_ioctl(struct net_device *, struct ifreq *, int);
 static int au1k_irda_set_speed(struct net_device *dev, int speed);
 
@@ -199,6 +198,14 @@ static int au1k_irda_init_iobuf(iobuff_t *io, int size)
 	return io->head ? 0 : -ENOMEM;
 }
 
+static const struct net_device_ops au1k_irda_netdev_ops = {
+	.ndo_open		= au1k_irda_start,
+	.ndo_stop		= au1k_irda_stop,
+	.ndo_start_xmit		= au1k_irda_hard_xmit,
+	.ndo_tx_timeout		= au1k_tx_timeout,
+	.ndo_do_ioctl		= au1k_irda_ioctl,
+};
+
 static int au1k_irda_net_init(struct net_device *dev)
 {
 	struct au1k_private *aup = netdev_priv(dev);
@@ -210,12 +217,7 @@ static int au1k_irda_net_init(struct net_device *dev)
 	if (err)
 		goto out1;
 
-	dev->open = au1k_irda_start;
-	dev->hard_start_xmit = au1k_irda_hard_xmit;
-	dev->stop = au1k_irda_stop;
-	dev->get_stats = au1k_irda_stats;
-	dev->do_ioctl = au1k_irda_ioctl;
-	dev->tx_timeout = au1k_tx_timeout;
+	dev->netdev_ops = &au1k_irda_netdev_ops;
 
 	irda_init_max_qos_capabilies(&aup->qos);
 
@@ -496,7 +498,7 @@ static int au1k_irda_hard_xmit(struct sk_buff *skb, struct net_device *dev)
 			aup->newspeed = 0;
 		}
 		dev_kfree_skb(skb);
-		return 0;
+		return NETDEV_TX_OK;
 	}
 
 	ptxd = aup->tx_ring[aup->tx_head];
@@ -506,13 +508,13 @@ static int au1k_irda_hard_xmit(struct sk_buff *skb, struct net_device *dev)
 		printk(KERN_DEBUG "%s: tx_full\n", dev->name);
 		netif_stop_queue(dev);
 		aup->tx_full = 1;
-		return 1;
+		return NETDEV_TX_BUSY;
 	}
 	else if (((aup->tx_head + 1) & (NUM_IR_DESC - 1)) == aup->tx_tail) {
 		printk(KERN_DEBUG "%s: tx_full\n", dev->name);
 		netif_stop_queue(dev);
 		aup->tx_full = 1;
-		return 1;
+		return NETDEV_TX_BUSY;
 	}
 
 	pDB = aup->tx_db_inuse[aup->tx_head];
@@ -549,7 +551,7 @@ static int au1k_irda_hard_xmit(struct sk_buff *skb, struct net_device *dev)
 	dev_kfree_skb(skb);
 	aup->tx_head = (aup->tx_head + 1) & (NUM_IR_DESC - 1);
 	dev->trans_start = jiffies;
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 
@@ -596,7 +598,7 @@ static int au1k_irda_rx(struct net_device *dev)
 			update_rx_stats(dev, flags, count);
 			skb=alloc_skb(count+1,GFP_ATOMIC);
 			if (skb == NULL) {
-				aup->stats.rx_dropped++;
+				aup->netdev->stats.rx_dropped++;
 				continue;
 			}
 			skb_reserve(skb, 1);
@@ -620,7 +622,6 @@ static int au1k_irda_rx(struct net_device *dev)
 		/* next descriptor */
 		prxd = aup->rx_ring[aup->rx_head];
 		flags = prxd->flags;
-		dev->last_rx = jiffies;
 
 	}
 	return 0;
@@ -831,13 +832,6 @@ au1k_irda_ioctl(struct net_device *dev, struct ifreq *ifreq, int cmd)
 		break;
 	}
 	return ret;
-}
-
-
-static struct net_device_stats *au1k_irda_stats(struct net_device *dev)
-{
-	struct au1k_private *aup = netdev_priv(dev);
-	return &aup->stats;
 }
 
 MODULE_AUTHOR("Pete Popov <ppopov@mvista.com>");

@@ -137,6 +137,7 @@
 /* #define CMX_CONF_DEBUG */
 
 /*#define CMX_DEBUG * massive read/write pointer output */
+/*#define CMX_DELAY_DEBUG * gives rx-buffer delay overview */
 /*#define CMX_TX_DEBUG * massive read/write on tx-buffer with content */
 
 static inline int
@@ -162,8 +163,9 @@ dsp_cmx_debug(struct dsp *dsp)
 
 	printk(KERN_DEBUG "-----Current DSP\n");
 	list_for_each_entry(odsp, &dsp_ilist, list) {
-		printk(KERN_DEBUG "* %s echo=%d txmix=%d",
-		    odsp->name, odsp->echo, odsp->tx_mix);
+		printk(KERN_DEBUG "* %s hardecho=%d softecho=%d txmix=%d",
+		    odsp->name, odsp->echo.hardware, odsp->echo.software,
+		    odsp->tx_mix);
 		if (odsp->conf)
 			printk(" (Conf %d)", odsp->conf->id);
 		if (dsp == odsp)
@@ -176,10 +178,12 @@ dsp_cmx_debug(struct dsp *dsp)
 		list_for_each_entry(member, &conf->mlist, list) {
 			printk(KERN_DEBUG
 			    "  - member = %s (slot_tx %d, bank_tx %d, "
-			    "slot_rx %d, bank_rx %d hfc_conf %d)%s\n",
+			    "slot_rx %d, bank_rx %d hfc_conf %d "
+			    "tx_data %d rx_is_off %d)%s\n",
 			    member->dsp->name, member->dsp->pcm_slot_tx,
 			    member->dsp->pcm_bank_tx, member->dsp->pcm_slot_rx,
 			    member->dsp->pcm_bank_rx, member->dsp->hfc_conf,
+			    member->dsp->tx_data, member->dsp->rx_is_off,
 			    (member->dsp == dsp) ? " *this*" : "");
 		}
 	}
@@ -234,7 +238,7 @@ dsp_cmx_add_conf_member(struct dsp *dsp, struct dsp_conf *conf)
 
 	member = kzalloc(sizeof(struct dsp_conf_member), GFP_ATOMIC);
 	if (!member) {
-		printk(KERN_ERR "kmalloc struct dsp_conf_member failed\n");
+		printk(KERN_ERR "kzalloc struct dsp_conf_member failed\n");
 		return -ENOMEM;
 	}
 	member->dsp = dsp;
@@ -313,7 +317,7 @@ static struct dsp_conf
 
 	conf = kzalloc(sizeof(struct dsp_conf), GFP_ATOMIC);
 	if (!conf) {
-		printk(KERN_ERR "kmalloc struct dsp_conf failed\n");
+		printk(KERN_ERR "kzalloc struct dsp_conf failed\n");
 		return NULL;
 	}
 	INIT_LIST_HEAD(&conf->mlist);
@@ -384,7 +388,7 @@ dsp_cmx_hardware(struct dsp_conf *conf, struct dsp *dsp)
 	int		freeunits[8];
 	u_char		freeslots[256];
 	int		same_hfc = -1, same_pcm = -1, current_conf = -1,
-	    all_conf = 1;
+	    all_conf = 1, tx_data = 0;
 
 	/* dsp gets updated (no conf) */
 	if (!conf) {
@@ -408,7 +412,7 @@ one_member:
 		/* process hw echo */
 		if (dsp->features.pcm_banks < 1)
 			return;
-		if (!dsp->echo) {
+		if (!dsp->echo.software && !dsp->echo.hardware) {
 			/* NO ECHO: remove PCM slot if assigned */
 			if (dsp->pcm_slot_tx >= 0 || dsp->pcm_slot_rx >= 0) {
 				if (dsp_debug & DEBUG_DSP_CMX)
@@ -426,10 +430,15 @@ one_member:
 			}
 			return;
 		}
+		/* echo is enabled, find out if we use soft or hardware */
+		dsp->echo.software = dsp->tx_data;
+		dsp->echo.hardware = 0;
 		/* ECHO: already echo */
 		if (dsp->pcm_slot_tx >= 0 && dsp->pcm_slot_rx < 0 &&
-		    dsp->pcm_bank_tx == 2 && dsp->pcm_bank_rx == 2)
+		    dsp->pcm_bank_tx == 2 && dsp->pcm_bank_rx == 2) {
+			dsp->echo.hardware = 1;
 			return;
+		}
 		/* ECHO: if slot already assigned */
 		if (dsp->pcm_slot_tx >= 0) {
 			dsp->pcm_slot_rx = dsp->pcm_slot_tx;
@@ -442,6 +451,7 @@ one_member:
 				    dsp->pcm_slot_tx);
 			dsp_cmx_hw_message(dsp, MISDN_CTRL_HFC_PCM_CONN,
 			    dsp->pcm_slot_tx, 2, dsp->pcm_slot_rx, 2);
+			dsp->echo.hardware = 1;
 			return;
 		}
 		/* ECHO: find slot */
@@ -452,10 +462,10 @@ one_member:
 			if (finddsp->features.pcm_id == dsp->features.pcm_id) {
 				if (finddsp->pcm_slot_rx >= 0 &&
 				    finddsp->pcm_slot_rx < sizeof(freeslots))
-					freeslots[finddsp->pcm_slot_tx] = 0;
+					freeslots[finddsp->pcm_slot_rx] = 0;
 				if (finddsp->pcm_slot_tx >= 0 &&
 				    finddsp->pcm_slot_tx < sizeof(freeslots))
-					freeslots[finddsp->pcm_slot_rx] = 0;
+					freeslots[finddsp->pcm_slot_tx] = 0;
 			}
 		}
 		i = 0;
@@ -471,6 +481,7 @@ one_member:
 				    "%s no slot available for echo\n",
 				    __func__);
 			/* no more slots available */
+			dsp->echo.software = 1;
 			return;
 		}
 		/* assign free slot */
@@ -484,6 +495,7 @@ one_member:
 			    __func__, dsp->name, dsp->pcm_slot_tx);
 		dsp_cmx_hw_message(dsp, MISDN_CTRL_HFC_PCM_CONN,
 		    dsp->pcm_slot_tx, 2, dsp->pcm_slot_rx, 2);
+		dsp->echo.hardware = 1;
 		return;
 	}
 
@@ -553,7 +565,7 @@ conf_software:
 			return;
 		}
 		/* check if member has echo turned on */
-		if (member->dsp->echo) {
+		if (member->dsp->echo.hardware || member->dsp->echo.software) {
 			if (dsp_debug & DEBUG_DSP_CMX)
 				printk(KERN_DEBUG
 				    "%s dsp %s cannot form a conf, because "
@@ -591,10 +603,9 @@ conf_software:
 		if (member->dsp->tx_data) {
 			if (dsp_debug & DEBUG_DSP_CMX)
 				printk(KERN_DEBUG
-				    "%s dsp %s cannot form a conf, because "
-				    "tx_data is turned on\n",
+				    "%s dsp %s tx_data is turned on\n",
 				    __func__, member->dsp->name);
-			goto conf_software;
+			tx_data = 1;
 		}
 		/* check if pipeline exists */
 		if (member->dsp->pipeline.inuse) {
@@ -744,11 +755,11 @@ conf_software:
 					if (dsp->pcm_slot_rx >= 0 &&
 					    dsp->pcm_slot_rx <
 					    sizeof(freeslots))
-						freeslots[dsp->pcm_slot_tx] = 0;
+						freeslots[dsp->pcm_slot_rx] = 0;
 					if (dsp->pcm_slot_tx >= 0 &&
 					    dsp->pcm_slot_tx <
 					    sizeof(freeslots))
-						freeslots[dsp->pcm_slot_rx] = 0;
+						freeslots[dsp->pcm_slot_tx] = 0;
 				}
 			}
 			i = 0;
@@ -793,7 +804,7 @@ conf_software:
 			    nextm->dsp->pcm_slot_tx, nextm->dsp->pcm_bank_tx,
 			    nextm->dsp->pcm_slot_rx, nextm->dsp->pcm_bank_rx);
 			conf->hardware = 1;
-			conf->software = 0;
+			conf->software = tx_data;
 			return;
 		/* if members have one bank (or on the same chip) */
 		} else {
@@ -836,11 +847,11 @@ conf_software:
 					if (dsp->pcm_slot_rx >= 0 &&
 					    dsp->pcm_slot_rx <
 					    sizeof(freeslots))
-						freeslots[dsp->pcm_slot_tx] = 0;
+						freeslots[dsp->pcm_slot_rx] = 0;
 					if (dsp->pcm_slot_tx >= 0 &&
 					    dsp->pcm_slot_tx <
 					    sizeof(freeslots))
-						freeslots[dsp->pcm_slot_rx] = 0;
+						freeslots[dsp->pcm_slot_tx] = 0;
 				}
 			}
 			i1 = 0;
@@ -903,7 +914,7 @@ conf_software:
 			    nextm->dsp->pcm_slot_tx, nextm->dsp->pcm_bank_tx,
 			    nextm->dsp->pcm_slot_rx, nextm->dsp->pcm_bank_rx);
 			conf->hardware = 1;
-			conf->software = 0;
+			conf->software = tx_data;
 			return;
 		}
 	}
@@ -926,10 +937,6 @@ conf_software:
 
 	/* for more than two members.. */
 
-	/* in case of hdlc, we change to software */
-	if (dsp->hdlc)
-		goto conf_software;
-
 	/* if all members already have the same conference */
 	if (all_conf)
 		return;
@@ -940,6 +947,13 @@ conf_software:
 	if (current_conf >= 0) {
 join_members:
 		list_for_each_entry(member, &conf->mlist, list) {
+			/* if no conference engine on our chip, change to
+			 * software */
+			if (!member->dsp->features.hfc_conf)
+				goto conf_software;
+			/* in case of hdlc, change to software */
+			if (member->dsp->hdlc)
+				goto conf_software;
 			/* join to current conference */
 			if (member->dsp->hfc_conf == current_conf)
 				continue;
@@ -1135,6 +1149,25 @@ dsp_cmx_conf(struct dsp *dsp, u32 conf_id)
 	return 0;
 }
 
+#ifdef CMX_DELAY_DEBUG
+int delaycount;
+static void
+showdelay(struct dsp *dsp, int samples, int delay)
+{
+	char bar[] = "--------------------------------------------------|";
+	int sdelay;
+
+	delaycount += samples;
+	if (delaycount < 8000)
+		return;
+	delaycount = 0;
+
+	sdelay = delay * 50 / (dsp_poll << 2);
+
+	printk(KERN_DEBUG "DELAY (%s) %3d >%s\n", dsp->name, delay,
+		sdelay > 50 ? "..." : bar + 50 - sdelay);
+}
+#endif
 
 /*
  * audio data is received from card
@@ -1168,11 +1201,18 @@ dsp_cmx_receive(struct dsp *dsp, struct sk_buff *skb)
 		dsp->rx_init = 0;
 		if (dsp->features.unordered) {
 			dsp->rx_R = (hh->id & CMX_BUFF_MASK);
-			dsp->rx_W = (dsp->rx_R + dsp->cmx_delay)
-				& CMX_BUFF_MASK;
+			if (dsp->cmx_delay)
+				dsp->rx_W = (dsp->rx_R + dsp->cmx_delay)
+					& CMX_BUFF_MASK;
+			else
+				dsp->rx_W = (dsp->rx_R + (dsp_poll >> 1))
+					& CMX_BUFF_MASK;
 		} else {
 			dsp->rx_R = 0;
-			dsp->rx_W = dsp->cmx_delay;
+			if (dsp->cmx_delay)
+				dsp->rx_W = dsp->cmx_delay;
+			else
+				dsp->rx_W = dsp_poll >> 1;
 		}
 	}
 	/* if frame contains time code, write directly */
@@ -1185,19 +1225,25 @@ dsp_cmx_receive(struct dsp *dsp, struct sk_buff *skb)
 	 * we set our new read pointer, and write silence to buffer
 	 */
 	if (((dsp->rx_W-dsp->rx_R) & CMX_BUFF_MASK) >= CMX_BUFF_HALF) {
-		if (dsp_debug & DEBUG_DSP_CMX)
+		if (dsp_debug & DEBUG_DSP_CLOCK)
 			printk(KERN_DEBUG
 			    "cmx_receive(dsp=%lx): UNDERRUN (or overrun the "
 			    "maximum delay), adjusting read pointer! "
 			    "(inst %s)\n", (u_long)dsp, dsp->name);
-		/* flush buffer */
+		/* flush rx buffer and set delay to dsp_poll / 2 */
 		if (dsp->features.unordered) {
 			dsp->rx_R = (hh->id & CMX_BUFF_MASK);
-			dsp->rx_W = (dsp->rx_R + dsp->cmx_delay)
-				& CMX_BUFF_MASK;
+			if (dsp->cmx_delay)
+				dsp->rx_W = (dsp->rx_R + dsp->cmx_delay)
+					& CMX_BUFF_MASK;
+				dsp->rx_W = (dsp->rx_R + (dsp_poll >> 1))
+					& CMX_BUFF_MASK;
 		} else {
 			dsp->rx_R = 0;
-			dsp->rx_W = dsp->cmx_delay;
+			if (dsp->cmx_delay)
+				dsp->rx_W = dsp->cmx_delay;
+			else
+				dsp->rx_W = dsp_poll >> 1;
 		}
 		memset(dsp->rx_buff, dsp_silence, sizeof(dsp->rx_buff));
 	}
@@ -1205,7 +1251,7 @@ dsp_cmx_receive(struct dsp *dsp, struct sk_buff *skb)
 	if (dsp->cmx_delay)
 		if (((dsp->rx_W - dsp->rx_R) & CMX_BUFF_MASK) >=
 		    (dsp->cmx_delay << 1)) {
-			if (dsp_debug & DEBUG_DSP_CMX)
+			if (dsp_debug & DEBUG_DSP_CLOCK)
 				printk(KERN_DEBUG
 				    "cmx_receive(dsp=%lx): OVERRUN (because "
 				    "twice the delay is reached), adjusting "
@@ -1243,6 +1289,9 @@ dsp_cmx_receive(struct dsp *dsp, struct sk_buff *skb)
 
 	/* increase write-pointer */
 	dsp->rx_W = ((dsp->rx_W+len) & CMX_BUFF_MASK);
+#ifdef CMX_DELAY_DEBUG
+	showdelay(dsp, len, (dsp->rx_W-dsp->rx_R) & CMX_BUFF_MASK);
+#endif
 }
 
 
@@ -1260,17 +1309,25 @@ dsp_cmx_send_member(struct dsp *dsp, int len, s32 *c, int members)
 	int r, rr, t, tt, o_r, o_rr;
 	int preload = 0;
 	struct mISDNhead *hh, *thh;
+	int tx_data_only = 0;
 
 	/* don't process if: */
 	if (!dsp->b_active) { /* if not active */
 		dsp->last_tx = 0;
 		return;
 	}
-	if (dsp->pcm_slot_tx >= 0 && /* connected to pcm slot */
+	if (((dsp->conf && dsp->conf->hardware) || /* hardware conf */
+	    dsp->echo.hardware) && /* OR hardware echo */
 	    dsp->tx_R == dsp->tx_W && /* AND no tx-data */
 	    !(dsp->tone.tone && dsp->tone.software)) { /* AND not soft tones */
-		dsp->last_tx = 0;
-		return;
+		if (!dsp->tx_data) { /* no tx_data for user space required */
+			dsp->last_tx = 0;
+			return;
+		}
+		if (dsp->conf && dsp->conf->software && dsp->conf->hardware)
+			tx_data_only = 1;
+		if (dsp->conf->software && dsp->echo.hardware)
+			tx_data_only = 1;
 	}
 
 #ifdef CMX_DEBUG
@@ -1332,7 +1389,8 @@ dsp_cmx_send_member(struct dsp *dsp, int len, s32 *c, int members)
 		while (r != rr && t != tt) {
 #ifdef CMX_TX_DEBUG
 			if (strlen(debugbuf) < 48)
-			    sprintf(debugbuf+strlen(debugbuf), " %02x", p[t]);
+				sprintf(debugbuf+strlen(debugbuf), " %02x",
+				    p[t]);
 #endif
 			*d++ = p[t]; /* write tx_buff */
 			t = (t+1) & CMX_BUFF_MASK;
@@ -1353,15 +1411,19 @@ dsp_cmx_send_member(struct dsp *dsp, int len, s32 *c, int members)
 	/* PROCESS DATA (one member / no conf) */
 	if (!conf || members <= 1) {
 		/* -> if echo is NOT enabled */
-		if (!dsp->echo) {
+		if (!dsp->echo.software) {
 			/* -> send tx-data if available or use 0-volume */
 			while (r != rr && t != tt) {
 				*d++ = p[t]; /* write tx_buff */
 				t = (t+1) & CMX_BUFF_MASK;
 				r = (r+1) & CMX_BUFF_MASK;
 			}
-			if (r != rr)
+			if (r != rr) {
+				if (dsp_debug & DEBUG_DSP_CLOCK)
+					printk(KERN_DEBUG "%s: RX empty\n",
+						__func__);
 				memset(d, dsp_silence, (rr-r)&CMX_BUFF_MASK);
+			}
 		/* -> if echo is enabled */
 		} else {
 			/*
@@ -1399,7 +1461,7 @@ dsp_cmx_send_member(struct dsp *dsp, int len, s32 *c, int members)
 		o_r = (o_rr - rr + r) & CMX_BUFF_MASK;
 			/* start rx-pointer at current read position*/
 		/* -> if echo is NOT enabled */
-		if (!dsp->echo) {
+		if (!dsp->echo.software) {
 			/*
 			 * -> copy other member's rx-data,
 			 * if tx-data is available, mix
@@ -1447,7 +1509,7 @@ dsp_cmx_send_member(struct dsp *dsp, int len, s32 *c, int members)
 #endif
 	/* PROCESS DATA (three or more members) */
 	/* -> if echo is NOT enabled */
-	if (!dsp->echo) {
+	if (!dsp->echo.software) {
 		/*
 		 * -> substract rx-data from conf-data,
 		 * if tx-data is available, mix
@@ -1511,27 +1573,40 @@ send_packet:
 	 * becuase we want what we send, not what we filtered
 	 */
 	if (dsp->tx_data) {
-		/* PREPARE RESULT */
-		txskb = mI_alloc_skb(len, GFP_ATOMIC);
-		if (!txskb) {
-			printk(KERN_ERR
-			    "FATAL ERROR in mISDN_dsp.o: "
-			    "cannot alloc %d bytes\n", len);
+		if (tx_data_only) {
+			hh->prim = DL_DATA_REQ;
+			hh->id = 0;
+			/* queue and trigger */
+			skb_queue_tail(&dsp->sendq, nskb);
+			schedule_work(&dsp->workq);
+			/* exit because only tx_data is used */
+			return;
 		} else {
-			thh = mISDN_HEAD_P(txskb);
-			thh->prim = DL_DATA_REQ;
-			thh->id = 0;
-			memcpy(skb_put(txskb, len), nskb->data+preload, len);
-			/* queue (trigger later) */
-			skb_queue_tail(&dsp->sendq, txskb);
+			txskb = mI_alloc_skb(len, GFP_ATOMIC);
+			if (!txskb) {
+				printk(KERN_ERR
+				    "FATAL ERROR in mISDN_dsp.o: "
+				    "cannot alloc %d bytes\n", len);
+			} else {
+				thh = mISDN_HEAD_P(txskb);
+				thh->prim = DL_DATA_REQ;
+				thh->id = 0;
+				memcpy(skb_put(txskb, len), nskb->data+preload,
+					len);
+				/* queue (trigger later) */
+				skb_queue_tail(&dsp->sendq, txskb);
+			}
 		}
 	}
+
+	/* send data only to card, if we don't just calculated tx_data */
 	/* adjust volume */
 	if (dsp->tx_volume)
 		dsp_change_volume(nskb, dsp->tx_volume);
 	/* pipeline */
 	if (dsp->pipeline.inuse)
-		dsp_pipeline_process_tx(&dsp->pipeline, nskb->data, nskb->len);
+		dsp_pipeline_process_tx(&dsp->pipeline, nskb->data,
+			nskb->len);
 	/* crypt */
 	if (dsp->bf_enable)
 		dsp_bf_encrypt(dsp, nskb->data, nskb->len);
@@ -1540,11 +1615,11 @@ send_packet:
 	schedule_work(&dsp->workq);
 }
 
-u32	samplecount;
+static u32	jittercount; /* counter for jitter check */
 struct timer_list dsp_spl_tl;
 u32	dsp_spl_jiffies; /* calculate the next time to fire */
-u32	dsp_start_jiffies; /* jiffies at the time, the calculation begins */
-struct timeval dsp_start_tv; /* time at start of calculation */
+static u16	dsp_count; /* last sample count */
+static int	dsp_count_valid ; /* if we have last sample count */
 
 void
 dsp_cmx_send(void *arg)
@@ -1553,43 +1628,38 @@ dsp_cmx_send(void *arg)
 	struct dsp_conf_member *member;
 	struct dsp *dsp;
 	int mustmix, members;
-	s32 mixbuffer[MAX_POLL+100], *c;
+	static s32 mixbuffer[MAX_POLL+100];
+	s32 *c;
 	u8 *p, *q;
 	int r, rr;
 	int jittercheck = 0, delay, i;
 	u_long flags;
-	struct timeval tv;
-	u32 elapsed;
-	s16 length;
+	u16 length, count;
 
 	/* lock */
 	spin_lock_irqsave(&dsp_lock, flags);
 
-	if (!dsp_start_tv.tv_sec) {
-		do_gettimeofday(&dsp_start_tv);
+	if (!dsp_count_valid) {
+		dsp_count = mISDN_clock_get();
 		length = dsp_poll;
+		dsp_count_valid = 1;
 	} else {
-		do_gettimeofday(&tv);
-		elapsed = ((tv.tv_sec - dsp_start_tv.tv_sec) * 8000)
-		    + ((s32)(tv.tv_usec / 125) - (dsp_start_tv.tv_usec / 125));
-		dsp_start_tv.tv_sec = tv.tv_sec;
-		dsp_start_tv.tv_usec = tv.tv_usec;
-		length = elapsed;
+		count = mISDN_clock_get();
+		length = count - dsp_count;
+		dsp_count = count;
 	}
 	if (length > MAX_POLL + 100)
 		length = MAX_POLL + 100;
-/* printk(KERN_DEBUG "len=%d dsp_count=0x%x.%04x dsp_poll_diff=0x%x.%04x\n",
- length, dsp_count >> 16, dsp_count & 0xffff, dsp_poll_diff >> 16,
- dsp_poll_diff & 0xffff);
- */
+	/* printk(KERN_DEBUG "len=%d dsp_count=0x%x\n", length, dsp_count); */
 
 	/*
-	 * check if jitter needs to be checked
-	 * (this is about every second = 8192 samples)
+	 * check if jitter needs to be checked (this is every second)
 	 */
-	samplecount += length;
-	if ((samplecount & 8191) < length)
+	jittercount += length;
+	if (jittercount >= 8000) {
+		jittercount -= 8000;
 		jittercheck = 1;
+	}
 
 	/* loop all members that do not require conference mixing */
 	list_for_each_entry(dsp, &dsp_ilist, list) {
@@ -1702,17 +1772,19 @@ dsp_cmx_send(void *arg)
 			}
 			/*
 			 * remove rx_delay only if we have delay AND we
-			 * have not preset cmx_delay
+			 * have not preset cmx_delay AND
+			 * the delay is greater dsp_poll
 			 */
-			if (delay && !dsp->cmx_delay) {
-				if (dsp_debug & DEBUG_DSP_CMX)
+			if (delay > dsp_poll && !dsp->cmx_delay) {
+				if (dsp_debug & DEBUG_DSP_CLOCK)
 					printk(KERN_DEBUG
 					    "%s lowest rx_delay of %d bytes for"
 					    " dsp %s are now removed.\n",
 					    __func__, delay,
 					    dsp->name);
 				r = dsp->rx_R;
-				rr = (r + delay) & CMX_BUFF_MASK;
+				rr = (r + delay - (dsp_poll >> 1))
+					& CMX_BUFF_MASK;
 				/* delete rx-data */
 				while (r != rr) {
 					p[r] = dsp_silence;
@@ -1734,15 +1806,16 @@ dsp_cmx_send(void *arg)
 			 * remove delay only if we have delay AND we
 			 * have enabled tx_dejitter
 			 */
-			if (delay && dsp->tx_dejitter) {
-				if (dsp_debug & DEBUG_DSP_CMX)
+			if (delay > dsp_poll && dsp->tx_dejitter) {
+				if (dsp_debug & DEBUG_DSP_CLOCK)
 					printk(KERN_DEBUG
 					    "%s lowest tx_delay of %d bytes for"
 					    " dsp %s are now removed.\n",
 					    __func__, delay,
 					    dsp->name);
 				r = dsp->tx_R;
-				rr = (r + delay) & CMX_BUFF_MASK;
+				rr = (r + delay - (dsp_poll >> 1))
+					& CMX_BUFF_MASK;
 				/* delete tx-data */
 				while (r != rr) {
 					q[r] = dsp_silence;
@@ -1795,14 +1868,16 @@ dsp_cmx_transmit(struct dsp *dsp, struct sk_buff *skb)
 	ww = dsp->tx_R;
 	p = dsp->tx_buff;
 	d = skb->data;
-	space = ww-w;
-	if (space <= 0)
-		space += CMX_BUFF_SIZE;
+	space = (ww - w - 1) & CMX_BUFF_MASK;
 	/* write-pointer should not overrun nor reach read pointer */
-	if (space-1 < skb->len)
+	if (space < skb->len) {
 		/* write to the space we have left */
-		ww = (ww - 1) & CMX_BUFF_MASK;
-	else
+		ww = (ww - 1) & CMX_BUFF_MASK; /* end one byte prior tx_R */
+		if (dsp_debug & DEBUG_DSP_CLOCK)
+			printk(KERN_DEBUG "%s: TX overflow space=%d skb->len="
+			    "%d, w=0x%04x, ww=0x%04x\n", __func__, space,
+			    skb->len, w, ww);
+	} else
 		/* write until all byte are copied */
 		ww = (w + skb->len) & CMX_BUFF_MASK;
 	dsp->tx_W = ww;
@@ -1852,10 +1927,8 @@ dsp_cmx_hdlc(struct dsp *dsp, struct sk_buff *skb)
 
 	/* no conf */
 	if (!dsp->conf) {
-		/* in case of hardware (echo) */
-		if (dsp->pcm_slot_tx >= 0)
-			return;
-		if (dsp->echo)
+		/* in case of software echo */
+		if (dsp->echo.software) {
 			nskb = skb_clone(skb, GFP_ATOMIC);
 			if (nskb) {
 				hh = mISDN_HEAD_P(nskb);
@@ -1864,13 +1937,14 @@ dsp_cmx_hdlc(struct dsp *dsp, struct sk_buff *skb)
 				skb_queue_tail(&dsp->sendq, nskb);
 				schedule_work(&dsp->workq);
 			}
+		}
 		return;
 	}
 	/* in case of hardware conference */
 	if (dsp->conf->hardware)
 		return;
 	list_for_each_entry(member, &dsp->conf->mlist, list) {
-		if (dsp->echo || member->dsp != dsp) {
+		if (dsp->echo.software || member->dsp != dsp) {
 			nskb = skb_clone(skb, GFP_ATOMIC);
 			if (nskb) {
 				hh = mISDN_HEAD_P(nskb);

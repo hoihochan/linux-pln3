@@ -58,6 +58,7 @@
 #include <linux/ioport.h>
 #include <linux/in.h>
 #include <linux/slab.h>
+#include <linux/smp_lock.h>
 #include <linux/tty.h>
 #include <linux/errno.h>
 #include <linux/string.h>	/* used in new tty drivers */
@@ -372,14 +373,8 @@ static void remove_from_rx_queue(struct r3964_info *pInfo,
 static void put_char(struct r3964_info *pInfo, unsigned char ch)
 {
 	struct tty_struct *tty = pInfo->tty;
-
-	if (tty == NULL)
-		return;
-
 	/* FIXME: put_char should not be called from an IRQ */
-	if (tty->ops->put_char) {
-		tty->ops->put_char(tty, ch);
-	}
+	tty_put_char(tty, ch);
 	pInfo->bcc ^= ch;
 }
 
@@ -1009,7 +1004,7 @@ static int r3964_open(struct tty_struct *tty)
 
 static void r3964_close(struct tty_struct *tty)
 {
-	struct r3964_info *pInfo = (struct r3964_info *)tty->disc_data;
+	struct r3964_info *pInfo = tty->disc_data;
 	struct r3964_client_info *pClient, *pNext;
 	struct r3964_message *pMsg;
 	struct r3964_block_header *pHeader, *pNextHeader;
@@ -1064,11 +1059,11 @@ static void r3964_close(struct tty_struct *tty)
 static ssize_t r3964_read(struct tty_struct *tty, struct file *file,
 			  unsigned char __user * buf, size_t nr)
 {
-	struct r3964_info *pInfo = (struct r3964_info *)tty->disc_data;
+	struct r3964_info *pInfo = tty->disc_data;
 	struct r3964_client_info *pClient;
 	struct r3964_message *pMsg;
 	struct r3964_client_message theMsg;
-	int count;
+	int ret;
 
 	TRACE_L("read()");
 
@@ -1080,8 +1075,8 @@ static ssize_t r3964_read(struct tty_struct *tty, struct file *file,
 		if (pMsg == NULL) {
 			/* no messages available. */
 			if (file->f_flags & O_NONBLOCK) {
-				unlock_kernel();
-				return -EAGAIN;
+				ret = -EAGAIN;
+				goto unlock;
 			}
 			/* block until there is a message: */
 			wait_event_interruptible(pInfo->read_wait,
@@ -1091,35 +1086,37 @@ static ssize_t r3964_read(struct tty_struct *tty, struct file *file,
 		/* If we still haven't got a message, we must have been signalled */
 
 		if (!pMsg) {
-			unlock_kernel();
-			return -EINTR;
+			ret = -EINTR;
+			goto unlock;
 		}
 
 		/* deliver msg to client process: */
 		theMsg.msg_id = pMsg->msg_id;
 		theMsg.arg = pMsg->arg;
 		theMsg.error_code = pMsg->error_code;
-		count = sizeof(struct r3964_client_message);
+		ret = sizeof(struct r3964_client_message);
 
 		kfree(pMsg);
 		TRACE_M("r3964_read - msg kfree %p", pMsg);
 
-		if (copy_to_user(buf, &theMsg, count)) {
-			unlock_kernel();
-			return -EFAULT;
+		if (copy_to_user(buf, &theMsg, ret)) {
+			ret = -EFAULT;
+			goto unlock;
 		}
 
-		TRACE_PS("read - return %d", count);
-		return count;
+		TRACE_PS("read - return %d", ret);
+		goto unlock;
 	}
+	ret = -EPERM;
+unlock:
 	unlock_kernel();
-	return -EPERM;
+	return ret;
 }
 
 static ssize_t r3964_write(struct tty_struct *tty, struct file *file,
 			   const unsigned char *data, size_t count)
 {
-	struct r3964_info *pInfo = (struct r3964_info *)tty->disc_data;
+	struct r3964_info *pInfo = tty->disc_data;
 	struct r3964_block_header *pHeader;
 	struct r3964_client_info *pClient;
 	unsigned char *new_data;
@@ -1188,7 +1185,7 @@ static ssize_t r3964_write(struct tty_struct *tty, struct file *file,
 static int r3964_ioctl(struct tty_struct *tty, struct file *file,
 		unsigned int cmd, unsigned long arg)
 {
-	struct r3964_info *pInfo = (struct r3964_info *)tty->disc_data;
+	struct r3964_info *pInfo = tty->disc_data;
 	if (pInfo == NULL)
 		return -EINVAL;
 	switch (cmd) {
@@ -1222,7 +1219,7 @@ static void r3964_set_termios(struct tty_struct *tty, struct ktermios *old)
 static unsigned int r3964_poll(struct tty_struct *tty, struct file *file,
 			struct poll_table_struct *wait)
 {
-	struct r3964_info *pInfo = (struct r3964_info *)tty->disc_data;
+	struct r3964_info *pInfo = tty->disc_data;
 	struct r3964_client_info *pClient;
 	struct r3964_message *pMsg = NULL;
 	unsigned long flags;
@@ -1247,7 +1244,7 @@ static unsigned int r3964_poll(struct tty_struct *tty, struct file *file,
 static void r3964_receive_buf(struct tty_struct *tty, const unsigned char *cp,
 			char *fp, int count)
 {
-	struct r3964_info *pInfo = (struct r3964_info *)tty->disc_data;
+	struct r3964_info *pInfo = tty->disc_data;
 	const unsigned char *p;
 	char *f, flags = 0;
 	int i;

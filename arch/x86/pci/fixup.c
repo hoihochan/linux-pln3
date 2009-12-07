@@ -6,8 +6,7 @@
 #include <linux/dmi.h>
 #include <linux/pci.h>
 #include <linux/init.h>
-#include "pci.h"
-
+#include <asm/pci_x86.h>
 
 static void __devinit pci_fixup_i450nx(struct pci_dev *d)
 {
@@ -357,7 +356,7 @@ static void __devinit pci_fixup_video(struct pci_dev *pdev)
 DECLARE_PCI_FIXUP_FINAL(PCI_ANY_ID, PCI_ANY_ID, pci_fixup_video);
 
 
-static struct dmi_system_id __devinitdata msi_k8t_dmi_table[] = {
+static const struct dmi_system_id __devinitconst msi_k8t_dmi_table[] = {
 	{
 		.ident = "MSI-K8T-Neo2Fir",
 		.matches = {
@@ -414,7 +413,7 @@ DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_8237,
  */
 static u16 toshiba_line_size;
 
-static struct dmi_system_id __devinitdata toshiba_ohci1394_dmi_table[] = {
+static const struct dmi_system_id __devinitconst toshiba_ohci1394_dmi_table[] = {
 	{
 		.ident = "Toshiba PS5 based laptop",
 		.matches = {
@@ -496,21 +495,29 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_SIEMENS, 0x0015,
 			  pci_siemens_interrupt_controller);
 
 /*
- * Regular PCI devices have 256 bytes, but AMD Family 10h/11h CPUs have
- * 4096 bytes configuration space for each function of their processor
- * configuration space.
+ * SB600: Disable BAR1 on device 14.0 to avoid HPET resources from
+ * confusing the PCI engine:
  */
-static void amd_cpu_pci_cfg_space_size(struct pci_dev *dev)
+static void sb600_disable_hpet_bar(struct pci_dev *dev)
 {
-	dev->cfg_size = pci_cfg_space_size_ext(dev);
+	u8 val;
+
+	/*
+	 * The SB600 and SB700 both share the same device
+	 * ID, but the PM register 0x55 does something different
+	 * for the SB700, so make sure we are dealing with the
+	 * SB600 before touching the bit:
+	 */
+
+	pci_read_config_byte(dev, 0x08, &val);
+
+	if (val < 0x2F) {
+		outb(0x55, 0xCD6);
+		val = inb(0xCD7);
+
+		/* Set bit 7 in PM register 0x55 */
+		outb(0x55, 0xCD6);
+		outb(val | 0x80, 0xCD7);
+	}
 }
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, 0x1200, amd_cpu_pci_cfg_space_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, 0x1201, amd_cpu_pci_cfg_space_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, 0x1202, amd_cpu_pci_cfg_space_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, 0x1203, amd_cpu_pci_cfg_space_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, 0x1204, amd_cpu_pci_cfg_space_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, 0x1300, amd_cpu_pci_cfg_space_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, 0x1301, amd_cpu_pci_cfg_space_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, 0x1302, amd_cpu_pci_cfg_space_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, 0x1303, amd_cpu_pci_cfg_space_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, 0x1304, amd_cpu_pci_cfg_space_size);
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_ATI, 0x4385, sb600_disable_hpet_bar);

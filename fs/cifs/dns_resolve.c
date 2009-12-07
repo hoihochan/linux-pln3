@@ -29,20 +29,41 @@
 #include "cifsproto.h"
 #include "cifs_debug.h"
 
-static int dns_resolver_instantiate(struct key *key, const void *data,
+/* Checks if supplied name is IP address
+ * returns:
+ * 		1 - name is IP
+ * 		0 - name is not IP
+ */
+static int
+is_ip(char *name)
+{
+	struct sockaddr_storage ss;
+
+	return cifs_convert_address(name, &ss);
+}
+
+static int
+dns_resolver_instantiate(struct key *key, const void *data,
 		size_t datalen)
 {
 	int rc = 0;
 	char *ip;
 
-	ip = kmalloc(datalen+1, GFP_KERNEL);
+	ip = kmalloc(datalen + 1, GFP_KERNEL);
 	if (!ip)
 		return -ENOMEM;
 
 	memcpy(ip, data, datalen);
 	ip[datalen] = '\0';
 
-	rcu_assign_pointer(key->payload.data, ip);
+	/* make sure this looks like an address */
+	if (!is_ip(ip)) {
+		kfree(ip);
+		return -EINVAL;
+	}
+
+	key->type_data.x[0] = datalen;
+	key->payload.data = ip;
 
 	return rc;
 }
@@ -61,33 +82,6 @@ struct key_type key_type_dns_resolver = {
 	.destroy     = dns_resolver_destroy,
 	.match       = user_match,
 };
-
-/* Checks if supplied name is IP address
- * returns:
- * 		1 - name is IP
- * 		0 - name is not IP
- */
-static int is_ip(const char *name)
-{
-	int rc;
-	struct sockaddr_in sin_server;
-	struct sockaddr_in6 sin_server6;
-
-	rc = cifs_inet_pton(AF_INET, name,
-			&sin_server.sin_addr.s_addr);
-
-	if (rc <= 0) {
-		/* not ipv4 address, try ipv6 */
-		rc = cifs_inet_pton(AF_INET6, name,
-				&sin_server6.sin6_addr.in6_u);
-		if (rc > 0)
-			return 1;
-	} else {
-		return 1;
-	}
-	/* we failed translating address */
-	return 0;
-}
 
 /* Resolves server name to ip address.
  * input:
@@ -140,6 +134,7 @@ dns_resolve_server_name_to_ip(const char *unc, char **ip_addr)
 
 	rkey = request_key(&key_type_dns_resolver, name, "");
 	if (!IS_ERR(rkey)) {
+		len = rkey->type_data.x[0];
 		data = rkey->payload.data;
 	} else {
 		cERROR(1, ("%s: unable to resolve: %s", __func__, name));
@@ -148,11 +143,9 @@ dns_resolve_server_name_to_ip(const char *unc, char **ip_addr)
 
 skip_upcall:
 	if (data) {
-		len = strlen(data);
-		*ip_addr = kmalloc(len+1, GFP_KERNEL);
+		*ip_addr = kmalloc(len + 1, GFP_KERNEL);
 		if (*ip_addr) {
-			memcpy(*ip_addr, data, len);
-			(*ip_addr)[len] = '\0';
+			memcpy(*ip_addr, data, len + 1);
 			if (!IS_ERR(rkey))
 				cFYI(1, ("%s: resolved: %s to %s", __func__,
 							name,

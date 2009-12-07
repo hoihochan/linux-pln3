@@ -20,9 +20,6 @@
 #include "sdio_cis.h"
 #include "sdio_bus.h"
 
-#define dev_to_sdio_func(d)	container_of(d, struct sdio_func, dev)
-#define to_sdio_driver(d)      container_of(d, struct sdio_driver, drv)
-
 /* show configuration fields */
 #define sdio_config_attr(field, format_string)				\
 static ssize_t								\
@@ -239,8 +236,7 @@ int sdio_add_func(struct sdio_func *func)
 {
 	int ret;
 
-	snprintf(func->dev.bus_id, sizeof(func->dev.bus_id),
-		 "%s:%d", mmc_card_id(func->card), func->num);
+	dev_set_name(&func->dev, "%s:%d", mmc_card_id(func->card), func->num);
 
 	ret = device_add(&func->dev);
 	if (ret == 0)

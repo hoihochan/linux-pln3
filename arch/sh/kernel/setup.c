@@ -26,6 +26,11 @@
 #include <linux/err.h>
 #include <linux/debugfs.h>
 #include <linux/crash_dump.h>
+#include <linux/mmzone.h>
+#include <linux/clk.h>
+#include <linux/delay.h>
+#include <linux/platform_device.h>
+#include <linux/lmb.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
 #include <asm/page.h>
@@ -44,6 +49,7 @@
 struct sh_cpuinfo cpu_data[NR_CPUS] __read_mostly = {
 	[0] = {
 		.type			= CPU_SH_NONE,
+		.family			= CPU_FAMILY_UNKNOWN,
 		.loops_per_jiffy	= 10000000,
 	},
 };
@@ -100,12 +106,11 @@ static int __init early_parse_mem(char *p)
 	size = memparse(p, &p);
 
 	if (size > __MEMORY_SIZE) {
-		static char msg[] __initdata = KERN_ERR
+		printk(KERN_ERR
 			"Using mem= to increase the size of kernel memory "
 			"is not allowed.\n"
 			"  Recompile the kernel with the correct value for "
-			"CONFIG_MEMORY_SIZE.\n";
-		printk(msg);
+			"CONFIG_MEMORY_SIZE.\n");
 		return 0;
 	}
 
@@ -144,6 +149,7 @@ static void __init reserve_crashkernel(void)
 {
 	unsigned long long free_mem;
 	unsigned long long crash_size, crash_base;
+	void *vp;
 	int ret;
 
 	free_mem = ((unsigned long long)max_low_pfn - min_low_pfn) << PAGE_SHIFT;
@@ -152,12 +158,14 @@ static void __init reserve_crashkernel(void)
 			&crash_size, &crash_base);
 	if (ret == 0 && crash_size) {
 		if (crash_base <= 0) {
-			printk(KERN_INFO "crashkernel reservation failed - "
-					"you have to specify a base address\n");
-			return;
-		}
-
-		if (reserve_bootmem(crash_base, crash_size,
+			vp = alloc_bootmem_nopanic(crash_size);
+			if (!vp) {
+				printk(KERN_INFO "crashkernel allocation "
+				       "failed\n");
+				return;
+			}
+			crash_base = __pa(vp);
+		} else if (reserve_bootmem(crash_base, crash_size,
 					BOOTMEM_EXCLUSIVE) < 0) {
 			printk(KERN_INFO "crashkernel reservation failed - "
 					"memory is in use\n");
@@ -178,6 +186,22 @@ static void __init reserve_crashkernel(void)
 static inline void __init reserve_crashkernel(void)
 {}
 #endif
+
+void __cpuinit calibrate_delay(void)
+{
+	struct clk *clk = clk_get(NULL, "cpu_clk");
+
+	if (IS_ERR(clk))
+		panic("Need a sane CPU clock definition!");
+
+	loops_per_jiffy = (clk_get_rate(clk) >> 1) / HZ;
+
+	printk(KERN_INFO "Calibrating delay loop (skipped)... "
+			 "%lu.%02lu BogoMIPS PRESET (lpj=%lu)\n",
+			 loops_per_jiffy/(500000/HZ),
+			 (loops_per_jiffy/(5000/HZ)) % 100,
+			 loops_per_jiffy);
+}
 
 void __init __add_active_range(unsigned int nid, unsigned long start_pfn,
 						unsigned long end_pfn)
@@ -211,36 +235,44 @@ void __init __add_active_range(unsigned int nid, unsigned long start_pfn,
 void __init setup_bootmem_allocator(unsigned long free_pfn)
 {
 	unsigned long bootmap_size;
+	unsigned long bootmap_pages, bootmem_paddr;
+	u64 total_pages = (lmb_end_of_DRAM() - __MEMORY_START) >> PAGE_SHIFT;
+	int i;
+
+	bootmap_pages = bootmem_bootmap_pages(total_pages);
+
+	bootmem_paddr = lmb_alloc(bootmap_pages << PAGE_SHIFT, PAGE_SIZE);
 
 	/*
 	 * Find a proper area for the bootmem bitmap. After this
 	 * bootstrap step all allocations (until the page allocator
 	 * is intact) must be done via bootmem_alloc().
 	 */
-	bootmap_size = init_bootmem_node(NODE_DATA(0), free_pfn,
+	bootmap_size = init_bootmem_node(NODE_DATA(0),
+					 bootmem_paddr >> PAGE_SHIFT,
 					 min_low_pfn, max_low_pfn);
 
-	__add_active_range(0, min_low_pfn, max_low_pfn);
+	/* Add active regions with valid PFNs. */
+	for (i = 0; i < lmb.memory.cnt; i++) {
+		unsigned long start_pfn, end_pfn;
+		start_pfn = lmb.memory.region[i].base >> PAGE_SHIFT;
+		end_pfn = start_pfn + lmb_size_pages(&lmb.memory, i);
+		__add_active_range(0, start_pfn, end_pfn);
+	}
+
+	/*
+	 * Add all physical memory to the bootmem map and mark each
+	 * area as present.
+	 */
 	register_bootmem_low_pages();
 
+	/* Reserve the sections we're already using. */
+	for (i = 0; i < lmb.reserved.cnt; i++)
+		reserve_bootmem(lmb.reserved.region[i].base,
+				lmb_size_bytes(&lmb.reserved, i),
+				BOOTMEM_DEFAULT);
+
 	node_set_online(0);
-
-	/*
-	 * Reserve the kernel text and
-	 * Reserve the bootmem bitmap. We do this in two steps (first step
-	 * was init_bootmem()), because this catches the (definitely buggy)
-	 * case of us accidentally initializing the bootmem allocator with
-	 * an invalid RAM area.
-	 */
-	reserve_bootmem(__MEMORY_START+PAGE_SIZE,
-		(PFN_PHYS(free_pfn)+bootmap_size+PAGE_SIZE-1)-__MEMORY_START,
-		BOOTMEM_DEFAULT);
-
-	/*
-	 * reserve physical page 0 - it's a special BIOS page on many boxes,
-	 * enabling clean reboots, SMP operation, laptop functions.
-	 */
-	reserve_bootmem(__MEMORY_START, PAGE_SIZE, BOOTMEM_DEFAULT);
 
 	sparse_memory_present_with_active_regions(0);
 
@@ -248,17 +280,18 @@ void __init setup_bootmem_allocator(unsigned long free_pfn)
 	ROOT_DEV = Root_RAM0;
 
 	if (LOADER_TYPE && INITRD_START) {
-		if (INITRD_START + INITRD_SIZE <= (max_low_pfn << PAGE_SHIFT)) {
-			reserve_bootmem(INITRD_START + __MEMORY_START,
-					INITRD_SIZE, BOOTMEM_DEFAULT);
-			initrd_start = INITRD_START + PAGE_OFFSET +
-					__MEMORY_START;
+		unsigned long initrd_start_phys = INITRD_START + __MEMORY_START;
+
+		if (initrd_start_phys + INITRD_SIZE <= PFN_PHYS(max_low_pfn)) {
+			reserve_bootmem(initrd_start_phys, INITRD_SIZE,
+					BOOTMEM_DEFAULT);
+			initrd_start = (unsigned long)__va(initrd_start_phys);
 			initrd_end = initrd_start + INITRD_SIZE;
 		} else {
 			printk("initrd extends beyond end of memory "
-			    "(0x%08lx > 0x%08lx)\ndisabling initrd\n",
-				    INITRD_START + INITRD_SIZE,
-				    max_low_pfn << PAGE_SHIFT);
+			       "(0x%08lx > 0x%08lx)\ndisabling initrd\n",
+			       initrd_start_phys + INITRD_SIZE,
+			       (unsigned long)PFN_PHYS(max_low_pfn));
 			initrd_start = 0;
 		}
 	}
@@ -271,12 +304,37 @@ void __init setup_bootmem_allocator(unsigned long free_pfn)
 static void __init setup_memory(void)
 {
 	unsigned long start_pfn;
+	u64 base = min_low_pfn << PAGE_SHIFT;
+	u64 size = (max_low_pfn << PAGE_SHIFT) - base;
 
 	/*
 	 * Partially used pages are not usable - thus
 	 * we are rounding upwards:
 	 */
 	start_pfn = PFN_UP(__pa(_end));
+
+	lmb_add(base, size);
+
+	/*
+	 * Reserve the kernel text and
+	 * Reserve the bootmem bitmap. We do this in two steps (first step
+	 * was init_bootmem()), because this catches the (definitely buggy)
+	 * case of us accidentally initializing the bootmem allocator with
+	 * an invalid RAM area.
+	 */
+	lmb_reserve(__MEMORY_START + CONFIG_ZERO_PAGE_OFFSET,
+		    (PFN_PHYS(start_pfn) + PAGE_SIZE - 1) -
+		    (__MEMORY_START + CONFIG_ZERO_PAGE_OFFSET));
+
+	/*
+	 * Reserve physical pages below CONFIG_ZERO_PAGE_OFFSET.
+	 */
+	if (CONFIG_ZERO_PAGE_OFFSET != 0)
+		lmb_reserve(__MEMORY_START, CONFIG_ZERO_PAGE_OFFSET);
+
+	lmb_analyze();
+	lmb_dump_all();
+
 	setup_bootmem_allocator(start_pfn);
 }
 #else
@@ -301,6 +359,10 @@ static int __init parse_elfcorehdr(char *arg)
 }
 early_param("elfcorehdr", parse_elfcorehdr);
 #endif
+
+void __init __attribute__ ((weak)) plat_early_device_setup(void)
+{
+}
 
 void __init setup_arch(char **cmdline_p)
 {
@@ -343,10 +405,14 @@ void __init setup_arch(char **cmdline_p)
 	if (!memory_end)
 		memory_end = memory_start + __MEMORY_SIZE;
 
-#ifdef CONFIG_CMDLINE_BOOL
+#ifdef CONFIG_CMDLINE_OVERWRITE
 	strlcpy(command_line, CONFIG_CMDLINE, sizeof(command_line));
 #else
 	strlcpy(command_line, COMMAND_LINE, sizeof(command_line));
+#ifdef CONFIG_CMDLINE_EXTEND
+	strlcat(command_line, " ", sizeof(command_line));
+	strlcat(command_line, CONFIG_CMDLINE, sizeof(command_line));
+#endif
 #endif
 
 	/* Save unparsed command line copy for /proc/cmdline */
@@ -354,6 +420,8 @@ void __init setup_arch(char **cmdline_p)
 	*cmdline_p = command_line;
 
 	parse_early_param();
+
+	plat_early_device_setup();
 
 	sh_mv_setup();
 
@@ -371,6 +439,7 @@ void __init setup_arch(char **cmdline_p)
 	nodes_clear(node_online_map);
 
 	/* Setup bootmem with available RAM */
+	lmb_init();
 	setup_memory();
 	sparse_init();
 
@@ -389,7 +458,20 @@ void __init setup_arch(char **cmdline_p)
 #endif
 }
 
+/* processor boot mode configuration */
+int generic_mode_pins(void)
+{
+	pr_warning("generic_mode_pins(): missing mode pin configuration\n");
+	return 0;
+}
+
+int test_mode_pin(int pin)
+{
+	return sh_mv.mv_mode_pins() & pin;
+}
+
 static const char *cpu_name[] = {
+	[CPU_SH7201]	= "SH7201",
 	[CPU_SH7203]	= "SH7203",	[CPU_SH7263]	= "SH7263",
 	[CPU_SH7206]	= "SH7206",	[CPU_SH7619]	= "SH7619",
 	[CPU_SH7705]	= "SH7705",	[CPU_SH7706]	= "SH7706",
@@ -404,10 +486,12 @@ static const char *cpu_name[] = {
 	[CPU_SH7763]	= "SH7763",	[CPU_SH7770]	= "SH7770",
 	[CPU_SH7780]	= "SH7780",	[CPU_SH7781]	= "SH7781",
 	[CPU_SH7343]	= "SH7343",	[CPU_SH7785]	= "SH7785",
+	[CPU_SH7786]	= "SH7786",	[CPU_SH7757]	= "SH7757",
 	[CPU_SH7722]	= "SH7722",	[CPU_SHX3]	= "SH-X3",
 	[CPU_SH5_101]	= "SH5-101",	[CPU_SH5_103]	= "SH5-103",
 	[CPU_MXG]	= "MX-G",	[CPU_SH7723]	= "SH7723",
-	[CPU_SH7366]	= "SH7366",	[CPU_SH_NONE]	= "Unknown"
+	[CPU_SH7366]	= "SH7366",	[CPU_SH7724]	= "SH7724",
+	[CPU_SH_NONE]	= "Unknown"
 };
 
 const char *get_cpu_subtype(struct sh_cpuinfo *c)
@@ -420,7 +504,7 @@ EXPORT_SYMBOL(get_cpu_subtype);
 /* Symbolic CPU flags, keep in sync with asm/cpu-features.h */
 static const char *cpu_flags[] = {
 	"none", "fpu", "p2flush", "mmuassoc", "dsp", "perfctr",
-	"ptea", "llsc", "l2", "op32", NULL
+	"ptea", "llsc", "l2", "op32", "pteaex", NULL
 };
 
 static void show_cpuflags(struct seq_file *m, struct sh_cpuinfo *c)
@@ -465,6 +549,8 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 
 	if (cpu == 0)
 		seq_printf(m, "machine\t\t: %s\n", get_system_type());
+	else
+		seq_printf(m, "\n");
 
 	seq_printf(m, "processor\t: %d\n", cpu);
 	seq_printf(m, "cpu family\t: %s\n", init_utsname()->machine);
@@ -530,6 +616,8 @@ struct dentry *sh_debugfs_root;
 static int __init sh_debugfs_init(void)
 {
 	sh_debugfs_root = debugfs_create_dir("sh", NULL);
+	if (!sh_debugfs_root)
+		return -ENOMEM;
 	if (IS_ERR(sh_debugfs_root))
 		return PTR_ERR(sh_debugfs_root);
 

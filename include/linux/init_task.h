@@ -5,6 +5,7 @@
 #include <linux/irqflags.h>
 #include <linux/utsname.h>
 #include <linux/lockdep.h>
+#include <linux/ftrace.h>
 #include <linux/ipc.h>
 #include <linux/pid_namespace.h>
 #include <linux/user_namespace.h>
@@ -12,31 +13,7 @@
 #include <net/net_namespace.h>
 
 extern struct files_struct init_files;
-
-#define INIT_KIOCTX(name, which_mm) \
-{							\
-	.users		= ATOMIC_INIT(1),		\
-	.dead		= 0,				\
-	.mm		= &which_mm,			\
-	.user_id	= 0,				\
-	.next		= NULL,				\
-	.wait		= __WAIT_QUEUE_HEAD_INITIALIZER(name.wait), \
-	.ctx_lock	= __SPIN_LOCK_UNLOCKED(name.ctx_lock), \
-	.reqs_active	= 0U,				\
-	.max_reqs	= ~0U,				\
-}
-
-#define INIT_MM(name) \
-{			 					\
-	.mm_rb		= RB_ROOT,				\
-	.pgd		= swapper_pg_dir, 			\
-	.mm_users	= ATOMIC_INIT(2), 			\
-	.mm_count	= ATOMIC_INIT(1), 			\
-	.mmap_sem	= __RWSEM_INITIALIZER(name.mmap_sem),	\
-	.page_table_lock =  __SPIN_LOCK_UNLOCKED(name.page_table_lock),	\
-	.mmlist		= LIST_HEAD_INIT(name.mmlist),		\
-	.cpu_vm_mask	= CPU_MASK_ALL,				\
-}
+extern struct fs_struct init_fs;
 
 #define INIT_SIGNALS(sig) {						\
 	.count		= ATOMIC_INIT(1), 				\
@@ -47,6 +24,11 @@ extern struct files_struct init_files;
 	.posix_timers	 = LIST_HEAD_INIT(sig.posix_timers),		\
 	.cpu_timers	= INIT_CPU_TIMERS(sig.cpu_timers),		\
 	.rlim		= INIT_RLIMITS,					\
+	.cputimer	= { 						\
+		.cputime = INIT_CPUTIME,				\
+		.running = 0,						\
+		.lock = __SPIN_LOCK_UNLOCKED(sig.cputimer.lock),	\
+	},								\
 }
 
 extern struct nsproxy init_nsproxy;
@@ -57,7 +39,6 @@ extern struct nsproxy init_nsproxy;
 	.mnt_ns		= NULL,						\
 	INIT_NET_NS(net_ns)                                             \
 	INIT_IPC_NS(ipc_ns)						\
-	.user_ns	= &init_user_ns,				\
 }
 
 #define INIT_SIGHAND(sighand) {						\
@@ -113,6 +94,27 @@ extern struct group_info init_groups;
 # define CAP_INIT_BSET  CAP_INIT_EFF_SET
 #endif
 
+#ifdef CONFIG_TREE_PREEMPT_RCU
+#define INIT_TASK_RCU_PREEMPT(tsk)					\
+	.rcu_read_lock_nesting = 0,					\
+	.rcu_read_unlock_special = 0,					\
+	.rcu_blocked_node = NULL,					\
+	.rcu_node_entry = LIST_HEAD_INIT(tsk.rcu_node_entry),
+#else
+#define INIT_TASK_RCU_PREEMPT(tsk)
+#endif
+
+extern struct cred init_cred;
+
+#ifdef CONFIG_PERF_EVENTS
+# define INIT_PERF_EVENTS(tsk)					\
+	.perf_event_mutex = 						\
+		 __MUTEX_INITIALIZER(tsk.perf_event_mutex),		\
+	.perf_event_list = LIST_HEAD_INIT(tsk.perf_event_list),
+#else
+# define INIT_PERF_EVENTS(tsk)
+#endif
+
 /*
  *  INIT_TASK is used to set up the first task table, touch at
  * your own risk!. Base=0, limit=0x1fffff (=2MB)
@@ -140,6 +142,7 @@ extern struct group_info init_groups;
 		.nr_cpus_allowed = NR_CPUS,				\
 	},								\
 	.tasks		= LIST_HEAD_INIT(tsk.tasks),			\
+	.pushable_tasks = PLIST_NODE_INIT(tsk.pushable_tasks, MAX_PRIO), \
 	.ptraced	= LIST_HEAD_INIT(tsk.ptraced),			\
 	.ptrace_entry	= LIST_HEAD_INIT(tsk.ptrace_entry),		\
 	.real_parent	= &tsk,						\
@@ -147,13 +150,10 @@ extern struct group_info init_groups;
 	.children	= LIST_HEAD_INIT(tsk.children),			\
 	.sibling	= LIST_HEAD_INIT(tsk.sibling),			\
 	.group_leader	= &tsk,						\
-	.group_info	= &init_groups,					\
-	.cap_effective	= CAP_INIT_EFF_SET,				\
-	.cap_inheritable = CAP_INIT_INH_SET,				\
-	.cap_permitted	= CAP_FULL_SET,					\
-	.cap_bset 	= CAP_INIT_BSET,				\
-	.securebits     = SECUREBITS_DEFAULT,				\
-	.user		= INIT_USER,					\
+	.real_cred	= &init_cred,					\
+	.cred		= &init_cred,					\
+	.cred_guard_mutex =						\
+		 __MUTEX_INITIALIZER(tsk.cred_guard_mutex),		\
 	.comm		= "swapper",					\
 	.thread		= INIT_THREAD,					\
 	.fs		= &init_fs,					\
@@ -170,6 +170,7 @@ extern struct group_info init_groups;
 	.cpu_timers	= INIT_CPU_TIMERS(tsk.cpu_timers),		\
 	.fs_excl	= ATOMIC_INIT(0),				\
 	.pi_lock	= __SPIN_LOCK_UNLOCKED(tsk.pi_lock),		\
+	.timer_slack_ns = 50000, /* 50 usec default slack */		\
 	.pids = {							\
 		[PIDTYPE_PID]  = INIT_PID_LINK(PIDTYPE_PID),		\
 		[PIDTYPE_PGID] = INIT_PID_LINK(PIDTYPE_PGID),		\
@@ -177,8 +178,12 @@ extern struct group_info init_groups;
 	},								\
 	.dirties = INIT_PROP_LOCAL_SINGLE(dirties),			\
 	INIT_IDS							\
+	INIT_PERF_EVENTS(tsk)						\
 	INIT_TRACE_IRQFLAGS						\
 	INIT_LOCKDEP							\
+	INIT_FTRACE_GRAPH						\
+	INIT_TRACE_RECURSION						\
+	INIT_TASK_RCU_PREEMPT(tsk)					\
 }
 
 
@@ -188,6 +193,9 @@ extern struct group_info init_groups;
 	LIST_HEAD_INIT(cpu_timers[1]),					\
 	LIST_HEAD_INIT(cpu_timers[2]),					\
 }
+
+/* Attach to the init_task data structure for proper alignment */
+#define __init_task_data __attribute__((__section__(".data.init_task")))
 
 
 #endif

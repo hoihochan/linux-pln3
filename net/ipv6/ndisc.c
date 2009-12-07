@@ -98,7 +98,7 @@ static int pndisc_constructor(struct pneigh_entry *n);
 static void pndisc_destructor(struct pneigh_entry *n);
 static void pndisc_redo(struct sk_buff *skb);
 
-static struct neigh_ops ndisc_generic_ops = {
+static const struct neigh_ops ndisc_generic_ops = {
 	.family =		AF_INET6,
 	.solicit =		ndisc_solicit,
 	.error_report =		ndisc_error_report,
@@ -108,7 +108,7 @@ static struct neigh_ops ndisc_generic_ops = {
 	.queue_xmit =		dev_queue_xmit,
 };
 
-static struct neigh_ops ndisc_hh_ops = {
+static const struct neigh_ops ndisc_hh_ops = {
 	.family =		AF_INET6,
 	.solicit =		ndisc_solicit,
 	.error_report =		ndisc_error_report,
@@ -119,7 +119,7 @@ static struct neigh_ops ndisc_hh_ops = {
 };
 
 
-static struct neigh_ops ndisc_direct_ops = {
+static const struct neigh_ops ndisc_direct_ops = {
 	.family =		AF_INET6,
 	.output =		dev_queue_xmit,
 	.connected_output =	dev_queue_xmit,
@@ -437,38 +437,20 @@ static void pndisc_destructor(struct pneigh_entry *n)
 	ipv6_dev_mc_dec(dev, &maddr);
 }
 
-/*
- *	Send a Neighbour Advertisement
- */
-static void __ndisc_send(struct net_device *dev,
-			 struct neighbour *neigh,
-			 const struct in6_addr *daddr,
-			 const struct in6_addr *saddr,
-			 struct icmp6hdr *icmp6h, const struct in6_addr *target,
-			 int llinfo)
+struct sk_buff *ndisc_build_skb(struct net_device *dev,
+				const struct in6_addr *daddr,
+				const struct in6_addr *saddr,
+				struct icmp6hdr *icmp6h,
+				const struct in6_addr *target,
+				int llinfo)
 {
-	struct flowi fl;
-	struct dst_entry *dst;
 	struct net *net = dev_net(dev);
 	struct sock *sk = net->ipv6.ndisc_sk;
 	struct sk_buff *skb;
 	struct icmp6hdr *hdr;
-	struct inet6_dev *idev;
 	int len;
 	int err;
-	u8 *opt, type;
-
-	type = icmp6h->icmp6_type;
-
-	icmpv6_flow_init(sk, &fl, type, saddr, daddr, dev->ifindex);
-
-	dst = icmp6_dst_alloc(dev, neigh, daddr);
-	if (!dst)
-		return;
-
-	err = xfrm_lookup(&dst, &fl, NULL, 0);
-	if (err < 0)
-		return;
+	u8 *opt;
 
 	if (!dev->addr_len)
 		llinfo = 0;
@@ -483,10 +465,9 @@ static void __ndisc_send(struct net_device *dev,
 				  1, &err);
 	if (!skb) {
 		ND_PRINTK0(KERN_ERR
-			   "ICMPv6 ND: %s() failed to allocate an skb.\n",
-			   __func__);
-		dst_release(dst);
-		return;
+			   "ICMPv6 ND: %s() failed to allocate an skb, err=%d.\n",
+			   __func__, err);
+		return NULL;
 	}
 
 	skb_reserve(skb, LL_RESERVED_SPACE(dev));
@@ -510,23 +491,80 @@ static void __ndisc_send(struct net_device *dev,
 
 	hdr->icmp6_cksum = csum_ipv6_magic(saddr, daddr, len,
 					   IPPROTO_ICMPV6,
-					   csum_partial((__u8 *) hdr,
+					   csum_partial(hdr,
 							len, 0));
 
-	skb->dst = dst;
+	return skb;
+}
+
+EXPORT_SYMBOL(ndisc_build_skb);
+
+void ndisc_send_skb(struct sk_buff *skb,
+		    struct net_device *dev,
+		    struct neighbour *neigh,
+		    const struct in6_addr *daddr,
+		    const struct in6_addr *saddr,
+		    struct icmp6hdr *icmp6h)
+{
+	struct flowi fl;
+	struct dst_entry *dst;
+	struct net *net = dev_net(dev);
+	struct sock *sk = net->ipv6.ndisc_sk;
+	struct inet6_dev *idev;
+	int err;
+	u8 type;
+
+	type = icmp6h->icmp6_type;
+
+	icmpv6_flow_init(sk, &fl, type, saddr, daddr, dev->ifindex);
+
+	dst = icmp6_dst_alloc(dev, neigh, daddr);
+	if (!dst) {
+		kfree_skb(skb);
+		return;
+	}
+
+	err = xfrm_lookup(net, &dst, &fl, NULL, 0);
+	if (err < 0) {
+		kfree_skb(skb);
+		return;
+	}
+
+	skb_dst_set(skb, dst);
 
 	idev = in6_dev_get(dst->dev);
-	IP6_INC_STATS(idev, IPSTATS_MIB_OUTREQUESTS);
+	IP6_UPD_PO_STATS(net, idev, IPSTATS_MIB_OUT, skb->len);
 
 	err = NF_HOOK(PF_INET6, NF_INET_LOCAL_OUT, skb, NULL, dst->dev,
 		      dst_output);
 	if (!err) {
-		ICMP6MSGOUT_INC_STATS(idev, type);
-		ICMP6_INC_STATS(idev, ICMP6_MIB_OUTMSGS);
+		ICMP6MSGOUT_INC_STATS(net, idev, type);
+		ICMP6_INC_STATS(net, idev, ICMP6_MIB_OUTMSGS);
 	}
 
 	if (likely(idev != NULL))
 		in6_dev_put(idev);
+}
+
+EXPORT_SYMBOL(ndisc_send_skb);
+
+/*
+ *	Send a Neighbour Discover packet
+ */
+static void __ndisc_send(struct net_device *dev,
+			 struct neighbour *neigh,
+			 const struct in6_addr *daddr,
+			 const struct in6_addr *saddr,
+			 struct icmp6hdr *icmp6h, const struct in6_addr *target,
+			 int llinfo)
+{
+	struct sk_buff *skb;
+
+	skb = ndisc_build_skb(dev, daddr, saddr, icmp6h, target, llinfo);
+	if (!skb)
+		return;
+
+	ndisc_send_skb(skb, dev, neigh, daddr, saddr, icmp6h);
 }
 
 static void ndisc_send_na(struct net_device *dev, struct neighbour *neigh,
@@ -647,11 +685,8 @@ static void ndisc_solicit(struct neighbour *neigh, struct sk_buff *skb)
 
 	if ((probes -= neigh->parms->ucast_probes) < 0) {
 		if (!(neigh->nud_state & NUD_VALID)) {
-			ND_PRINTK1(KERN_DEBUG
-				   "%s(): trying to ucast probe in NUD_INVALID: "
-				   NIP6_FMT "\n",
-				   __func__,
-				   NIP6(*target));
+			ND_PRINTK1(KERN_DEBUG "%s(): trying to ucast probe in NUD_INVALID: %pI6\n",
+				   __func__, target);
 		}
 		ndisc_send_ns(dev, neigh, target, target, saddr);
 	} else if ((probes -= neigh->parms->app_probes) < 0) {
@@ -912,10 +947,15 @@ static void ndisc_recv_na(struct sk_buff *skb)
 		   is invalid, but ndisc specs say nothing
 		   about it. It could be misconfiguration, or
 		   an smart proxy agent tries to help us :-)
+
+		   We should not print the error if NA has been
+		   received from loopback - it is just our own
+		   unsolicited advertisement.
 		 */
-		ND_PRINTK1(KERN_WARNING
-			   "ICMPv6 NA: someone advertises our address on %s!\n",
-			   ifp->idev->dev->name);
+		if (skb->pkt_type != PACKET_LOOPBACK)
+			ND_PRINTK1(KERN_WARNING
+			   "ICMPv6 NA: someone advertises our address %pI6 on %s!\n",
+			   &ifp->addr, ifp->idev->dev->name);
 		in6_ifa_put(ifp);
 		return;
 	}
@@ -1055,11 +1095,7 @@ static void ndisc_ra_useropt(struct sk_buff *ra, struct nd_opt_hdr *opt)
 		&ipv6_hdr(ra)->saddr);
 	nlmsg_end(skb, nlh);
 
-	err = rtnl_notify(skb, net, 0, RTNLGRP_ND_USEROPT, NULL,
-			  GFP_ATOMIC);
-	if (err < 0)
-		goto errout;
-
+	rtnl_notify(skb, net, 0, RTNLGRP_ND_USEROPT, NULL, GFP_ATOMIC);
 	return;
 
 nla_put_failure:
@@ -1114,10 +1150,6 @@ static void ndisc_router_discovery(struct sk_buff *skb)
 			   skb->dev->name);
 		return;
 	}
-	if (in6_dev->cnf.forwarding || !in6_dev->cnf.accept_ra) {
-		in6_dev_put(in6_dev);
-		return;
-	}
 
 	if (!ndisc_parse_options(opt, optlen, &ndopts)) {
 		in6_dev_put(in6_dev);
@@ -1125,6 +1157,10 @@ static void ndisc_router_discovery(struct sk_buff *skb)
 			   "ICMP6 RA: invalid ND options\n");
 		return;
 	}
+
+	/* skip route and link configuration on routers */
+	if (in6_dev->cnf.forwarding || !in6_dev->cnf.accept_ra)
+		goto skip_linkparms;
 
 #ifdef CONFIG_IPV6_NDISC_NODETYPE
 	/* skip link-specific parameters from interior routers */
@@ -1199,7 +1235,7 @@ static void ndisc_router_discovery(struct sk_buff *skb)
 		}
 		neigh->flags |= NTF_ROUTER;
 	} else if (rt) {
-		rt->rt6i_flags |= (rt->rt6i_flags & ~RTF_PREF_MASK) | RTF_PREF(pref);
+		rt->rt6i_flags = (rt->rt6i_flags & ~RTF_PREF_MASK) | RTF_PREF(pref);
 	}
 
 	if (rt)
@@ -1246,9 +1282,7 @@ skip_defrtr:
 		}
 	}
 
-#ifdef CONFIG_IPV6_NDISC_NODETYPE
 skip_linkparms:
-#endif
 
 	/*
 	 *	Process options.
@@ -1274,6 +1308,10 @@ skip_linkparms:
 			     NEIGH_UPDATE_F_OVERRIDE_ISROUTER|
 			     NEIGH_UPDATE_F_ISROUTER);
 	}
+
+	/* skip route and link configuration on routers */
+	if (in6_dev->cnf.forwarding || !in6_dev->cnf.accept_ra)
+		goto out;
 
 #ifdef CONFIG_IPV6_ROUTE_INFO
 	if (in6_dev->cnf.accept_ra_rtr_pref && ndopts.nd_opts_ri) {
@@ -1489,7 +1527,7 @@ void ndisc_send_redirect(struct sk_buff *skb, struct neighbour *neigh,
 	if (dst == NULL)
 		return;
 
-	err = xfrm_lookup(&dst, &fl, NULL, 0);
+	err = xfrm_lookup(net, &dst, &fl, NULL, 0);
 	if (err)
 		return;
 
@@ -1498,13 +1536,10 @@ void ndisc_send_redirect(struct sk_buff *skb, struct neighbour *neigh,
 	if (rt->rt6i_flags & RTF_GATEWAY) {
 		ND_PRINTK2(KERN_WARNING
 			   "ICMPv6 Redirect: destination is not a neighbour.\n");
-		dst_release(dst);
-		return;
+		goto release;
 	}
-	if (!xrlim_allow(dst, 1*HZ)) {
-		dst_release(dst);
-		return;
-	}
+	if (!xrlim_allow(dst, 1*HZ))
+		goto release;
 
 	if (dev->addr_len) {
 		read_lock_bh(&neigh->lock);
@@ -1528,10 +1563,9 @@ void ndisc_send_redirect(struct sk_buff *skb, struct neighbour *neigh,
 				   1, &err);
 	if (buff == NULL) {
 		ND_PRINTK0(KERN_ERR
-			   "ICMPv6 Redirect: %s() failed to allocate an skb.\n",
-			   __func__);
-		dst_release(dst);
-		return;
+			   "ICMPv6 Redirect: %s() failed to allocate an skb, err=%d.\n",
+			   __func__, err);
+		goto release;
 	}
 
 	skb_reserve(buff, LL_RESERVED_SPACE(dev));
@@ -1577,20 +1611,24 @@ void ndisc_send_redirect(struct sk_buff *skb, struct neighbour *neigh,
 
 	icmph->icmp6_cksum = csum_ipv6_magic(&saddr_buf, &ipv6_hdr(skb)->saddr,
 					     len, IPPROTO_ICMPV6,
-					     csum_partial((u8 *) icmph, len, 0));
+					     csum_partial(icmph, len, 0));
 
-	buff->dst = dst;
+	skb_dst_set(buff, dst);
 	idev = in6_dev_get(dst->dev);
-	IP6_INC_STATS(idev, IPSTATS_MIB_OUTREQUESTS);
+	IP6_UPD_PO_STATS(net, idev, IPSTATS_MIB_OUT, skb->len);
 	err = NF_HOOK(PF_INET6, NF_INET_LOCAL_OUT, buff, NULL, dst->dev,
 		      dst_output);
 	if (!err) {
-		ICMP6MSGOUT_INC_STATS(idev, NDISC_REDIRECT);
-		ICMP6_INC_STATS(idev, ICMP6_MIB_OUTMSGS);
+		ICMP6MSGOUT_INC_STATS(net, idev, NDISC_REDIRECT);
+		ICMP6_INC_STATS(net, idev, ICMP6_MIB_OUTMSGS);
 	}
 
 	if (likely(idev != NULL))
 		in6_dev_put(idev);
+	return;
+
+release:
+	dst_release(dst);
 }
 
 static void pndisc_redo(struct sk_buff *skb)
@@ -1696,7 +1734,7 @@ static void ndisc_warn_deprecated_sysctl(struct ctl_table *ctl,
 	}
 }
 
-int ndisc_ifinfo_sysctl_change(struct ctl_table *ctl, int write, struct file * filp, void __user *buffer, size_t *lenp, loff_t *ppos)
+int ndisc_ifinfo_sysctl_change(struct ctl_table *ctl, int write, void __user *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct net_device *dev = ctl->extra1;
 	struct inet6_dev *idev;
@@ -1707,16 +1745,16 @@ int ndisc_ifinfo_sysctl_change(struct ctl_table *ctl, int write, struct file * f
 		ndisc_warn_deprecated_sysctl(ctl, "syscall", dev ? dev->name : "default");
 
 	if (strcmp(ctl->procname, "retrans_time") == 0)
-		ret = proc_dointvec(ctl, write, filp, buffer, lenp, ppos);
+		ret = proc_dointvec(ctl, write, buffer, lenp, ppos);
 
 	else if (strcmp(ctl->procname, "base_reachable_time") == 0)
 		ret = proc_dointvec_jiffies(ctl, write,
-					    filp, buffer, lenp, ppos);
+					    buffer, lenp, ppos);
 
 	else if ((strcmp(ctl->procname, "retrans_time_ms") == 0) ||
 		 (strcmp(ctl->procname, "base_reachable_time_ms") == 0))
 		ret = proc_dointvec_ms_jiffies(ctl, write,
-					       filp, buffer, lenp, ppos);
+					       buffer, lenp, ppos);
 	else
 		ret = -1;
 
@@ -1730,9 +1768,8 @@ int ndisc_ifinfo_sysctl_change(struct ctl_table *ctl, int write, struct file * f
 	return ret;
 }
 
-int ndisc_ifinfo_sysctl_strategy(ctl_table *ctl, int __user *name,
-				 int nlen, void __user *oldval,
-				 size_t __user *oldlenp,
+int ndisc_ifinfo_sysctl_strategy(ctl_table *ctl,
+				 void __user *oldval, size_t __user *oldlenp,
 				 void __user *newval, size_t newlen)
 {
 	struct net_device *dev = ctl->extra1;
@@ -1745,13 +1782,11 @@ int ndisc_ifinfo_sysctl_strategy(ctl_table *ctl, int __user *name,
 
 	switch (ctl->ctl_name) {
 	case NET_NEIGH_REACHABLE_TIME:
-		ret = sysctl_jiffies(ctl, name, nlen,
-				     oldval, oldlenp, newval, newlen);
+		ret = sysctl_jiffies(ctl, oldval, oldlenp, newval, newlen);
 		break;
 	case NET_NEIGH_RETRANS_TIME_MS:
 	case NET_NEIGH_REACHABLE_TIME_MS:
-		 ret = sysctl_ms_jiffies(ctl, name, nlen,
-					 oldval, oldlenp, newval, newlen);
+		 ret = sysctl_ms_jiffies(ctl, oldval, oldlenp, newval, newlen);
 		 break;
 	default:
 		ret = 0;

@@ -60,7 +60,7 @@ static inline u64 scale_delta(u64 delta, u32 mul_frac, int shift)
 		"adc  %5,%%edx ; "
 		: "=A" (product), "=r" (tmp1), "=r" (tmp2)
 		: "a" ((u32)delta), "1" ((u32)(delta >> 32)), "2" (mul_frac) );
-#elif __x86_64__
+#elif defined(__x86_64__)
 	__asm__ (
 		"mul %%rdx ; shrd $32,%%rdx,%%rax"
 		: "=a" (product) : "0" (delta), "d" ((u64)mul_frac) );
@@ -95,6 +95,18 @@ static unsigned pvclock_get_time_values(struct pvclock_shadow_time *dst,
 	} while ((src->version & 1) || (dst->version != src->version));
 
 	return dst->version;
+}
+
+unsigned long pvclock_tsc_khz(struct pvclock_vcpu_time_info *src)
+{
+	u64 pv_tsc_khz = 1000000ULL << 32;
+
+	do_div(pv_tsc_khz, src->tsc_to_system_mul);
+	if (src->tsc_shift < 0)
+		pv_tsc_khz <<= -src->tsc_shift;
+	else
+		pv_tsc_khz >>= src->tsc_shift;
+	return pv_tsc_khz;
 }
 
 cycle_t pvclock_clocksource_read(struct pvclock_vcpu_time_info *src)

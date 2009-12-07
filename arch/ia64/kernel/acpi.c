@@ -52,6 +52,7 @@
 #include <asm/numa.h>
 #include <asm/sal.h>
 #include <asm/cyclone.h>
+#include <asm/xen/hypervisor.h>
 
 #define BAD_MADT_ENTRY(entry, end) (                                        \
 		(!entry) || (unsigned long)entry + sizeof(*entry) > end ||  \
@@ -64,6 +65,7 @@ EXPORT_SYMBOL(pm_idle);
 void (*pm_power_off) (void);
 EXPORT_SYMBOL(pm_power_off);
 
+u32 acpi_rsdt_forced;
 unsigned int acpi_cpei_override;
 unsigned int acpi_cpei_phys_cpuid;
 
@@ -91,6 +93,9 @@ acpi_get_sysname(void)
 	struct acpi_table_rsdp *rsdp;
 	struct acpi_table_xsdt *xsdt;
 	struct acpi_table_header *hdr;
+#ifdef CONFIG_DMAR
+	u64 i, nentries;
+#endif
 
 	rsdp_phys = acpi_find_rsdp();
 	if (!rsdp_phys) {
@@ -121,7 +126,21 @@ acpi_get_sysname(void)
 			return "uv";
 		else
 			return "sn2";
+	} else if (xen_pv_domain() && !strcmp(hdr->oem_id, "XEN")) {
+		return "xen";
 	}
+
+#ifdef CONFIG_DMAR
+	/* Look for Intel IOMMU */
+	nentries = (hdr->length - sizeof(*hdr)) /
+			 sizeof(xsdt->table_offset_entry[0]);
+	for (i = 0; i < nentries; i++) {
+		hdr = __va(xsdt->table_offset_entry[i]);
+		if (strncmp(hdr->signature, ACPI_SIG_DMAR,
+			sizeof(ACPI_SIG_DMAR) - 1) == 0)
+			return "dig_vtd";
+	}
+#endif
 
 	return "dig";
 #else
@@ -137,6 +156,10 @@ acpi_get_sysname(void)
 	return "uv";
 # elif defined (CONFIG_IA64_DIG)
 	return "dig";
+# elif defined (CONFIG_IA64_XEN_GUEST)
+	return "xen";
+# elif defined(CONFIG_IA64_DIG_VTD)
+	return "dig_vtd";
 # else
 #	error Unknown platform.  Fix acpi.c.
 # endif
@@ -176,11 +199,14 @@ char *__init __acpi_map_table(unsigned long phys_addr, unsigned long size)
 	return __va(phys_addr);
 }
 
+void __init __acpi_unmap_table(char *map, unsigned long size)
+{
+}
+
 /* --------------------------------------------------------------------------
                             Boot-time Table Parsing
    -------------------------------------------------------------------------- */
 
-static int total_cpus __initdata;
 static int available_cpus __initdata;
 struct acpi_table_madt *acpi_madt __initdata;
 static u8 has_8259;
@@ -610,7 +636,7 @@ void __init acpi_numa_arch_fixup(void)
  * success: return IRQ number (>=0)
  * failure: return < 0
  */
-int acpi_register_gsi(u32 gsi, int triggering, int polarity)
+int acpi_register_gsi(struct device *dev, u32 gsi, int triggering, int polarity)
 {
 	if (acpi_irq_model == ACPI_IRQ_MODEL_PLATFORM)
 		return gsi;
@@ -652,7 +678,8 @@ static int __init acpi_parse_fadt(struct acpi_table_header *table)
 
 	fadt = (struct acpi_table_fadt *)fadt_header;
 
-	acpi_register_gsi(fadt->sci_interrupt, ACPI_LEVEL_SENSITIVE, ACPI_ACTIVE_LOW);
+	acpi_register_gsi(NULL, fadt->sci_interrupt, ACPI_LEVEL_SENSITIVE,
+				 ACPI_ACTIVE_LOW);
 	return 0;
 }
 
@@ -864,7 +891,7 @@ __init void prefill_possible_map(void)
 		possible, max((possible - available_cpus), 0));
 
 	for (i = 0; i < possible; i++)
-		cpu_set(i, cpu_possible_map);
+		set_cpu_possible(i, true);
 }
 
 int acpi_map_lsapic(acpi_handle handle, int *pcpu)
@@ -902,9 +929,9 @@ int acpi_map_lsapic(acpi_handle handle, int *pcpu)
 	buffer.length = ACPI_ALLOCATE_BUFFER;
 	buffer.pointer = NULL;
 
-	cpus_complement(tmp_map, cpu_present_map);
-	cpu = first_cpu(tmp_map);
-	if (cpu >= NR_CPUS)
+	cpumask_complement(&tmp_map, cpu_present_mask);
+	cpu = cpumask_first(&tmp_map);
+	if (cpu >= nr_cpu_ids)
 		return -EINVAL;
 
 	acpi_map_cpu2node(handle, cpu, physid);
@@ -979,7 +1006,7 @@ acpi_map_iosapic(acpi_handle handle, u32 depth, void *context, void **ret)
 	node = pxm_to_node(pxm);
 
 	if (node >= MAX_NUMNODES || !node_online(node) ||
-	    cpus_empty(node_to_cpumask(node)))
+	    cpumask_empty(cpumask_of_node(node)))
 		return AE_OK;
 
 	/* We know a gsi to node mapping! */

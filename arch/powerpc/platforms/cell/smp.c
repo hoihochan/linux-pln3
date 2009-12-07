@@ -36,7 +36,6 @@
 #include <asm/prom.h>
 #include <asm/smp.h>
 #include <asm/paca.h>
-#include <asm/time.h>
 #include <asm/machdep.h>
 #include <asm/cputable.h>
 #include <asm/firmware.h>
@@ -58,8 +57,6 @@
  * interface by prom_hold_cpus and is spinning on secondary_hold_spinloop.
  */
 static cpumask_t of_spin_map;
-
-extern void generic_secondary_smp_init(unsigned long);
 
 /**
  * smp_startup_cpu() - start the given cpu
@@ -129,35 +126,15 @@ static int __init smp_iic_probe(void)
 	return cpus_weight(cpu_possible_map);
 }
 
-static void __devinit smp_iic_setup_cpu(int cpu)
+static void __devinit smp_cell_setup_cpu(int cpu)
 {
 	if (cpu != boot_cpuid)
 		iic_setup_cpu();
-}
 
-static DEFINE_SPINLOCK(timebase_lock);
-static unsigned long timebase = 0;
-
-static void __devinit cell_give_timebase(void)
-{
-	spin_lock(&timebase_lock);
-	rtas_call(rtas_token("freeze-time-base"), 0, 1, NULL);
-	timebase = get_tb();
-	spin_unlock(&timebase_lock);
-
-	while (timebase)
-		barrier();
-	rtas_call(rtas_token("thaw-time-base"), 0, 1, NULL);
-}
-
-static void __devinit cell_take_timebase(void)
-{
-	while (!timebase)
-		barrier();
-	spin_lock(&timebase_lock);
-	set_tb(timebase >> 32, timebase & 0xffffffff);
-	timebase = 0;
-	spin_unlock(&timebase_lock);
+	/*
+	 * change default DABRX to allow user watchpoints
+	 */
+	mtspr(SPRN_DABRX, DABRX_KERNEL | DABRX_USER);
 }
 
 static void __devinit smp_cell_kick_cpu(int nr)
@@ -192,7 +169,7 @@ static struct smp_ops_t bpa_iic_smp_ops = {
 	.message_pass	= smp_iic_message_pass,
 	.probe		= smp_iic_probe,
 	.kick_cpu	= smp_cell_kick_cpu,
-	.setup_cpu	= smp_iic_setup_cpu,
+	.setup_cpu	= smp_cell_setup_cpu,
 	.cpu_bootable	= smp_cell_cpu_bootable,
 };
 
@@ -219,8 +196,8 @@ void __init smp_init_cell(void)
 
 	/* Non-lpar has additional take/give timebase */
 	if (rtas_token("freeze-time-base") != RTAS_UNKNOWN_SERVICE) {
-		smp_ops->give_timebase = cell_give_timebase;
-		smp_ops->take_timebase = cell_take_timebase;
+		smp_ops->give_timebase = rtas_give_timebase;
+		smp_ops->take_timebase = rtas_take_timebase;
 	}
 
 	DBG(" <- smp_init_cell()\n");

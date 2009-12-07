@@ -1,7 +1,7 @@
 /*
  * MTD partitioning layer definitions
  *
- * (C) 2000 Nicolas Pitre <nico@cam.org>
+ * (C) 2000 Nicolas Pitre <nico@fluxnic.net>
  *
  * This code is GPL
  */
@@ -36,17 +36,18 @@
 
 struct mtd_partition {
 	char *name;			/* identifier string */
-	u_int32_t size;			/* partition size */
-	u_int32_t offset;		/* offset within the master MTD space */
-	u_int32_t mask_flags;		/* master MTD flags to mask out for this partition */
+	uint64_t size;			/* partition size */
+	uint64_t offset;		/* offset within the master MTD space */
+	uint32_t mask_flags;		/* master MTD flags to mask out for this partition */
 	struct nand_ecclayout *ecclayout;	/* out of band layout for this partition (NAND only)*/
-	struct mtd_info **mtdp;		/* pointer to store the MTD object */
 };
 
 #define MTDPART_OFS_NXTBLK	(-2)
 #define MTDPART_OFS_APPEND	(-1)
 #define MTDPART_SIZ_FULL	(0)
 
+
+struct mtd_info;
 
 int add_mtd_partitions(struct mtd_info *, const struct mtd_partition *, int);
 int del_mtd_partitions(struct mtd_info *);
@@ -73,8 +74,19 @@ struct device;
 struct device_node;
 
 int __devinit of_mtd_parse_partitions(struct device *dev,
-                                      struct mtd_info *mtd,
                                       struct device_node *node,
                                       struct mtd_partition **pparts);
+
+#ifdef CONFIG_MTD_PARTITIONS
+static inline int mtd_has_partitions(void) { return 1; }
+#else
+static inline int mtd_has_partitions(void) { return 0; }
+#endif
+
+#ifdef CONFIG_MTD_CMDLINE_PARTS
+static inline int mtd_has_cmdlinepart(void) { return 1; }
+#else
+static inline int mtd_has_cmdlinepart(void) { return 0; }
+#endif
 
 #endif

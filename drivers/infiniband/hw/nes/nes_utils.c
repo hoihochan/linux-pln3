@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006 - 2008 NetEffect, Inc. All rights reserved.
+ * Copyright (c) 2006 - 2009 Intel-NE, Inc.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -183,6 +183,9 @@ int nes_read_eeprom_values(struct nes_device *nesdev, struct nes_adapter *nesada
 		} else if (((major_ver == 2) && (minor_ver > 21)) || ((major_ver > 2) && (major_ver != 255))) {
 			nesadapter->virtwq = 1;
 		}
+		if (((major_ver == 3) && (minor_ver >= 16)) || (major_ver > 3))
+			nesadapter->send_term_ok = 1;
+
 		nesadapter->firmware_version = (((u32)(u8)(eeprom_data>>8))  <<  16) +
 				(u32)((u8)eeprom_data);
 
@@ -540,12 +543,15 @@ struct nes_cqp_request *nes_get_cqp_request(struct nes_device *nesdev)
 
 	if (!list_empty(&nesdev->cqp_avail_reqs)) {
 		spin_lock_irqsave(&nesdev->cqp.lock, flags);
-		cqp_request = list_entry(nesdev->cqp_avail_reqs.next,
+		if (!list_empty(&nesdev->cqp_avail_reqs)) {
+			cqp_request = list_entry(nesdev->cqp_avail_reqs.next,
 				struct nes_cqp_request, list);
-		list_del_init(&cqp_request->list);
+			list_del_init(&cqp_request->list);
+		}
 		spin_unlock_irqrestore(&nesdev->cqp.lock, flags);
-	} else {
-		cqp_request = kzalloc(sizeof(struct nes_cqp_request), GFP_KERNEL);
+	}
+	if (cqp_request == NULL) {
+		cqp_request = kzalloc(sizeof(struct nes_cqp_request), GFP_ATOMIC);
 		if (cqp_request) {
 			cqp_request->dynamic = 1;
 			INIT_LIST_HEAD(&cqp_request->list);
@@ -652,6 +658,7 @@ int nes_arp_table(struct nes_device *nesdev, u32 ip_addr, u8 *mac_addr, u32 acti
 	struct nes_adapter *nesadapter = nesdev->nesadapter;
 	int arp_index;
 	int err = 0;
+	__be32 tmp_addr;
 
 	for (arp_index = 0; (u32) arp_index < nesadapter->arp_table_size; arp_index++) {
 		if (nesadapter->arp_table[arp_index].ip_addr == ip_addr)
@@ -679,9 +686,9 @@ int nes_arp_table(struct nes_device *nesdev, u32 ip_addr, u8 *mac_addr, u32 acti
 
 	/* DELETE or RESOLVE */
 	if (arp_index == nesadapter->arp_table_size) {
-		nes_debug(NES_DBG_NETDEV, "MAC for " NIPQUAD_FMT " not in ARP table - cannot %s\n",
-			  HIPQUAD(ip_addr),
-			  action == NES_ARP_RESOLVE ? "resolve" : "delete");
+		tmp_addr = cpu_to_be32(ip_addr);
+		nes_debug(NES_DBG_NETDEV, "MAC for %pI4 not in ARP table - cannot %s\n",
+			  &tmp_addr, action == NES_ARP_RESOLVE ? "resolve" : "delete");
 		return -1;
 	}
 

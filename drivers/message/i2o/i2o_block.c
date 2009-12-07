@@ -354,7 +354,7 @@ static inline void i2o_block_sglist_free(struct i2o_block_request *ireq)
  *	@req: the request to prepare
  *
  *	Allocate the necessary i2o_block_request struct and connect it to
- *	the request. This is needed that we not loose the SG list later on.
+ *	the request. This is needed that we not lose the SG list later on.
  *
  *	Returns BLKPREP_OK on success or BLKPREP_DEFER on failure.
  */
@@ -426,15 +426,9 @@ static void i2o_block_end_request(struct request *req, int error,
 	struct request_queue *q = req->q;
 	unsigned long flags;
 
-	if (blk_end_request(req, error, nr_bytes)) {
-		int leftover = (req->hard_nr_sectors << KERNEL_SECTOR_SHIFT);
-
-		if (blk_pc_request(req))
-			leftover = req->data_len;
-
+	if (blk_end_request(req, error, nr_bytes))
 		if (error)
-			blk_end_request(req, -EIO, leftover);
-	}
+			blk_end_request_all(req, -EIO);
 
 	spin_lock_irqsave(q->queue_lock, flags);
 
@@ -567,17 +561,17 @@ static void i2o_block_biosparam(unsigned long capacity, unsigned short *cyls,
 
 /**
  *	i2o_block_open - Open the block device
- *	@inode: inode for block device being opened
- *	@file: file to open
+ *	@bdev: block device being opened
+ *	@mode: file open mode
  *
  *	Power up the device, mount and lock the media. This function is called,
  *	if the block device is opened for access.
  *
  *	Returns 0 on success or negative error code on failure.
  */
-static int i2o_block_open(struct inode *inode, struct file *file)
+static int i2o_block_open(struct block_device *bdev, fmode_t mode)
 {
-	struct i2o_block_device *dev = inode->i_bdev->bd_disk->private_data;
+	struct i2o_block_device *dev = bdev->bd_disk->private_data;
 
 	if (!dev->i2o_dev)
 		return -ENODEV;
@@ -596,17 +590,16 @@ static int i2o_block_open(struct inode *inode, struct file *file)
 
 /**
  *	i2o_block_release - Release the I2O block device
- *	@inode: inode for block device being released
- *	@file: file to close
+ *	@disk: gendisk device being released
+ *	@mode: file open mode
  *
  *	Unlock and unmount the media, and power down the device. Gets called if
  *	the block device is closed.
  *
  *	Returns 0 on success or negative error code on failure.
  */
-static int i2o_block_release(struct inode *inode, struct file *file)
+static int i2o_block_release(struct gendisk *disk, fmode_t mode)
 {
-	struct gendisk *disk = inode->i_bdev->bd_disk;
 	struct i2o_block_device *dev = disk->private_data;
 	u8 operation;
 
@@ -644,8 +637,8 @@ static int i2o_block_getgeo(struct block_device *bdev, struct hd_geometry *geo)
 
 /**
  *	i2o_block_ioctl - Issue device specific ioctl calls.
- *	@inode: inode for block device ioctl
- *	@file: file for ioctl
+ *	@bdev: block device being opened
+ *	@mode: file open mode
  *	@cmd: ioctl command
  *	@arg: arg
  *
@@ -653,10 +646,10 @@ static int i2o_block_getgeo(struct block_device *bdev, struct hd_geometry *geo)
  *
  *	Return 0 on success or negative error on failure.
  */
-static int i2o_block_ioctl(struct inode *inode, struct file *file,
+static int i2o_block_ioctl(struct block_device *bdev, fmode_t mode,
 			   unsigned int cmd, unsigned long arg)
 {
-	struct gendisk *disk = inode->i_bdev->bd_disk;
+	struct gendisk *disk = bdev->bd_disk;
 	struct i2o_block_device *dev = disk->private_data;
 
 	/* Anyone capable of this syscall can do *real bad* things */
@@ -762,7 +755,7 @@ static int i2o_block_transfer(struct request *req)
 			break;
 
 		case CACHE_SMARTFETCH:
-			if (req->nr_sectors > 16)
+			if (blk_rq_sectors(req) > 16)
 				ctl_flags = 0x201F0008;
 			else
 				ctl_flags = 0x001F0000;
@@ -782,13 +775,13 @@ static int i2o_block_transfer(struct request *req)
 			ctl_flags = 0x001F0010;
 			break;
 		case CACHE_SMARTBACK:
-			if (req->nr_sectors > 16)
+			if (blk_rq_sectors(req) > 16)
 				ctl_flags = 0x001F0004;
 			else
 				ctl_flags = 0x001F0010;
 			break;
 		case CACHE_SMARTTHROUGH:
-			if (req->nr_sectors > 16)
+			if (blk_rq_sectors(req) > 16)
 				ctl_flags = 0x001F0004;
 			else
 				ctl_flags = 0x001F0010;
@@ -801,8 +794,9 @@ static int i2o_block_transfer(struct request *req)
 	if (c->adaptec) {
 		u8 cmd[10];
 		u32 scsi_flags;
-		u16 hwsec = queue_hardsect_size(req->q) >> KERNEL_SECTOR_SHIFT;
+		u16 hwsec;
 
+		hwsec = queue_logical_block_size(req->q) >> KERNEL_SECTOR_SHIFT;
 		memset(cmd, 0, 10);
 
 		sgl_offset = SGL_OFFSET_12;
@@ -828,22 +822,22 @@ static int i2o_block_transfer(struct request *req)
 
 		*mptr++ = cpu_to_le32(scsi_flags);
 
-		*((u32 *) & cmd[2]) = cpu_to_be32(req->sector * hwsec);
-		*((u16 *) & cmd[7]) = cpu_to_be16(req->nr_sectors * hwsec);
+		*((u32 *) & cmd[2]) = cpu_to_be32(blk_rq_pos(req) * hwsec);
+		*((u16 *) & cmd[7]) = cpu_to_be16(blk_rq_sectors(req) * hwsec);
 
 		memcpy(mptr, cmd, 10);
 		mptr += 4;
-		*mptr++ = cpu_to_le32(req->nr_sectors << KERNEL_SECTOR_SHIFT);
+		*mptr++ = cpu_to_le32(blk_rq_bytes(req));
 	} else
 #endif
 	{
 		msg->u.head[1] = cpu_to_le32(cmd | HOST_TID << 12 | tid);
 		*mptr++ = cpu_to_le32(ctl_flags);
-		*mptr++ = cpu_to_le32(req->nr_sectors << KERNEL_SECTOR_SHIFT);
+		*mptr++ = cpu_to_le32(blk_rq_bytes(req));
 		*mptr++ =
-		    cpu_to_le32((u32) (req->sector << KERNEL_SECTOR_SHIFT));
+		    cpu_to_le32((u32) (blk_rq_pos(req) << KERNEL_SECTOR_SHIFT));
 		*mptr++ =
-		    cpu_to_le32(req->sector >> (32 - KERNEL_SECTOR_SHIFT));
+		    cpu_to_le32(blk_rq_pos(req) >> (32 - KERNEL_SECTOR_SHIFT));
 	}
 
 	if (!i2o_block_sglist_alloc(c, ireq, &mptr)) {
@@ -884,7 +878,7 @@ static void i2o_block_request_fn(struct request_queue *q)
 	struct request *req;
 
 	while (!blk_queue_plugged(q)) {
-		req = elv_next_request(q);
+		req = blk_peek_request(q);
 		if (!req)
 			break;
 
@@ -897,7 +891,7 @@ static void i2o_block_request_fn(struct request_queue *q)
 
 			if (queue_depth < I2O_BLOCK_MAX_OPEN_REQUESTS) {
 				if (!i2o_block_transfer(req)) {
-					blkdev_dequeue_request(req);
+					blk_start_request(req);
 					continue;
 				} else
 					osm_info("transfer error\n");
@@ -923,17 +917,19 @@ static void i2o_block_request_fn(struct request_queue *q)
 				blk_stop_queue(q);
 				break;
 			}
-		} else
-			end_request(req, 0);
+		} else {
+			blk_start_request(req);
+			__blk_end_request_all(req, -EIO);
+		}
 	}
 };
 
 /* I2O Block device operations definition */
-static struct block_device_operations i2o_block_fops = {
+static const struct block_device_operations i2o_block_fops = {
 	.owner = THIS_MODULE,
 	.open = i2o_block_open,
 	.release = i2o_block_release,
-	.ioctl = i2o_block_ioctl,
+	.locked_ioctl = i2o_block_ioctl,
 	.getgeo = i2o_block_getgeo,
 	.media_changed = i2o_block_media_changed
 };
@@ -1083,7 +1079,7 @@ static int i2o_block_probe(struct device *dev)
 	 */
 	if (!i2o_parm_field_get(i2o_dev, 0x0004, 1, &blocksize, 4) ||
 	    !i2o_parm_field_get(i2o_dev, 0x0000, 3, &blocksize, 4)) {
-		blk_queue_hardsect_size(queue, le32_to_cpu(blocksize));
+		blk_queue_logical_block_size(queue, le32_to_cpu(blocksize));
 	} else
 		osm_warn("unable to get blocksize of %s\n", gd->disk_name);
 

@@ -302,7 +302,7 @@ static int __devexit bfin_cf_remove(struct platform_device *pdev)
 
 static int bfin_cf_suspend(struct platform_device *pdev, pm_message_t mesg)
 {
-	return pcmcia_socket_dev_suspend(&pdev->dev, mesg);
+	return pcmcia_socket_dev_suspend(&pdev->dev);
 }
 
 static int bfin_cf_resume(struct platform_device *pdev)
@@ -334,6 +334,6 @@ static void __exit bfin_cf_exit(void)
 module_init(bfin_cf_init);
 module_exit(bfin_cf_exit);
 
-MODULE_AUTHOR("Michael Hennerich <hennerich@blackfin.uclinux.org>")
+MODULE_AUTHOR("Michael Hennerich <hennerich@blackfin.uclinux.org>");
 MODULE_DESCRIPTION("BFIN CF/PCMCIA Driver");
 MODULE_LICENSE("GPL");

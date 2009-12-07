@@ -10,11 +10,12 @@
 
 #include <acpi/acpi_bus.h>
 #include <acpi/acpi_drivers.h>
-#include <acpi/actypes.h>
 #include <linux/wait.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include "sbshc.h"
+
+#define PREFIX "ACPI: "
 
 #define ACPI_SMB_HC_CLASS	"smbus_host_controller"
 #define ACPI_SMB_HC_DEVICE_NAME	"ACPI SMBus HC"
@@ -282,7 +283,7 @@ static int acpi_smbus_hc_add(struct acpi_device *device)
 	hc->ec = acpi_driver_data(device->parent);
 	hc->offset = (val >> 8) & 0xff;
 	hc->query_bit = val & 0xff;
-	acpi_driver_data(device) = hc;
+	device->driver_data = hc;
 
 	acpi_ec_add_query_handler(hc->ec, hc->query_bit, NULL, smbus_alarm, hc);
 	printk(KERN_INFO PREFIX "SBS HC: EC = 0x%p, offset = 0x%0x, query_bit = 0x%0x\n",
@@ -303,7 +304,7 @@ static int acpi_smbus_hc_remove(struct acpi_device *device, int type)
 	hc = acpi_driver_data(device);
 	acpi_ec_remove_query_handler(hc->ec, hc->query_bit);
 	kfree(hc);
-	acpi_driver_data(device) = NULL;
+	device->driver_data = NULL;
 	return 0;
 }
 

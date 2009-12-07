@@ -255,7 +255,9 @@ const char tulip_media_cap[32] =
 
 static void tulip_tx_timeout(struct net_device *dev);
 static void tulip_init_ring(struct net_device *dev);
-static int tulip_start_xmit(struct sk_buff *skb, struct net_device *dev);
+static void tulip_free_ring(struct net_device *dev);
+static netdev_tx_t tulip_start_xmit(struct sk_buff *skb,
+					  struct net_device *dev);
 static int tulip_open(struct net_device *dev);
 static int tulip_close(struct net_device *dev);
 static void tulip_up(struct net_device *dev);
@@ -502,16 +504,21 @@ tulip_open(struct net_device *dev)
 {
 	int retval;
 
-	if ((retval = request_irq(dev->irq, &tulip_interrupt, IRQF_SHARED, dev->name, dev)))
-		return retval;
-
 	tulip_init_ring (dev);
+
+	retval = request_irq(dev->irq, &tulip_interrupt, IRQF_SHARED, dev->name, dev);
+	if (retval)
+		goto free_ring;
 
 	tulip_up (dev);
 
 	netif_start_queue (dev);
 
 	return 0;
+
+free_ring:
+	tulip_free_ring (dev);
+	return retval;
 }
 
 
@@ -564,16 +571,18 @@ static void tulip_tx_timeout(struct net_device *dev)
 				   (unsigned int)tp->rx_ring[i].buffer2,
 				   buf[0], buf[1], buf[2]);
 			for (j = 0; buf[j] != 0xee && j < 1600; j++)
-				if (j < 100) printk(" %2.2x", buf[j]);
-			printk(" j=%d.\n", j);
+				if (j < 100)
+					printk(KERN_CONT " %2.2x", buf[j]);
+			printk(KERN_CONT " j=%d.\n", j);
 		}
 		printk(KERN_DEBUG "  Rx ring %8.8x: ", (int)tp->rx_ring);
 		for (i = 0; i < RX_RING_SIZE; i++)
-			printk(" %8.8x", (unsigned int)tp->rx_ring[i].status);
-		printk("\n" KERN_DEBUG "  Tx ring %8.8x: ", (int)tp->tx_ring);
+			printk(KERN_CONT " %8.8x",
+			       (unsigned int)tp->rx_ring[i].status);
+		printk(KERN_DEBUG "  Tx ring %8.8x: ", (int)tp->tx_ring);
 		for (i = 0; i < TX_RING_SIZE; i++)
-			printk(" %8.8x", (unsigned int)tp->tx_ring[i].status);
-		printk("\n");
+			printk(KERN_CONT " %8.8x", (unsigned int)tp->tx_ring[i].status);
+		printk(KERN_CONT "\n");
 	}
 #endif
 
@@ -637,15 +646,16 @@ static void tulip_init_ring(struct net_device *dev)
 	tp->tx_ring[i-1].buffer2 = cpu_to_le32(tp->tx_ring_dma);
 }
 
-static int
+static netdev_tx_t
 tulip_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct tulip_private *tp = netdev_priv(dev);
 	int entry;
 	u32 flag;
 	dma_addr_t mapping;
+	unsigned long flags;
 
-	spin_lock_irq(&tp->lock);
+	spin_lock_irqsave(&tp->lock, flags);
 
 	/* Calculate the next Tx descriptor entry. */
 	entry = tp->cur_tx % TX_RING_SIZE;
@@ -680,11 +690,11 @@ tulip_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	/* Trigger an immediate transmit demand. */
 	iowrite32(0, tp->base_addr + CSR1);
 
-	spin_unlock_irq(&tp->lock);
+	spin_unlock_irqrestore(&tp->lock, flags);
 
 	dev->trans_start = jiffies;
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 static void tulip_clean_tx_ring(struct tulip_private *tp)
@@ -768,22 +778,10 @@ static void tulip_down (struct net_device *dev)
 	tulip_set_power_state (tp, 0, 1);
 }
 
-
-static int tulip_close (struct net_device *dev)
+static void tulip_free_ring (struct net_device *dev)
 {
 	struct tulip_private *tp = netdev_priv(dev);
-	void __iomem *ioaddr = tp->base_addr;
 	int i;
-
-	netif_stop_queue (dev);
-
-	tulip_down (dev);
-
-	if (tulip_debug > 1)
-		printk (KERN_DEBUG "%s: Shutting down ethercard, status was %2.2x.\n",
-			dev->name, ioread32 (ioaddr + CSR5));
-
-	free_irq (dev->irq, dev);
 
 	/* Free all the skbuffs in the Rx queue. */
 	for (i = 0; i < RX_RING_SIZE; i++) {
@@ -803,6 +801,7 @@ static int tulip_close (struct net_device *dev)
 			dev_kfree_skb (skb);
 		}
 	}
+
 	for (i = 0; i < TX_RING_SIZE; i++) {
 		struct sk_buff *skb = tp->tx_buffers[i].skb;
 
@@ -814,6 +813,24 @@ static int tulip_close (struct net_device *dev)
 		tp->tx_buffers[i].skb = NULL;
 		tp->tx_buffers[i].mapping = 0;
 	}
+}
+
+static int tulip_close (struct net_device *dev)
+{
+	struct tulip_private *tp = netdev_priv(dev);
+	void __iomem *ioaddr = tp->base_addr;
+
+	netif_stop_queue (dev);
+
+	tulip_down (dev);
+
+	if (tulip_debug > 1)
+		printk (KERN_DEBUG "%s: Shutting down ethercard, status was %2.2x.\n",
+			dev->name, ioread32 (ioaddr + CSR5));
+
+	free_irq (dev->irq, dev);
+
+	tulip_free_ring (dev);
 
 	return 0;
 }
@@ -906,8 +923,6 @@ static int private_ioctl (struct net_device *dev, struct ifreq *rq, int cmd)
 		return 0;
 
 	case SIOCSMIIREG:		/* Write MII PHY register. */
-		if (!capable (CAP_NET_ADMIN))
-			return -EPERM;
 		if (regnum & ~0x1f)
 			return -EINVAL;
 		if (data->phy_id == phy) {
@@ -1050,13 +1065,11 @@ static void set_rx_mode(struct net_device *dev)
 					filterbit = ether_crc(ETH_ALEN, mclist->dmi_addr) >> 26;
 				filterbit &= 0x3f;
 				mc_filter[filterbit >> 5] |= 1 << (filterbit & 31);
-				if (tulip_debug > 2) {
-					DECLARE_MAC_BUF(mac);
-					printk(KERN_INFO "%s: Added filter for %s"
+				if (tulip_debug > 2)
+					printk(KERN_INFO "%s: Added filter for %pM"
 					       "  %8.8x bit %d.\n",
-					       dev->name, print_mac(mac, mclist->dmi_addr),
+					       dev->name, mclist->dmi_addr,
 					       ether_crc(ETH_ALEN, mclist->dmi_addr), filterbit);
-				}
 			}
 			if (mc_filter[0] == tp->mc_filter[0]  &&
 				mc_filter[1] == tp->mc_filter[1])
@@ -1227,6 +1240,22 @@ static int tulip_uli_dm_quirk(struct pci_dev *pdev)
 	return 0;
 }
 
+static const struct net_device_ops tulip_netdev_ops = {
+	.ndo_open		= tulip_open,
+	.ndo_start_xmit		= tulip_start_xmit,
+	.ndo_tx_timeout		= tulip_tx_timeout,
+	.ndo_stop		= tulip_close,
+	.ndo_get_stats		= tulip_get_stats,
+	.ndo_do_ioctl 		= private_ioctl,
+	.ndo_set_multicast_list = set_rx_mode,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	.ndo_poll_controller	 = poll_tulip,
+#endif
+};
+
 static int __devinit tulip_init_one (struct pci_dev *pdev,
 				     const struct pci_device_id *ent)
 {
@@ -1250,7 +1279,6 @@ static int __devinit tulip_init_one (struct pci_dev *pdev,
 	const char *chip_name = tulip_tbl[chip_idx].chip_name;
 	unsigned int eeprom_missing = 0;
 	unsigned int force_csr0 = 0;
-	DECLARE_MAC_BUF(mac);
 
 #ifndef MODULE
 	static int did_version;		/* Already printed version info. */
@@ -1432,9 +1460,9 @@ static int __devinit tulip_init_one (struct pci_dev *pdev,
 		for (i = 0; i < 3; i++) {
 			int value, boguscnt = 100000;
 			iowrite32(0x600 | i, ioaddr + 0x98);
-			do
+			do {
 				value = ioread32(ioaddr + CSR9);
-			while (value < 0  && --boguscnt > 0);
+			} while (value < 0  && --boguscnt > 0);
 			put_unaligned_le16(value, ((__le16 *)dev->dev_addr) + i);
 			sum += value & 0xffff;
 		}
@@ -1604,19 +1632,10 @@ static int __devinit tulip_init_one (struct pci_dev *pdev,
 	}
 
 	/* The Tulip-specific entries in the device structure. */
-	dev->open = tulip_open;
-	dev->hard_start_xmit = tulip_start_xmit;
-	dev->tx_timeout = tulip_tx_timeout;
+	dev->netdev_ops = &tulip_netdev_ops;
 	dev->watchdog_timeo = TX_TIMEOUT;
 #ifdef CONFIG_TULIP_NAPI
 	netif_napi_add(dev, &tp->napi, tulip_poll, 16);
-#endif
-	dev->stop = tulip_close;
-	dev->get_stats = tulip_get_stats;
-	dev->do_ioctl = private_ioctl;
-	dev->set_multicast_list = set_rx_mode;
-#ifdef CONFIG_NET_POLL_CONTROLLER
-	dev->poll_controller = &poll_tulip;
 #endif
 	SET_ETHTOOL_OPS(dev, &ops);
 
@@ -1635,7 +1654,7 @@ static int __devinit tulip_init_one (struct pci_dev *pdev,
 
 	if (eeprom_missing)
 		printk(" EEPROM not present,");
-	printk(" %s", print_mac(mac, dev->dev_addr));
+	printk(" %pM", dev->dev_addr);
 	printk(", IRQ %d.\n", irq);
 
         if (tp->chip_id == PNIC2)

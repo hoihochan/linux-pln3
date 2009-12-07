@@ -37,9 +37,11 @@
 #include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/list.h>
+#include <linux/sched.h>
 #include <linux/spinlock.h>
 #include <linux/ethtool.h>
 #include <linux/rtnetlink.h>
+#include <linux/inetdevice.h>
 
 #include <asm/io.h>
 #include <asm/irq.h>
@@ -194,7 +196,11 @@ static struct ib_cq *iwch_create_cq(struct ib_device *ibdev, int entries, int ve
 	spin_lock_init(&chp->lock);
 	atomic_set(&chp->refcnt, 1);
 	init_waitqueue_head(&chp->wait);
-	insert_handle(rhp, &rhp->cqidr, chp, chp->cq.cqid);
+	if (insert_handle(rhp, &rhp->cqidr, chp, chp->cq.cqid)) {
+		cxio_destroy_cq(&chp->rhp->rdev, &chp->cq);
+		kfree(chp);
+		return ERR_PTR(-ENOMEM);
+	}
 
 	if (ucontext) {
 		struct iwch_mm_entry *mm;
@@ -749,7 +755,11 @@ static struct ib_mw *iwch_alloc_mw(struct ib_pd *pd)
 	mhp->attr.stag = stag;
 	mmid = (stag) >> 8;
 	mhp->ibmw.rkey = stag;
-	insert_handle(rhp, &rhp->mmidr, mhp, mmid);
+	if (insert_handle(rhp, &rhp->mmidr, mhp, mmid)) {
+		cxio_deallocate_window(&rhp->rdev, mhp->attr.stag);
+		kfree(mhp);
+		return ERR_PTR(-ENOMEM);
+	}
 	PDBG("%s mmid 0x%x mhp %p stag 0x%x\n", __func__, mmid, mhp, stag);
 	return &(mhp->ibmw);
 }
@@ -777,37 +787,43 @@ static struct ib_mr *iwch_alloc_fast_reg_mr(struct ib_pd *pd, int pbl_depth)
 	struct iwch_mr *mhp;
 	u32 mmid;
 	u32 stag = 0;
-	int ret;
+	int ret = 0;
 
 	php = to_iwch_pd(pd);
 	rhp = php->rhp;
 	mhp = kzalloc(sizeof(*mhp), GFP_KERNEL);
 	if (!mhp)
-		return ERR_PTR(-ENOMEM);
+		goto err;
 
 	mhp->rhp = rhp;
 	ret = iwch_alloc_pbl(mhp, pbl_depth);
-	if (ret) {
-		kfree(mhp);
-		return ERR_PTR(ret);
-	}
+	if (ret)
+		goto err1;
 	mhp->attr.pbl_size = pbl_depth;
 	ret = cxio_allocate_stag(&rhp->rdev, &stag, php->pdid,
 				 mhp->attr.pbl_size, mhp->attr.pbl_addr);
-	if (ret) {
-		iwch_free_pbl(mhp);
-		kfree(mhp);
-		return ERR_PTR(ret);
-	}
+	if (ret)
+		goto err2;
 	mhp->attr.pdid = php->pdid;
 	mhp->attr.type = TPT_NON_SHARED_MR;
 	mhp->attr.stag = stag;
 	mhp->attr.state = 1;
 	mmid = (stag) >> 8;
 	mhp->ibmr.rkey = mhp->ibmr.lkey = stag;
-	insert_handle(rhp, &rhp->mmidr, mhp, mmid);
+	if (insert_handle(rhp, &rhp->mmidr, mhp, mmid))
+		goto err3;
+
 	PDBG("%s mmid 0x%x mhp %p stag 0x%x\n", __func__, mmid, mhp, stag);
 	return &(mhp->ibmr);
+err3:
+	cxio_dereg_mem(&rhp->rdev, stag, mhp->attr.pbl_size,
+		       mhp->attr.pbl_addr);
+err2:
+	iwch_free_pbl(mhp);
+err1:
+	kfree(mhp);
+err:
+	return ERR_PTR(ret);
 }
 
 static struct ib_fast_reg_page_list *iwch_alloc_fastreg_pbl(
@@ -960,7 +976,13 @@ static struct ib_qp *iwch_create_qp(struct ib_pd *pd,
 	spin_lock_init(&qhp->lock);
 	init_waitqueue_head(&qhp->wait);
 	atomic_set(&qhp->refcnt, 1);
-	insert_handle(rhp, &rhp->qpidr, qhp, qhp->wq.qpid);
+
+	if (insert_handle(rhp, &rhp->qpidr, qhp, qhp->wq.qpid)) {
+		cxio_destroy_qp(&rhp->rdev, &qhp->wq,
+			ucontext ? &ucontext->uctx : &rhp->rdev.uctx);
+		kfree(qhp);
+		return ERR_PTR(-ENOMEM);
+	}
 
 	if (udata) {
 
@@ -1102,9 +1124,7 @@ static u64 fw_vers_string_to_u64(struct iwch_dev *iwch_dev)
 	char *cp, *next;
 	unsigned fw_maj, fw_min, fw_mic;
 
-	rtnl_lock();
 	lldev->ethtool_ops->get_drvinfo(lldev, &info);
-	rtnl_unlock();
 
 	next = info.fw_version + 1;
 	cp = strsep(&next, ".");
@@ -1154,14 +1174,42 @@ static int iwch_query_device(struct ib_device *ibdev,
 static int iwch_query_port(struct ib_device *ibdev,
 			   u8 port, struct ib_port_attr *props)
 {
+	struct iwch_dev *dev;
+	struct net_device *netdev;
+	struct in_device *inetdev;
+
 	PDBG("%s ibdev %p\n", __func__, ibdev);
+
+	dev = to_iwch_dev(ibdev);
+	netdev = dev->rdev.port_info.lldevs[port-1];
+
+	memset(props, 0, sizeof(struct ib_port_attr));
 	props->max_mtu = IB_MTU_4096;
-	props->lid = 0;
-	props->lmc = 0;
-	props->sm_lid = 0;
-	props->sm_sl = 0;
-	props->state = IB_PORT_ACTIVE;
-	props->phys_state = 0;
+	if (netdev->mtu >= 4096)
+		props->active_mtu = IB_MTU_4096;
+	else if (netdev->mtu >= 2048)
+		props->active_mtu = IB_MTU_2048;
+	else if (netdev->mtu >= 1024)
+		props->active_mtu = IB_MTU_1024;
+	else if (netdev->mtu >= 512)
+		props->active_mtu = IB_MTU_512;
+	else
+		props->active_mtu = IB_MTU_256;
+
+	if (!netif_carrier_ok(netdev))
+		props->state = IB_PORT_DOWN;
+	else {
+		inetdev = in_dev_get(netdev);
+		if (inetdev) {
+			if (inetdev->ifa_list)
+				props->state = IB_PORT_ACTIVE;
+			else
+				props->state = IB_PORT_INIT;
+			in_dev_put(inetdev);
+		} else
+			props->state = IB_PORT_INIT;
+	}
+
 	props->port_cap_flags =
 	    IB_PORT_CM_SUP |
 	    IB_PORT_SNMP_TUNNEL_SUP |
@@ -1170,7 +1218,6 @@ static int iwch_query_port(struct ib_device *ibdev,
 	    IB_PORT_VENDOR_CLASS_SUP | IB_PORT_BOOT_MGMT_SUP;
 	props->gid_tbl_len = 1;
 	props->pkey_tbl_len = 1;
-	props->qkey_viol_cntr = 0;
 	props->active_width = 2;
 	props->active_speed = 2;
 	props->max_msg_sz = -1;
@@ -1195,9 +1242,7 @@ static ssize_t show_fw_ver(struct device *dev, struct device_attribute *attr, ch
 	struct net_device *lldev = iwch_dev->rdev.t3cdev_p->lldev;
 
 	PDBG("%s dev 0x%p\n", __func__, dev);
-	rtnl_lock();
 	lldev->ethtool_ops->get_drvinfo(lldev, &info);
-	rtnl_unlock();
 	return sprintf(buf, "%s\n", info.fw_version);
 }
 
@@ -1210,9 +1255,7 @@ static ssize_t show_hca(struct device *dev, struct device_attribute *attr,
 	struct net_device *lldev = iwch_dev->rdev.t3cdev_p->lldev;
 
 	PDBG("%s dev 0x%p\n", __func__, dev);
-	rtnl_lock();
 	lldev->ethtool_ops->get_drvinfo(lldev, &info);
-	rtnl_unlock();
 	return sprintf(buf, "%s\n", info.driver);
 }
 
@@ -1399,6 +1442,7 @@ int iwch_register_device(struct iwch_dev *dev)
 bail2:
 	ib_unregister_device(&dev->ibdev);
 bail1:
+	kfree(dev->ibdev.iwcm);
 	return ret;
 }
 
@@ -1411,5 +1455,6 @@ void iwch_unregister_device(struct iwch_dev *dev)
 		device_remove_file(&dev->ibdev.dev,
 				   iwch_class_attributes[i]);
 	ib_unregister_device(&dev->ibdev);
+	kfree(dev->ibdev.iwcm);
 	return;
 }

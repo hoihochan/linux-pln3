@@ -10,6 +10,10 @@ config M32R
 	default y
 	select HAVE_IDE
 	select HAVE_OPROFILE
+	select INIT_ALL_POSSIBLE
+	select HAVE_KERNEL_GZIP
+	select HAVE_KERNEL_BZIP2
+	select HAVE_KERNEL_LZMA
 
 config SBUS
 	bool
@@ -36,14 +40,19 @@ config NO_IOPORT
 config NO_DMA
 	def_bool y
 
-config ARCH_SUPPORTS_AOUT
-	def_bool y
-
 config HZ
 	int
 	default 100
 
+config GENERIC_TIME
+	def_bool y
+
+config ARCH_USES_GETTIMEOFFSET
+	def_bool y
+
 source "init/Kconfig"
+
+source "kernel/Kconfig.freezer"
 
 
 menu "Processor type and features"
@@ -274,7 +283,7 @@ config GENERIC_CALIBRATE_DELAY
 	bool
 	default y
 
-config SCHED_NO_NO_OMIT_FRAME_POINTER
+config SCHED_OMIT_FRAME_POINTER
         bool
         default y
 

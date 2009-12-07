@@ -72,7 +72,7 @@
 /*
  * There is a bunch of documentation about the card, jumpers, config
  * settings, restrictions, cables, device names and numbers in
- * Documentation/specialix.txt
+ * Documentation/serial/specialix.txt
  */
 
 #include <linux/module.h>
@@ -87,6 +87,7 @@
 #include <linux/tty_flip.h>
 #include <linux/mm.h>
 #include <linux/serial.h>
+#include <linux/smp_lock.h>
 #include <linux/fcntl.h>
 #include <linux/major.h>
 #include <linux/delay.h>
@@ -1450,7 +1451,7 @@ static int sx_open(struct tty_struct *tty, struct file *filp)
 
 static void sx_flush_buffer(struct tty_struct *tty)
 {
-	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
+	struct specialix_port *port = tty->driver_data;
 	unsigned long flags;
 	struct specialix_board  *bp;
 
@@ -1472,7 +1473,7 @@ static void sx_flush_buffer(struct tty_struct *tty)
 
 static void sx_close(struct tty_struct *tty, struct file *filp)
 {
-	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
+	struct specialix_port *port = tty->driver_data;
 	struct specialix_board *bp;
 	unsigned long flags;
 	unsigned long timeout;
@@ -1585,7 +1586,7 @@ static void sx_close(struct tty_struct *tty, struct file *filp)
 static int sx_write(struct tty_struct *tty,
 					const unsigned char *buf, int count)
 {
-	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
+	struct specialix_port *port = tty->driver_data;
 	struct specialix_board *bp;
 	int c, total = 0;
 	unsigned long flags;
@@ -1637,7 +1638,7 @@ static int sx_write(struct tty_struct *tty,
 
 static int sx_put_char(struct tty_struct *tty, unsigned char ch)
 {
-	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
+	struct specialix_port *port = tty->driver_data;
 	unsigned long flags;
 	struct specialix_board  *bp;
 
@@ -1676,7 +1677,7 @@ static int sx_put_char(struct tty_struct *tty, unsigned char ch)
 
 static void sx_flush_chars(struct tty_struct *tty)
 {
-	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
+	struct specialix_port *port = tty->driver_data;
 	unsigned long flags;
 	struct specialix_board  *bp = port_Board(port);
 
@@ -1703,7 +1704,7 @@ static void sx_flush_chars(struct tty_struct *tty)
 
 static int sx_write_room(struct tty_struct *tty)
 {
-	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
+	struct specialix_port *port = tty->driver_data;
 	int	ret;
 
 	func_enter();
@@ -1724,7 +1725,7 @@ static int sx_write_room(struct tty_struct *tty)
 
 static int sx_chars_in_buffer(struct tty_struct *tty)
 {
-	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
+	struct specialix_port *port = tty->driver_data;
 
 	func_enter();
 
@@ -1738,7 +1739,7 @@ static int sx_chars_in_buffer(struct tty_struct *tty)
 
 static int sx_tiocmget(struct tty_struct *tty, struct file *file)
 {
-	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
+	struct specialix_port *port = tty->driver_data;
 	struct specialix_board *bp;
 	unsigned char status;
 	unsigned int result;
@@ -1780,7 +1781,7 @@ static int sx_tiocmget(struct tty_struct *tty, struct file *file)
 static int sx_tiocmset(struct tty_struct *tty, struct file *file,
 		       unsigned int set, unsigned int clear)
 {
-	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
+	struct specialix_port *port = tty->driver_data;
 	unsigned long flags;
 	struct specialix_board *bp;
 
@@ -1808,10 +1809,10 @@ static int sx_tiocmset(struct tty_struct *tty, struct file *file,
 		if (clear & TIOCM_DTR)
 			port->MSVR &= ~MSVR_DTR;
 	}
-	spin_lock_irqsave(&bp->lock, flags);
+	spin_lock(&bp->lock);
 	sx_out(bp, CD186x_CAR, port_No(port));
 	sx_out(bp, CD186x_MSVR, port->MSVR);
-	spin_unlock_irqrestore(&bp->lock, flags);
+	spin_unlock(&bp->lock);
 	spin_unlock_irqrestore(&port->lock, flags);
 	func_exit();
 	return 0;
@@ -1820,7 +1821,7 @@ static int sx_tiocmset(struct tty_struct *tty, struct file *file,
 
 static int sx_send_break(struct tty_struct *tty, int length)
 {
-	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
+	struct specialix_port *port = tty->driver_data;
 	struct specialix_board *bp = port_Board(port);
 	unsigned long flags;
 
@@ -1832,11 +1833,11 @@ static int sx_send_break(struct tty_struct *tty, int length)
 	port->break_length = SPECIALIX_TPS / HZ * length;
 	port->COR2 |= COR2_ETC;
 	port->IER  |= IER_TXRDY;
-	spin_lock_irqsave(&bp->lock, flags);
+	spin_lock(&bp->lock);
 	sx_out(bp, CD186x_CAR, port_No(port));
 	sx_out(bp, CD186x_COR2, port->COR2);
 	sx_out(bp, CD186x_IER, port->IER);
-	spin_unlock_irqrestore(&bp->lock, flags);
+	spin_unlock(&bp->lock);
 	spin_unlock_irqrestore(&port->lock, flags);
 	sx_wait_CCR(bp);
 	spin_lock_irqsave(&bp->lock, flags);
@@ -1931,7 +1932,7 @@ static int sx_get_serial_info(struct specialix_port *port,
 static int sx_ioctl(struct tty_struct *tty, struct file *filp,
 				unsigned int cmd, unsigned long arg)
 {
-	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
+	struct specialix_port *port = tty->driver_data;
 	void __user *argp = (void __user *)arg;
 
 	func_enter();
@@ -1959,7 +1960,7 @@ static int sx_ioctl(struct tty_struct *tty, struct file *filp,
 
 static void sx_throttle(struct tty_struct *tty)
 {
-	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
+	struct specialix_port *port = tty->driver_data;
 	struct specialix_board *bp;
 	unsigned long flags;
 
@@ -2004,7 +2005,7 @@ static void sx_throttle(struct tty_struct *tty)
 
 static void sx_unthrottle(struct tty_struct *tty)
 {
-	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
+	struct specialix_port *port = tty->driver_data;
 	struct specialix_board *bp;
 	unsigned long flags;
 
@@ -2022,9 +2023,9 @@ static void sx_unthrottle(struct tty_struct *tty)
 	if (sx_crtscts(tty))
 		port->MSVR |= MSVR_DTR;
 	/* Else clause: see remark in "sx_throttle"... */
-	spin_lock_irqsave(&bp->lock, flags);
+	spin_lock(&bp->lock);
 	sx_out(bp, CD186x_CAR, port_No(port));
-	spin_unlock_irqrestore(&bp->lock, flags);
+	spin_unlock(&bp->lock);
 	if (I_IXOFF(tty)) {
 		spin_unlock_irqrestore(&port->lock, flags);
 		sx_wait_CCR(bp);
@@ -2034,9 +2035,9 @@ static void sx_unthrottle(struct tty_struct *tty)
 		sx_wait_CCR(bp);
 		spin_lock_irqsave(&port->lock, flags);
 	}
-	spin_lock_irqsave(&bp->lock, flags);
+	spin_lock(&bp->lock);
 	sx_out(bp, CD186x_MSVR, port->MSVR);
-	spin_unlock_irqrestore(&bp->lock, flags);
+	spin_unlock(&bp->lock);
 	spin_unlock_irqrestore(&port->lock, flags);
 
 	func_exit();
@@ -2045,7 +2046,7 @@ static void sx_unthrottle(struct tty_struct *tty)
 
 static void sx_stop(struct tty_struct *tty)
 {
-	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
+	struct specialix_port *port = tty->driver_data;
 	struct specialix_board *bp;
 	unsigned long flags;
 
@@ -2060,10 +2061,10 @@ static void sx_stop(struct tty_struct *tty)
 
 	spin_lock_irqsave(&port->lock, flags);
 	port->IER &= ~IER_TXRDY;
-	spin_lock_irqsave(&bp->lock, flags);
+	spin_lock(&bp->lock);
 	sx_out(bp, CD186x_CAR, port_No(port));
 	sx_out(bp, CD186x_IER, port->IER);
-	spin_unlock_irqrestore(&bp->lock, flags);
+	spin_unlock(&bp->lock);
 	spin_unlock_irqrestore(&port->lock, flags);
 
 	func_exit();
@@ -2072,7 +2073,7 @@ static void sx_stop(struct tty_struct *tty)
 
 static void sx_start(struct tty_struct *tty)
 {
-	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
+	struct specialix_port *port = tty->driver_data;
 	struct specialix_board *bp;
 	unsigned long flags;
 
@@ -2088,10 +2089,10 @@ static void sx_start(struct tty_struct *tty)
 	spin_lock_irqsave(&port->lock, flags);
 	if (port->xmit_cnt && port->xmit_buf && !(port->IER & IER_TXRDY)) {
 		port->IER |= IER_TXRDY;
-		spin_lock_irqsave(&bp->lock, flags);
+		spin_lock(&bp->lock);
 		sx_out(bp, CD186x_CAR, port_No(port));
 		sx_out(bp, CD186x_IER, port->IER);
-		spin_unlock_irqrestore(&bp->lock, flags);
+		spin_unlock(&bp->lock);
 	}
 	spin_unlock_irqrestore(&port->lock, flags);
 
@@ -2100,7 +2101,7 @@ static void sx_start(struct tty_struct *tty)
 
 static void sx_hangup(struct tty_struct *tty)
 {
-	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
+	struct specialix_port *port = tty->driver_data;
 	struct specialix_board *bp;
 	unsigned long flags;
 
@@ -2135,7 +2136,7 @@ static void sx_hangup(struct tty_struct *tty)
 static void sx_set_termios(struct tty_struct *tty,
 					struct ktermios *old_termios)
 {
-	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
+	struct specialix_port *port = tty->driver_data;
 	unsigned long flags;
 	struct specialix_board  *bp;
 
@@ -2365,3 +2366,4 @@ module_init(specialix_init_module);
 module_exit(specialix_exit_module);
 
 MODULE_LICENSE("GPL");
+MODULE_ALIAS_CHARDEV_MAJOR(SPECIALIX_NORMAL_MAJOR);

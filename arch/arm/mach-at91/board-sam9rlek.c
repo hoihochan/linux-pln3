@@ -15,10 +15,11 @@
 #include <linux/spi/spi.h>
 #include <linux/fb.h>
 #include <linux/clk.h>
+#include <linux/input.h>
+#include <linux/gpio_keys.h>
 
 #include <video/atmel_lcdc.h>
 
-#include <mach/hardware.h>
 #include <asm/setup.h>
 #include <asm/mach-types.h>
 #include <asm/irq.h>
@@ -27,10 +28,13 @@
 #include <asm/mach/map.h>
 #include <asm/mach/irq.h>
 
+#include <mach/hardware.h>
 #include <mach/board.h>
 #include <mach/gpio.h>
 #include <mach/at91sam9_smc.h>
+#include <mach/at91_shdwc.h>
 
+#include "sam9_smc.h"
 #include "generic.h"
 
 
@@ -39,7 +43,7 @@ static void __init ek_map_io(void)
 	/* Initialize processor: 12.000 MHz crystal */
 	at91sam9rl_initialize(12000000);
 
-	/* DGBU on ttyS0. (Rx & Tx only) */
+	/* DBGU on ttyS0. (Rx & Tx only) */
 	at91_register_uart(0, 0, 0);
 
 	/* USART0 on ttyS1. (Rx, Tx, CTS, RTS) */
@@ -81,11 +85,11 @@ static struct mtd_partition __initdata ek_nand_partition[] = {
 	{
 		.name	= "Partition 1",
 		.offset	= 0,
-		.size	= 256 * 1024,
+		.size	= SZ_256K,
 	},
 	{
 		.name	= "Partition 2",
-		.offset	= 256 * 1024 ,
+		.offset	= MTDPART_OFS_NXTBLK,
 		.size	= MTDPART_SIZ_FULL,
 	},
 };
@@ -103,8 +107,33 @@ static struct atmel_nand_data __initdata ek_nand_data = {
 	.rdy_pin	= AT91_PIN_PD17,
 	.enable_pin	= AT91_PIN_PB6,
 	.partition_info	= nand_partitions,
-	.bus_width_16	= 0,
 };
+
+static struct sam9_smc_config __initdata ek_nand_smc_config = {
+	.ncs_read_setup		= 0,
+	.nrd_setup		= 1,
+	.ncs_write_setup	= 0,
+	.nwe_setup		= 1,
+
+	.ncs_read_pulse		= 3,
+	.nrd_pulse		= 3,
+	.ncs_write_pulse	= 3,
+	.nwe_pulse		= 3,
+
+	.read_cycle		= 5,
+	.write_cycle		= 5,
+
+	.mode			= AT91_SMC_READMODE | AT91_SMC_WRITEMODE | AT91_SMC_EXNWMODE_DISABLE | AT91_SMC_DBW_8,
+	.tdf_cycles		= 2,
+};
+
+static void __init ek_add_device_nand(void)
+{
+	/* configure chip-select 3 (NAND) */
+	sam9_smc_configure(3, &ek_nand_smc_config);
+
+	at91_add_device_nand(&ek_nand_data);
+}
 
 
 /*
@@ -159,23 +188,106 @@ static struct fb_monspecs at91fb_default_monspecs = {
 static void at91_lcdc_power_control(int on)
 {
 	if (on)
-		at91_set_gpio_value(AT91_PIN_PA30, 0);	/* power up */
+		at91_set_gpio_value(AT91_PIN_PC1, 0);	/* power up */
 	else
-		at91_set_gpio_value(AT91_PIN_PA30, 1);	/* power down */
+		at91_set_gpio_value(AT91_PIN_PC1, 1);	/* power down */
 }
 
 /* Driver datas */
 static struct atmel_lcdfb_info __initdata ek_lcdc_data = {
+	.lcdcon_is_backlight            = true,
 	.default_bpp			= 16,
 	.default_dmacon			= ATMEL_LCDC_DMAEN,
 	.default_lcdcon2		= AT91SAM9RL_DEFAULT_LCDCON2,
 	.default_monspecs		= &at91fb_default_monspecs,
 	.atmel_lcdfb_power_control	= at91_lcdc_power_control,
 	.guard_time			= 1,
+	.lcd_wiring_mode		= ATMEL_LCDC_WIRING_RGB,
 };
 
 #else
 static struct atmel_lcdfb_info __initdata ek_lcdc_data;
+#endif
+
+
+/*
+ * AC97
+ * reset_pin is not connected: NRST
+ */
+static struct ac97c_platform_data ek_ac97_data = {
+};
+
+
+/*
+ * LEDs
+ */
+static struct gpio_led ek_leds[] = {
+	{	/* "bottom" led, green, userled1 to be defined */
+		.name			= "ds1",
+		.gpio			= AT91_PIN_PD15,
+		.active_low		= 1,
+		.default_trigger	= "none",
+	},
+	{	/* "bottom" led, green, userled2 to be defined */
+		.name			= "ds2",
+		.gpio			= AT91_PIN_PD16,
+		.active_low		= 1,
+		.default_trigger	= "none",
+	},
+	{	/* "power" led, yellow */
+		.name			= "ds3",
+		.gpio			= AT91_PIN_PD14,
+		.default_trigger	= "heartbeat",
+	}
+};
+
+
+/*
+ * GPIO Buttons
+ */
+#if defined(CONFIG_KEYBOARD_GPIO) || defined(CONFIG_KEYBOARD_GPIO_MODULE)
+static struct gpio_keys_button ek_buttons[] = {
+	{
+		.gpio		= AT91_PIN_PB0,
+		.code		= BTN_2,
+		.desc		= "Right Click",
+		.active_low	= 1,
+		.wakeup		= 1,
+	},
+	{
+		.gpio		= AT91_PIN_PB1,
+		.code		= BTN_1,
+		.desc		= "Left Click",
+		.active_low	= 1,
+		.wakeup		= 1,
+	}
+};
+
+static struct gpio_keys_platform_data ek_button_data = {
+	.buttons	= ek_buttons,
+	.nbuttons	= ARRAY_SIZE(ek_buttons),
+};
+
+static struct platform_device ek_button_device = {
+	.name		= "gpio-keys",
+	.id		= -1,
+	.num_resources	= 0,
+	.dev		= {
+		.platform_data	= &ek_button_data,
+	}
+};
+
+static void __init ek_add_device_buttons(void)
+{
+	at91_set_gpio_input(AT91_PIN_PB1, 1);	/* btn1 */
+	at91_set_deglitch(AT91_PIN_PB1, 1);
+	at91_set_gpio_input(AT91_PIN_PB0, 1);	/* btn2 */
+	at91_set_deglitch(AT91_PIN_PB0, 1);
+
+	platform_device_register(&ek_button_device);
+}
+#else
+static void __init ek_add_device_buttons(void) {}
 #endif
 
 
@@ -188,13 +300,21 @@ static void __init ek_board_init(void)
 	/* I2C */
 	at91_add_device_i2c(NULL, 0);
 	/* NAND */
-	at91_add_device_nand(&ek_nand_data);
+	ek_add_device_nand();
 	/* SPI */
 	at91_add_device_spi(ek_spi_devices, ARRAY_SIZE(ek_spi_devices));
 	/* MMC */
 	at91_add_device_mmc(0, &ek_mmc_data);
 	/* LCD Controller */
 	at91_add_device_lcdc(&ek_lcdc_data);
+	/* AC97 */
+	at91_add_device_ac97(&ek_ac97_data);
+	/* Touch Screen Controller */
+	at91_add_device_tsadcc();
+	/* LEDs */
+	at91_gpio_leds(ek_leds, ARRAY_SIZE(ek_leds));
+	/* Push Buttons */
+	ek_add_device_buttons();
 }
 
 MACHINE_START(AT91SAM9RLEK, "Atmel AT91SAM9RL-EK")

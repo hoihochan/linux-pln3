@@ -12,6 +12,8 @@
 #include <linux/rwsem.h>
 #include <linux/acpi.h>
 
+#include "internal.h"
+
 #define ACPI_GLUE_DEBUG	0
 #if ACPI_GLUE_DEBUG
 #define DBG(x...) printk(PREFIX x)
@@ -93,15 +95,13 @@ do_acpi_find_child(acpi_handle handle, u32 lvl, void *context, void **rv)
 {
 	acpi_status status;
 	struct acpi_device_info *info;
-	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
 	struct acpi_find_child *find = context;
 
-	status = acpi_get_object_info(handle, &buffer);
+	status = acpi_get_object_info(handle, &info);
 	if (ACPI_SUCCESS(status)) {
-		info = buffer.pointer;
 		if (info->address == find->address)
 			find->handle = handle;
-		kfree(buffer.pointer);
+		kfree(info);
 	}
 	return AE_OK;
 }
@@ -121,7 +121,7 @@ EXPORT_SYMBOL(acpi_get_child);
 
 /* Link ACPI devices with physical devices */
 static void acpi_glue_data_handler(acpi_handle handle,
-				   u32 function, void *context)
+				   void *context)
 {
 	/* we provide an empty handler */
 }
@@ -215,12 +215,12 @@ static int acpi_platform_notify(struct device *dev)
 	}
 	type = acpi_get_bus_type(dev->bus);
 	if (!type) {
-		DBG("No ACPI bus support for %s\n", dev->bus_id);
+		DBG("No ACPI bus support for %s\n", dev_name(dev));
 		ret = -EINVAL;
 		goto end;
 	}
 	if ((ret = type->find_device(dev, &handle)) != 0)
-		DBG("Can't get handler for %s\n", dev->bus_id);
+		DBG("Can't get handler for %s\n", dev_name(dev));
       end:
 	if (!ret)
 		acpi_bind_one(dev, handle);
@@ -231,10 +231,10 @@ static int acpi_platform_notify(struct device *dev)
 
 		acpi_get_name(dev->archdata.acpi_handle,
 			      ACPI_FULL_PATHNAME, &buffer);
-		DBG("Device %s -> %s\n", dev->bus_id, (char *)buffer.pointer);
+		DBG("Device %s -> %s\n", dev_name(dev), (char *)buffer.pointer);
 		kfree(buffer.pointer);
 	} else
-		DBG("Device %s -> No ACPI support\n", dev->bus_id);
+		DBG("Device %s -> No ACPI support\n", dev_name(dev));
 #endif
 
 	return ret;
@@ -246,10 +246,8 @@ static int acpi_platform_notify_remove(struct device *dev)
 	return 0;
 }
 
-static int __init init_acpi_device_notify(void)
+int __init init_acpi_device_notify(void)
 {
-	if (acpi_disabled)
-		return 0;
 	if (platform_notify || platform_notify_remove) {
 		printk(KERN_ERR PREFIX "Can't use platform_notify\n");
 		return 0;
@@ -258,118 +256,3 @@ static int __init init_acpi_device_notify(void)
 	platform_notify_remove = acpi_platform_notify_remove;
 	return 0;
 }
-
-arch_initcall(init_acpi_device_notify);
-
-
-#if defined(CONFIG_RTC_DRV_CMOS) || defined(CONFIG_RTC_DRV_CMOS_MODULE)
-
-#ifdef CONFIG_PM
-static u32 rtc_handler(void *context)
-{
-	acpi_clear_event(ACPI_EVENT_RTC);
-	acpi_disable_event(ACPI_EVENT_RTC, 0);
-	return ACPI_INTERRUPT_HANDLED;
-}
-
-static inline void rtc_wake_setup(void)
-{
-	acpi_install_fixed_event_handler(ACPI_EVENT_RTC, rtc_handler, NULL);
-	/*
-	 * After the RTC handler is installed, the Fixed_RTC event should
-	 * be disabled. Only when the RTC alarm is set will it be enabled.
-	 */
-	acpi_clear_event(ACPI_EVENT_RTC);
-	acpi_disable_event(ACPI_EVENT_RTC, 0);
-}
-
-static void rtc_wake_on(struct device *dev)
-{
-	acpi_clear_event(ACPI_EVENT_RTC);
-	acpi_enable_event(ACPI_EVENT_RTC, 0);
-}
-
-static void rtc_wake_off(struct device *dev)
-{
-	acpi_disable_event(ACPI_EVENT_RTC, 0);
-}
-#else
-#define rtc_wake_setup()	do{}while(0)
-#define rtc_wake_on		NULL
-#define rtc_wake_off		NULL
-#endif
-
-/* Every ACPI platform has a mc146818 compatible "cmos rtc".  Here we find
- * its device node and pass extra config data.  This helps its driver use
- * capabilities that the now-obsolete mc146818 didn't have, and informs it
- * that this board's RTC is wakeup-capable (per ACPI spec).
- */
-#include <linux/mc146818rtc.h>
-
-static struct cmos_rtc_board_info rtc_info;
-
-
-/* PNP devices are registered in a subsys_initcall();
- * ACPI specifies the PNP IDs to use.
- */
-#include <linux/pnp.h>
-
-static int __init pnp_match(struct device *dev, void *data)
-{
-	static const char *ids[] = { "PNP0b00", "PNP0b01", "PNP0b02", };
-	struct pnp_dev *pnp = to_pnp_dev(dev);
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(ids); i++) {
-		if (compare_pnp_id(pnp->id, ids[i]) != 0)
-			return 1;
-	}
-	return 0;
-}
-
-static struct device *__init get_rtc_dev(void)
-{
-	return bus_find_device(&pnp_bus_type, NULL, NULL, pnp_match);
-}
-
-static int __init acpi_rtc_init(void)
-{
-	struct device *dev = get_rtc_dev();
-
-	if (acpi_disabled)
-		return 0;
-
-	if (dev) {
-		rtc_wake_setup();
-		rtc_info.wake_on = rtc_wake_on;
-		rtc_info.wake_off = rtc_wake_off;
-
-		/* workaround bug in some ACPI tables */
-		if (acpi_gbl_FADT.month_alarm && !acpi_gbl_FADT.day_alarm) {
-			DBG("bogus FADT month_alarm\n");
-			acpi_gbl_FADT.month_alarm = 0;
-		}
-
-		rtc_info.rtc_day_alarm = acpi_gbl_FADT.day_alarm;
-		rtc_info.rtc_mon_alarm = acpi_gbl_FADT.month_alarm;
-		rtc_info.rtc_century = acpi_gbl_FADT.century;
-
-		/* NOTE:  S4_RTC_WAKE is NOT currently useful to Linux */
-		if (acpi_gbl_FADT.flags & ACPI_FADT_S4_RTC_WAKE)
-			printk(PREFIX "RTC can wake from S4\n");
-
-
-		dev->platform_data = &rtc_info;
-
-		/* RTC always wakes from S1/S2/S3, and often S4/STD */
-		device_init_wakeup(dev, 1);
-
-		put_device(dev);
-	} else
-		DBG("RTC unavailable?\n");
-	return 0;
-}
-/* do this between RTC subsys_initcall() and rtc_cmos driver_initcall() */
-fs_initcall(acpi_rtc_init);
-
-#endif

@@ -139,9 +139,10 @@ static int full_duplex[MAX_UNITS] = {-1, -1, -1, -1, -1, -1, -1, -1};
 #define PKT_BUF_SZ		1536	/* Size of each temporary Rx buffer.*/
 
 /* These identify the driver base version and may not be removed. */
-static char version[] =
-KERN_INFO DRV_NAME ".c:v" DRV_VERSION " (2.4 port) " DRV_RELDATE "  Donald Becker <becker@scyld.com>\n"
-KERN_INFO "  http://www.scyld.com/network/drivers.html\n";
+static const char version[] __initconst =
+	KERN_INFO DRV_NAME ".c:v" DRV_VERSION " (2.4 port) "
+	DRV_RELDATE "  Donald Becker <becker@scyld.com>\n"
+	"  http://www.scyld.com/network/drivers.html\n";
 
 MODULE_AUTHOR("Donald Becker <becker@scyld.com>");
 MODULE_DESCRIPTION("Winbond W89c840 Ethernet driver");
@@ -332,7 +333,7 @@ static void init_registers(struct net_device *dev);
 static void tx_timeout(struct net_device *dev);
 static int alloc_ringdesc(struct net_device *dev);
 static void free_ringdesc(struct netdev_private *np);
-static int  start_tx(struct sk_buff *skb, struct net_device *dev);
+static netdev_tx_t start_tx(struct sk_buff *skb, struct net_device *dev);
 static irqreturn_t intr_handler(int irq, void *dev_instance);
 static void netdev_error(struct net_device *dev, int intr_status);
 static int  netdev_rx(struct net_device *dev);
@@ -343,7 +344,18 @@ static int netdev_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
 static const struct ethtool_ops netdev_ethtool_ops;
 static int  netdev_close(struct net_device *dev);
 
-
+static const struct net_device_ops netdev_ops = {
+	.ndo_open		= netdev_open,
+	.ndo_stop		= netdev_close,
+	.ndo_start_xmit		= start_tx,
+	.ndo_get_stats		= get_stats,
+	.ndo_set_multicast_list = set_rx_mode,
+	.ndo_do_ioctl		= netdev_ioctl,
+	.ndo_tx_timeout		= tx_timeout,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+};
 
 static int __devinit w840_probe1 (struct pci_dev *pdev,
 				  const struct pci_device_id *ent)
@@ -355,7 +367,6 @@ static int __devinit w840_probe1 (struct pci_dev *pdev,
 	int irq;
 	int i, option = find_cnt < MAX_UNITS ? options[find_cnt] : 0;
 	void __iomem *ioaddr;
-	DECLARE_MAC_BUF(mac);
 
 	i = pci_enable_device(pdev);
 	if (i) return i;
@@ -364,7 +375,7 @@ static int __devinit w840_probe1 (struct pci_dev *pdev,
 
 	irq = pdev->irq;
 
-	if (pci_set_dma_mask(pdev, DMA_32BIT_MASK)) {
+	if (pci_set_dma_mask(pdev, DMA_BIT_MASK(32))) {
 		printk(KERN_WARNING "Winbond-840: Device %s disabled due to DMA limitations.\n",
 		       pci_name(pdev));
 		return -EIO;
@@ -421,23 +432,17 @@ static int __devinit w840_probe1 (struct pci_dev *pdev,
 		np->mii_if.force_media = 1;
 
 	/* The chip-specific entries in the device structure. */
-	dev->open = &netdev_open;
-	dev->hard_start_xmit = &start_tx;
-	dev->stop = &netdev_close;
-	dev->get_stats = &get_stats;
-	dev->set_multicast_list = &set_rx_mode;
-	dev->do_ioctl = &netdev_ioctl;
+	dev->netdev_ops = &netdev_ops;
 	dev->ethtool_ops = &netdev_ethtool_ops;
-	dev->tx_timeout = &tx_timeout;
 	dev->watchdog_timeo = TX_TIMEOUT;
 
 	i = register_netdev(dev);
 	if (i)
 		goto err_out_cleardev;
 
-	printk(KERN_INFO "%s: %s at %p, %s, IRQ %d.\n",
+	printk(KERN_INFO "%s: %s at %p, %pM, IRQ %d.\n",
 	       dev->name, pci_id_tbl[chip_idx].name, ioaddr,
-	       print_mac(mac, dev->dev_addr), irq);
+	       dev->dev_addr, irq);
 
 	if (np->drv_flags & CanHaveMII) {
 		int phy, phy_idx = 0;
@@ -934,7 +939,7 @@ static void tx_timeout(struct net_device *dev)
 		printk(KERN_DEBUG "  Rx ring %p: ", np->rx_ring);
 		for (i = 0; i < RX_RING_SIZE; i++)
 			printk(" %8.8x", (unsigned int)np->rx_ring[i].status);
-		printk("\n"KERN_DEBUG"  Tx ring %p: ", np->tx_ring);
+		printk(KERN_DEBUG"  Tx ring %p: ", np->tx_ring);
 		for (i = 0; i < TX_RING_SIZE; i++)
 			printk(" %8.8x", np->tx_ring[i].status);
 		printk("\n");
@@ -992,7 +997,7 @@ static void free_ringdesc(struct netdev_private *np)
 
 }
 
-static int start_tx(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t start_tx(struct sk_buff *skb, struct net_device *dev)
 {
 	struct netdev_private *np = netdev_priv(dev);
 	unsigned entry;
@@ -1053,7 +1058,7 @@ static int start_tx(struct sk_buff *skb, struct net_device *dev)
 		printk(KERN_DEBUG "%s: Transmit frame #%d queued in slot %d.\n",
 			   dev->name, np->cur_tx, entry);
 	}
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 static void netdev_tx_done(struct net_device *dev)
@@ -1245,20 +1250,15 @@ static int netdev_rx(struct net_device *dev)
 			}
 #ifndef final_version				/* Remove after testing. */
 			/* You will want this info for the initial debug. */
-			if (debug > 5) {
-				DECLARE_MAC_BUF(mac);
-				DECLARE_MAC_BUF(mac2);
-
-				printk(KERN_DEBUG "  Rx data %s %s"
+			if (debug > 5)
+				printk(KERN_DEBUG "  Rx data %pM %pM"
 				       " %2.2x%2.2x %d.%d.%d.%d.\n",
-				       print_mac(mac, &skb->data[0]), print_mac(mac2, &skb->data[6]),
+				       &skb->data[0], &skb->data[6],
 				       skb->data[12], skb->data[13],
 				       skb->data[14], skb->data[15], skb->data[16], skb->data[17]);
-			}
 #endif
 			skb->protocol = eth_type_trans(skb, dev);
 			netif_rx(skb);
-			dev->last_rx = jiffies;
 			np->stats.rx_packets++;
 			np->stats.rx_bytes += pkt_len;
 		}
@@ -1470,8 +1470,6 @@ static int netdev_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 		return 0;
 
 	case SIOCSMIIREG:		/* Write MII PHY register. */
-		if (!capable(CAP_NET_ADMIN))
-			return -EPERM;
 		spin_lock_irq(&np->lock);
 		mdio_write(dev, data->phy_id & 0x1f, data->reg_num & 0x1f, data->val_in);
 		spin_unlock_irq(&np->lock);
@@ -1520,7 +1518,7 @@ static int netdev_close(struct net_device *dev)
 			printk(KERN_DEBUG " #%d desc. %4.4x %4.4x %8.8x.\n",
 				   i, np->tx_ring[i].length,
 				   np->tx_ring[i].status, np->tx_ring[i].buffer1);
-		printk("\n"KERN_DEBUG "  Rx ring %8.8x:\n",
+		printk(KERN_DEBUG "  Rx ring %8.8x:\n",
 			   (int)np->rx_ring);
 		for (i = 0; i < RX_RING_SIZE; i++) {
 			printk(KERN_DEBUG " #%d desc. %4.4x %4.4x %8.8x\n",
@@ -1561,7 +1559,7 @@ static void __devexit w840_remove1 (struct pci_dev *pdev)
  * 	rtnl_lock, & netif_device_detach after the rtnl_unlock.
  * - get_stats:
  * 	spin_lock_irq(np->lock), doesn't touch hw if not present
- * - hard_start_xmit:
+ * - start_xmit:
  * 	synchronize_irq + netif_tx_disable;
  * - tx_timeout:
  * 	netif_device_detach + netif_tx_disable;
@@ -1601,8 +1599,7 @@ static int w840_suspend (struct pci_dev *pdev, pm_message_t state)
 
 		/* no more hardware accesses behind this line. */
 
-		BUG_ON(np->csr6);
-		if (ioread32(ioaddr + IntrEnable)) BUG();
+		BUG_ON(np->csr6 || ioread32(ioaddr + IntrEnable));
 
 		/* pci_power_off(pdev, -1); */
 

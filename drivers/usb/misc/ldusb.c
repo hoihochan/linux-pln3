@@ -57,7 +57,6 @@
 #define USB_DEVICE_ID_LD_MACHINETEST	0x2040	/* USB Product ID of Machine Test System */
 
 #define USB_VENDOR_ID_VERNIER		0x08f7
-#define USB_DEVICE_ID_VERNIER_LABPRO	0x0001
 #define USB_DEVICE_ID_VERNIER_GOTEMP	0x0002
 #define USB_DEVICE_ID_VERNIER_SKIP	0x0003
 #define USB_DEVICE_ID_VERNIER_CYCLOPS	0x0004
@@ -85,7 +84,6 @@ static struct usb_device_id ld_usb_table [] = {
 	{ USB_DEVICE(USB_VENDOR_ID_LD, USB_DEVICE_ID_LD_NETWORKANALYSER) },
 	{ USB_DEVICE(USB_VENDOR_ID_LD, USB_DEVICE_ID_LD_POWERCONTROL) },
 	{ USB_DEVICE(USB_VENDOR_ID_LD, USB_DEVICE_ID_LD_MACHINETEST) },
-	{ USB_DEVICE(USB_VENDOR_ID_VERNIER, USB_DEVICE_ID_VERNIER_LABPRO) },
 	{ USB_DEVICE(USB_VENDOR_ID_VERNIER, USB_DEVICE_ID_VERNIER_GOTEMP) },
 	{ USB_DEVICE(USB_VENDOR_ID_VERNIER, USB_DEVICE_ID_VERNIER_SKIP) },
 	{ USB_DEVICE(USB_VENDOR_ID_VERNIER, USB_DEVICE_ID_VERNIER_CYCLOPS) },
@@ -413,6 +411,9 @@ static unsigned int ld_usb_poll(struct file *file, poll_table *wait)
 	unsigned int mask = 0;
 
 	dev = file->private_data;
+
+	if (!dev->intf)
+		return POLLERR | POLLHUP;
 
 	poll_wait(file, &dev->read_wait, wait);
 	poll_wait(file, &dev->write_wait, wait);
@@ -769,6 +770,9 @@ static void ld_usb_disconnect(struct usb_interface *intf)
 		ld_usb_delete(dev);
 	} else {
 		dev->intf = NULL;
+		/* wake up pollers */
+		wake_up_interruptible_all(&dev->read_wait);
+		wake_up_interruptible_all(&dev->write_wait);
 		mutex_unlock(&dev->mutex);
 	}
 

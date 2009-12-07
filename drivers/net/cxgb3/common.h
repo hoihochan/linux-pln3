@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005-2007 Chelsio, Inc. All rights reserved.
+ * Copyright (c) 2005-2008 Chelsio, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -39,7 +39,7 @@
 #include <linux/init.h>
 #include <linux/netdevice.h>
 #include <linux/ethtool.h>
-#include <linux/mii.h>
+#include <linux/mdio.h>
 #include "version.h"
 
 #define CH_ERR(adap, fmt, ...)   dev_err(&adap->pdev->dev, fmt, ## __VA_ARGS__)
@@ -184,29 +184,22 @@ struct cphy;
 struct adapter;
 
 struct mdio_ops {
-	int (*read)(struct adapter *adapter, int phy_addr, int mmd_addr,
-		    int reg_addr, unsigned int *val);
-	int (*write)(struct adapter *adapter, int phy_addr, int mmd_addr,
-		     int reg_addr, unsigned int val);
+	int (*read)(struct net_device *dev, int phy_addr, int mmd_addr,
+		    u16 reg_addr);
+	int (*write)(struct net_device *dev, int phy_addr, int mmd_addr,
+		     u16 reg_addr, u16 val);
+	unsigned mode_support;
 };
 
 struct adapter_info {
-	unsigned char nports;	/* # of ports */
+	unsigned char nports0;        /* # of ports on channel 0 */
+	unsigned char nports1;        /* # of ports on channel 1 */
 	unsigned char phy_base_addr;	/* MDIO PHY base address */
-	unsigned char mdien;
-	unsigned char mdiinv;
 	unsigned int gpio_out;	/* GPIO output settings */
-	unsigned int gpio_intr;	/* GPIO IRQ enable mask */
+	unsigned char gpio_intr[MAX_NPORTS]; /* GPIO PHY IRQ pins */
 	unsigned long caps;	/* adapter capabilities */
 	const struct mdio_ops *mdio_ops;	/* MDIO operations */
 	const char *desc;	/* product description */
-};
-
-struct port_type_info {
-	void (*phy_prep)(struct cphy *phy, struct adapter *adapter,
-			 int phy_addr, const struct mdio_ops *ops);
-	unsigned int caps;
-	const char *desc;
 };
 
 struct mc5_stats {
@@ -289,6 +282,7 @@ struct mac_stats {
 	unsigned long num_toggled; /* # times toggled TxEn due to stuck TX */
 	unsigned long num_resets;  /* # times reset due to stuck TX */
 
+	unsigned long link_faults;  /* # detected link faults */
 };
 
 struct tp_mib_stats {
@@ -358,6 +352,7 @@ struct qset_params {		/* SGE queue set parameters */
 	unsigned int jumbo_size;	/* # of entries in jumbo free list */
 	unsigned int txq_size[SGE_TXQ_PER_SET];	/* Tx queue sizes */
 	unsigned int cong_thres;	/* FL congestion threshold */
+	unsigned int vector;		/* Interrupt (line or vector) number */
 };
 
 struct sge_params {
@@ -429,6 +424,7 @@ struct adapter_params {
 	unsigned short b_wnd[NCCTRL_WIN];
 
 	unsigned int nports;	/* # of ethernet ports */
+	unsigned int chan_map;  /* bitmap of in-use Tx channels */
 	unsigned int stats_update_period;	/* MAC stats accumulation period */
 	unsigned int linkpoll_period;	/* link poll period in 0.1s */
 	unsigned int rev;	/* chip revision */
@@ -525,14 +521,6 @@ enum {
 	MAC_RXFIFO_SIZE = 32768
 };
 
-/* IEEE 802.3ae specified MDIO devices */
-enum {
-	MDIO_DEV_PMA_PMD = 1,
-	MDIO_DEV_WIS = 2,
-	MDIO_DEV_PCS = 3,
-	MDIO_DEV_XGXS = 4
-};
-
 /* PHY loopback direction */
 enum {
 	PHY_LOOPBACK_TX = 1,
@@ -542,12 +530,23 @@ enum {
 /* PHY interrupt types */
 enum {
 	cphy_cause_link_change = 1,
-	cphy_cause_fifo_error = 2
+	cphy_cause_fifo_error = 2,
+	cphy_cause_module_change = 4,
+};
+
+/* PHY module types */
+enum {
+	phy_modtype_none,
+	phy_modtype_sr,
+	phy_modtype_lr,
+	phy_modtype_lrm,
+	phy_modtype_twinax,
+	phy_modtype_twinax_long,
+	phy_modtype_unknown
 };
 
 /* PHY operations */
 struct cphy_ops {
-	void (*destroy)(struct cphy *phy);
 	int (*reset)(struct cphy *phy, int wait);
 
 	int (*intr_enable)(struct cphy *phy);
@@ -564,44 +563,64 @@ struct cphy_ops {
 	int (*get_link_status)(struct cphy *phy, int *link_ok, int *speed,
 			       int *duplex, int *fc);
 	int (*power_down)(struct cphy *phy, int enable);
+
+	u32 mmds;
+};
+enum {
+	EDC_OPT_AEL2005 = 0,
+	EDC_OPT_AEL2005_SIZE = 1084,
+	EDC_TWX_AEL2005 = 1,
+	EDC_TWX_AEL2005_SIZE = 1464,
+	EDC_TWX_AEL2020 = 2,
+	EDC_TWX_AEL2020_SIZE = 1628,
+	EDC_MAX_SIZE = EDC_TWX_AEL2020_SIZE, /* Max cache size */
 };
 
 /* A PHY instance */
 struct cphy {
-	int addr;		/* PHY address */
+	u8 modtype;			/* PHY module type */
+	short priv;			/* scratch pad */
+	unsigned int caps;		/* PHY capabilities */
 	struct adapter *adapter;	/* associated adapter */
+	const char *desc;		/* PHY description */
 	unsigned long fifo_errors;	/* FIFO over/under-flows */
 	const struct cphy_ops *ops;	/* PHY operations */
-	int (*mdio_read)(struct adapter *adapter, int phy_addr, int mmd_addr,
-			 int reg_addr, unsigned int *val);
-	int (*mdio_write)(struct adapter *adapter, int phy_addr, int mmd_addr,
-			  int reg_addr, unsigned int val);
+	struct mdio_if_info mdio;
+	u16 phy_cache[EDC_MAX_SIZE];	/* EDC cache */
 };
 
 /* Convenience MDIO read/write wrappers */
-static inline int mdio_read(struct cphy *phy, int mmd, int reg,
-			    unsigned int *valp)
+static inline int t3_mdio_read(struct cphy *phy, int mmd, int reg,
+			       unsigned int *valp)
 {
-	return phy->mdio_read(phy->adapter, phy->addr, mmd, reg, valp);
+	int rc = phy->mdio.mdio_read(phy->mdio.dev, phy->mdio.prtad, mmd, reg);
+	*valp = (rc >= 0) ? rc : -1;
+	return (rc >= 0) ? 0 : rc;
 }
 
-static inline int mdio_write(struct cphy *phy, int mmd, int reg,
-			     unsigned int val)
+static inline int t3_mdio_write(struct cphy *phy, int mmd, int reg,
+				unsigned int val)
 {
-	return phy->mdio_write(phy->adapter, phy->addr, mmd, reg, val);
+	return phy->mdio.mdio_write(phy->mdio.dev, phy->mdio.prtad, mmd,
+				    reg, val);
 }
 
 /* Convenience initializer */
 static inline void cphy_init(struct cphy *phy, struct adapter *adapter,
 			     int phy_addr, struct cphy_ops *phy_ops,
-			     const struct mdio_ops *mdio_ops)
+			     const struct mdio_ops *mdio_ops,
+			      unsigned int caps, const char *desc)
 {
+	phy->caps = caps;
 	phy->adapter = adapter;
-	phy->addr = phy_addr;
+	phy->desc = desc;
 	phy->ops = phy_ops;
 	if (mdio_ops) {
-		phy->mdio_read = mdio_ops->read;
-		phy->mdio_write = mdio_ops->write;
+		phy->mdio.prtad = phy_addr;
+		phy->mdio.mmds = phy_ops->mmds;
+		phy->mdio.mode_support = mdio_ops->mode_support;
+		phy->mdio.mdio_read = mdio_ops->read;
+		phy->mdio.mdio_write = mdio_ops->write;
 	}
 }
 
@@ -668,11 +687,18 @@ int t3_mdio_change_bits(struct cphy *phy, int mmd, int reg, unsigned int clear,
 			unsigned int set);
 int t3_phy_reset(struct cphy *phy, int mmd, int wait);
 int t3_phy_advertise(struct cphy *phy, unsigned int advert);
+int t3_phy_advertise_fiber(struct cphy *phy, unsigned int advert);
 int t3_set_phy_speed_duplex(struct cphy *phy, int speed, int duplex);
+int t3_phy_lasi_intr_enable(struct cphy *phy);
+int t3_phy_lasi_intr_disable(struct cphy *phy);
+int t3_phy_lasi_intr_clear(struct cphy *phy);
+int t3_phy_lasi_intr_handler(struct cphy *phy);
 
 void t3_intr_enable(struct adapter *adapter);
 void t3_intr_disable(struct adapter *adapter);
 void t3_intr_clear(struct adapter *adapter);
+void t3_xgm_intr_enable(struct adapter *adapter, int idx);
+void t3_xgm_intr_disable(struct adapter *adapter, int idx);
 void t3_port_intr_enable(struct adapter *adapter, int idx);
 void t3_port_intr_disable(struct adapter *adapter, int idx);
 void t3_port_intr_clear(struct adapter *adapter, int idx);
@@ -680,13 +706,14 @@ int t3_slow_intr_handler(struct adapter *adapter);
 int t3_phy_intr_handler(struct adapter *adapter);
 
 void t3_link_changed(struct adapter *adapter, int port_id);
+void t3_link_fault(struct adapter *adapter, int port_id);
 int t3_link_start(struct cphy *phy, struct cmac *mac, struct link_config *lc);
 const struct adapter_info *t3_get_adapter_info(unsigned int board_id);
 int t3_seeprom_read(struct adapter *adapter, u32 addr, __le32 *data);
 int t3_seeprom_write(struct adapter *adapter, u32 addr, __le32 data);
 int t3_seeprom_wp(struct adapter *adapter, int enable);
 int t3_get_tp_version(struct adapter *adapter, u32 *vers);
-int t3_check_tpsram_version(struct adapter *adapter, int *must_load);
+int t3_check_tpsram_version(struct adapter *adapter);
 int t3_check_tpsram(struct adapter *adapter, const u8 *tp_ram,
 		    unsigned int size);
 int t3_set_proto_sram(struct adapter *adap, const u8 *data);
@@ -694,10 +721,11 @@ int t3_read_flash(struct adapter *adapter, unsigned int addr,
 		  unsigned int nwords, u32 *data, int byte_oriented);
 int t3_load_fw(struct adapter *adapter, const u8 * fw_data, unsigned int size);
 int t3_get_fw_version(struct adapter *adapter, u32 *vers);
-int t3_check_fw_version(struct adapter *adapter, int *must_load);
+int t3_check_fw_version(struct adapter *adapter);
 int t3_init_hw(struct adapter *adapter, u32 fw_params);
 void mac_prep(struct cmac *mac, struct adapter *adapter, int index);
 void early_hw_init(struct adapter *adapter, const struct adapter_info *ai);
+int t3_reset_adapter(struct adapter *adapter);
 int t3_prep_adapter(struct adapter *adapter, const struct adapter_info *ai,
 		    int reset);
 int t3_replay_prep_adapter(struct adapter *adapter);
@@ -715,6 +743,8 @@ int t3_mc7_bd_read(struct mc7 *mc7, unsigned int start, unsigned int n,
 
 int t3_mac_reset(struct cmac *mac);
 void t3b_pcs_reset(struct cmac *mac);
+void t3_mac_disable_exact_filters(struct cmac *mac);
+void t3_mac_enable_exact_filters(struct cmac *mac);
 int t3_mac_enable(struct cmac *mac, int which);
 int t3_mac_disable(struct cmac *mac, int which);
 int t3_mac_set_mtu(struct cmac *mac, unsigned int mtu);
@@ -774,14 +804,20 @@ int t3_sge_read_rspq(struct adapter *adapter, unsigned int id, u32 data[4]);
 int t3_sge_cqcntxt_op(struct adapter *adapter, unsigned int id, unsigned int op,
 		      unsigned int credits);
 
-void t3_vsc8211_phy_prep(struct cphy *phy, struct adapter *adapter,
-			 int phy_addr, const struct mdio_ops *mdio_ops);
-void t3_ael1002_phy_prep(struct cphy *phy, struct adapter *adapter,
-			 int phy_addr, const struct mdio_ops *mdio_ops);
-void t3_ael1006_phy_prep(struct cphy *phy, struct adapter *adapter,
-			 int phy_addr, const struct mdio_ops *mdio_ops);
-void t3_qt2045_phy_prep(struct cphy *phy, struct adapter *adapter, int phy_addr,
-			const struct mdio_ops *mdio_ops);
-void t3_xaui_direct_phy_prep(struct cphy *phy, struct adapter *adapter,
-			     int phy_addr, const struct mdio_ops *mdio_ops);
+int t3_vsc8211_phy_prep(struct cphy *phy, struct adapter *adapter,
+			int phy_addr, const struct mdio_ops *mdio_ops);
+int t3_ael1002_phy_prep(struct cphy *phy, struct adapter *adapter,
+			int phy_addr, const struct mdio_ops *mdio_ops);
+int t3_ael1006_phy_prep(struct cphy *phy, struct adapter *adapter,
+			int phy_addr, const struct mdio_ops *mdio_ops);
+int t3_ael2005_phy_prep(struct cphy *phy, struct adapter *adapter,
+			int phy_addr, const struct mdio_ops *mdio_ops);
+int t3_ael2020_phy_prep(struct cphy *phy, struct adapter *adapter,
+			int phy_addr, const struct mdio_ops *mdio_ops);
+int t3_qt2045_phy_prep(struct cphy *phy, struct adapter *adapter, int phy_addr,
+		       const struct mdio_ops *mdio_ops);
+int t3_xaui_direct_phy_prep(struct cphy *phy, struct adapter *adapter,
+			    int phy_addr, const struct mdio_ops *mdio_ops);
+int t3_aq100x_phy_prep(struct cphy *phy, struct adapter *adapter,
+			    int phy_addr, const struct mdio_ops *mdio_ops);
 #endif				/* __CHELSIO_COMMON_H */

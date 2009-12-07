@@ -114,7 +114,7 @@ static int __devinit xenkbd_probe(struct xenbus_device *dev,
 		xenbus_dev_fatal(dev, -ENOMEM, "allocating info structure");
 		return -ENOMEM;
 	}
-	dev->dev.driver_data = info;
+	dev_set_drvdata(&dev->dev, info);
 	info->xbdev = dev;
 	info->irq = -1;
 	snprintf(info->phys, sizeof(info->phys), "xenbus/%s", dev->nodename);
@@ -186,7 +186,7 @@ static int __devinit xenkbd_probe(struct xenbus_device *dev,
 
 static int xenkbd_resume(struct xenbus_device *dev)
 {
-	struct xenkbd_info *info = dev->dev.driver_data;
+	struct xenkbd_info *info = dev_get_drvdata(&dev->dev);
 
 	xenkbd_disconnect_backend(info);
 	memset(info->page, 0, PAGE_SIZE);
@@ -195,7 +195,7 @@ static int xenkbd_resume(struct xenbus_device *dev)
 
 static int xenkbd_remove(struct xenbus_device *dev)
 {
-	struct xenkbd_info *info = dev->dev.driver_data;
+	struct xenkbd_info *info = dev_get_drvdata(&dev->dev);
 
 	xenkbd_disconnect_backend(info);
 	if (info->kbd)
@@ -266,7 +266,7 @@ static void xenkbd_disconnect_backend(struct xenkbd_info *info)
 static void xenkbd_backend_changed(struct xenbus_device *dev,
 				   enum xenbus_state backend_state)
 {
-	struct xenkbd_info *info = dev->dev.driver_data;
+	struct xenkbd_info *info = dev_get_drvdata(&dev->dev);
 	int ret, val;
 
 	switch (backend_state) {
@@ -323,7 +323,7 @@ static struct xenbus_device_id xenkbd_ids[] = {
 	{ "" }
 };
 
-static struct xenbus_driver xenkbd = {
+static struct xenbus_driver xenkbd_driver = {
 	.name = "vkbd",
 	.owner = THIS_MODULE,
 	.ids = xenkbd_ids,
@@ -335,19 +335,19 @@ static struct xenbus_driver xenkbd = {
 
 static int __init xenkbd_init(void)
 {
-	if (!is_running_on_xen())
+	if (!xen_domain())
 		return -ENODEV;
 
 	/* Nothing to do if running in dom0. */
-	if (is_initial_xendomain())
+	if (xen_initial_domain())
 		return -ENODEV;
 
-	return xenbus_register_frontend(&xenkbd);
+	return xenbus_register_frontend(&xenkbd_driver);
 }
 
 static void __exit xenkbd_cleanup(void)
 {
-	xenbus_unregister_driver(&xenkbd);
+	xenbus_unregister_driver(&xenkbd_driver);
 }
 
 module_init(xenkbd_init);

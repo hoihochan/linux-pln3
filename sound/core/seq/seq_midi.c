@@ -116,10 +116,12 @@ static int dump_midi(struct snd_rawmidi_substream *substream, const char *buf, i
 	struct snd_rawmidi_runtime *runtime;
 	int tmp;
 
-	snd_assert(substream != NULL || buf != NULL, return -EINVAL);
+	if (snd_BUG_ON(!substream || !buf))
+		return -EINVAL;
 	runtime = substream->runtime;
 	if ((tmp = runtime->avail) < count) {
-		snd_printd("warning, output event was lost (count = %i, available = %i)\n", count, tmp);
+		if (printk_ratelimit())
+			snd_printk(KERN_ERR "MIDI output buffer overrun\n");
 		return -ENOMEM;
 	}
 	if (snd_rawmidi_kernel_write(substream, buf, count) < count)
@@ -135,7 +137,8 @@ static int event_process_midi(struct snd_seq_event *ev, int direct,
 	struct snd_rawmidi_substream *substream;
 	int len;
 
-	snd_assert(msynth != NULL, return -EINVAL);
+	if (snd_BUG_ON(!msynth))
+		return -EINVAL;
 	substream = msynth->output_rfile.output;
 	if (substream == NULL)
 		return -ENODEV;
@@ -210,7 +213,8 @@ static int midisynth_unsubscribe(void *private_data, struct snd_seq_port_subscri
 	int err;
 	struct seq_midisynth *msynth = private_data;
 
-	snd_assert(msynth->input_rfile.input != NULL, return -EINVAL);
+	if (snd_BUG_ON(!msynth->input_rfile.input))
+		return -EINVAL;
 	err = snd_rawmidi_kernel_release(&msynth->input_rfile);
 	return err;
 }
@@ -233,6 +237,7 @@ static int midisynth_use(void *private_data, struct snd_seq_port_subscribe *info
 	memset(&params, 0, sizeof(params));
 	params.avail_min = 1;
 	params.buffer_size = output_buffer_size;
+	params.no_active_sensing = 1;
 	if ((err = snd_rawmidi_output_params(msynth->output_rfile.output, &params)) < 0) {
 		snd_rawmidi_kernel_release(&msynth->output_rfile);
 		return err;
@@ -245,11 +250,9 @@ static int midisynth_use(void *private_data, struct snd_seq_port_subscribe *info
 static int midisynth_unuse(void *private_data, struct snd_seq_port_subscribe *info)
 {
 	struct seq_midisynth *msynth = private_data;
-	unsigned char buf = 0xff; /* MIDI reset */
 
-	snd_assert(msynth->output_rfile.output != NULL, return -EINVAL);
-	/* sending single MIDI reset message to shut the device up */
-	snd_rawmidi_kernel_write(msynth->output_rfile.output, &buf, 1);
+	if (snd_BUG_ON(!msynth->output_rfile.output))
+		return -EINVAL;
 	snd_rawmidi_drain_output(msynth->output_rfile.output);
 	return snd_rawmidi_kernel_release(&msynth->output_rfile);
 }
@@ -285,7 +288,8 @@ snd_seq_midisynth_register_port(struct snd_seq_device *dev)
 	int device = dev->device;
 	unsigned int input_count = 0, output_count = 0;
 
-	snd_assert(card != NULL && device >= 0 && device < SNDRV_RAWMIDI_DEVICES, return -EINVAL);
+	if (snd_BUG_ON(!card || device < 0 || device >= SNDRV_RAWMIDI_DEVICES))
+		return -EINVAL;
 	info = kmalloc(sizeof(*info), GFP_KERNEL);
 	if (! info)
 		return -ENOMEM;

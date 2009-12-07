@@ -393,7 +393,8 @@ static int flash_erase (struct mtd_info *mtd,struct erase_info *instr)
 	* erase range is aligned with the erase size which is in
 	* effect here.
 	*/
-   if (instr->addr & (mtd->eraseregions[i].erasesize - 1)) return (-EINVAL);
+   if (i < 0 || (instr->addr & (mtd->eraseregions[i].erasesize - 1)))
+      return -EINVAL;
 
    /* Remember the erase region we start on */
    first = i;
@@ -409,7 +410,8 @@ static int flash_erase (struct mtd_info *mtd,struct erase_info *instr)
    i--;
 
    /* is the end aligned on a block boundary? */
-   if ((instr->addr + instr->len) & (mtd->eraseregions[i].erasesize - 1)) return (-EINVAL);
+   if (i < 0 || ((instr->addr + instr->len) & (mtd->eraseregions[i].erasesize - 1)))
+      return -EINVAL;
 
    addr = instr->addr;
    len = instr->len;
@@ -619,7 +621,7 @@ static struct mtd_partition lart_partitions[] = {
 };
 #endif
 
-int __init lart_flash_init (void)
+static int __init lart_flash_init (void)
 {
    int result;
    memset (&mtd,0,sizeof (mtd));
@@ -690,7 +692,7 @@ int __init lart_flash_init (void)
    return (result);
 }
 
-void __exit lart_flash_exit (void)
+static void __exit lart_flash_exit (void)
 {
 #ifndef HAVE_PARTITIONS
    del_mtd_device (&mtd);
@@ -705,5 +707,3 @@ module_exit (lart_flash_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Abraham vd Merwe <abraham@2d3d.co.za>");
 MODULE_DESCRIPTION("MTD driver for Intel 28F160F3 on LART board");
-
-

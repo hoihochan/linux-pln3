@@ -37,6 +37,11 @@
 #include <linux/proc_fs.h>
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
+#include <linux/math64.h>
+#include <linux/hash.h>
+
+#define CREATE_TRACE_POINTS
+#include <trace/events/jbd2.h>
 
 #include <asm/uaccess.h>
 #include <asm/page.h>
@@ -50,6 +55,7 @@ EXPORT_SYMBOL(jbd2_journal_unlock_updates);
 EXPORT_SYMBOL(jbd2_journal_get_write_access);
 EXPORT_SYMBOL(jbd2_journal_get_create_access);
 EXPORT_SYMBOL(jbd2_journal_get_undo_access);
+EXPORT_SYMBOL(jbd2_journal_set_triggers);
 EXPORT_SYMBOL(jbd2_journal_dirty_metadata);
 EXPORT_SYMBOL(jbd2_journal_release_buffer);
 EXPORT_SYMBOL(jbd2_journal_forget);
@@ -65,7 +71,6 @@ EXPORT_SYMBOL(jbd2_journal_update_format);
 EXPORT_SYMBOL(jbd2_journal_check_used_features);
 EXPORT_SYMBOL(jbd2_journal_check_available_features);
 EXPORT_SYMBOL(jbd2_journal_set_features);
-EXPORT_SYMBOL(jbd2_journal_create);
 EXPORT_SYMBOL(jbd2_journal_load);
 EXPORT_SYMBOL(jbd2_journal_destroy);
 EXPORT_SYMBOL(jbd2_journal_abort);
@@ -130,9 +135,6 @@ static int kjournald2(void *arg)
 	/* Record that the journal thread is running */
 	journal->j_task = current;
 	wake_up(&journal->j_wait_done_commit);
-
-	printk(KERN_INFO "kjournald2 starting.  Commit interval %ld seconds\n",
-			journal->j_commit_interval / HZ);
 
 	/*
 	 * And now, wait forever for commit wakeup events.
@@ -217,7 +219,8 @@ static int jbd2_journal_start_thread(journal_t *journal)
 {
 	struct task_struct *t;
 
-	t = kthread_run(kjournald2, journal, "kjournald2");
+	t = kthread_run(kjournald2, journal, "jbd2/%s",
+			journal->j_devname);
 	if (IS_ERR(t))
 		return PTR_ERR(t);
 
@@ -290,6 +293,8 @@ int jbd2_journal_write_metadata_buffer(transaction_t *transaction,
 	struct page *new_page;
 	unsigned int new_offset;
 	struct buffer_head *bh_in = jh2bh(jh_in);
+	struct jbd2_buffer_trigger_type *triggers;
+	journal_t *journal = transaction->t_journal;
 
 	/*
 	 * The buffer really shouldn't be locked: only the current committing
@@ -303,6 +308,11 @@ int jbd2_journal_write_metadata_buffer(transaction_t *transaction,
 	J_ASSERT_BH(bh_in, buffer_jbddirty(bh_in));
 
 	new_bh = alloc_buffer_head(GFP_NOFS|__GFP_NOFAIL);
+	/* keep subsequent assertions sane */
+	new_bh->b_state = 0;
+	init_buffer(new_bh, NULL, NULL);
+	atomic_set(&new_bh->b_count, 1);
+	new_jh = jbd2_journal_add_journal_head(new_bh);	/* This sleeps */
 
 	/*
 	 * If a new transaction has already done a buffer copy-out, then
@@ -314,12 +324,22 @@ repeat:
 		done_copy_out = 1;
 		new_page = virt_to_page(jh_in->b_frozen_data);
 		new_offset = offset_in_page(jh_in->b_frozen_data);
+		triggers = jh_in->b_frozen_triggers;
 	} else {
 		new_page = jh2bh(jh_in)->b_page;
 		new_offset = offset_in_page(jh2bh(jh_in)->b_data);
+		triggers = jh_in->b_triggers;
 	}
 
 	mapped_data = kmap_atomic(new_page, KM_USER0);
+	/*
+	 * Fire any commit trigger.  Do this before checking for escaping,
+	 * as the trigger may modify the magic offset.  If a copy-out
+	 * happens afterwards, it will have the correct data in the buffer.
+	 */
+	jbd2_buffer_commit_trigger(jh_in, mapped_data + new_offset,
+				   triggers);
+
 	/*
 	 * Check for escaping
 	 */
@@ -352,6 +372,13 @@ repeat:
 		new_page = virt_to_page(tmp);
 		new_offset = offset_in_page(tmp);
 		done_copy_out = 1;
+
+		/*
+		 * This isn't strictly necessary, as we're using frozen
+		 * data for the escaping, but it keeps consistency with
+		 * b_frozen_data usage.
+		 */
+		jh_in->b_frozen_triggers = jh_in->b_triggers;
 	}
 
 	/*
@@ -363,14 +390,6 @@ repeat:
 		*((unsigned int *)(mapped_data + new_offset)) = 0;
 		kunmap_atomic(mapped_data, KM_USER0);
 	}
-
-	/* keep subsequent assertions sane */
-	new_bh->b_state = 0;
-	init_buffer(new_bh, NULL, NULL);
-	atomic_set(&new_bh->b_count, 1);
-	jbd_unlock_bh_state(bh_in);
-
-	new_jh = jbd2_journal_add_journal_head(new_bh);	/* This sleeps */
 
 	set_bh_page(new_bh, new_page, new_offset);
 	new_jh->b_transaction = NULL;
@@ -388,7 +407,11 @@ repeat:
 	 * copying is moved to the transaction's shadow queue.
 	 */
 	JBUFFER_TRACE(jh_in, "file as BJ_Shadow");
-	jbd2_journal_file_buffer(jh_in, transaction, BJ_Shadow);
+	spin_lock(&journal->j_list_lock);
+	__jbd2_journal_file_buffer(jh_in, transaction, BJ_Shadow);
+	spin_unlock(&journal->j_list_lock);
+	jbd_unlock_bh_state(bh_in);
+
 	JBUFFER_TRACE(new_jh, "file as BJ_IO");
 	jbd2_journal_file_buffer(new_jh, transaction, BJ_IO);
 
@@ -602,13 +625,9 @@ int jbd2_journal_bmap(journal_t *journal, unsigned long blocknr,
 		if (ret)
 			*retp = ret;
 		else {
-			char b[BDEVNAME_SIZE];
-
 			printk(KERN_ALERT "%s: journal block not found "
 					"at offset %lu on %s\n",
-				__func__,
-				blocknr,
-				bdevname(journal->j_dev, b));
+			       __func__, blocknr, journal->j_devname);
 			err = -EIO;
 			__journal_abort_soft(journal, err);
 		}
@@ -640,6 +659,8 @@ struct journal_head *jbd2_journal_get_descriptor_buffer(journal_t *journal)
 		return NULL;
 
 	bh = __getblk(journal->j_dev, blocknr, journal->j_blocksize);
+	if (!bh)
+		return NULL;
 	lock_buffer(bh);
 	memset(bh->b_data, 0, journal->j_blocksize);
 	set_buffer_uptodate(bh);
@@ -653,153 +674,6 @@ struct jbd2_stats_proc_session {
 	struct transaction_stats_s *stats;
 	int start;
 	int max;
-};
-
-static void *jbd2_history_skip_empty(struct jbd2_stats_proc_session *s,
-					struct transaction_stats_s *ts,
-					int first)
-{
-	if (ts == s->stats + s->max)
-		ts = s->stats;
-	if (!first && ts == s->stats + s->start)
-		return NULL;
-	while (ts->ts_type == 0) {
-		ts++;
-		if (ts == s->stats + s->max)
-			ts = s->stats;
-		if (ts == s->stats + s->start)
-			return NULL;
-	}
-	return ts;
-
-}
-
-static void *jbd2_seq_history_start(struct seq_file *seq, loff_t *pos)
-{
-	struct jbd2_stats_proc_session *s = seq->private;
-	struct transaction_stats_s *ts;
-	int l = *pos;
-
-	if (l == 0)
-		return SEQ_START_TOKEN;
-	ts = jbd2_history_skip_empty(s, s->stats + s->start, 1);
-	if (!ts)
-		return NULL;
-	l--;
-	while (l) {
-		ts = jbd2_history_skip_empty(s, ++ts, 0);
-		if (!ts)
-			break;
-		l--;
-	}
-	return ts;
-}
-
-static void *jbd2_seq_history_next(struct seq_file *seq, void *v, loff_t *pos)
-{
-	struct jbd2_stats_proc_session *s = seq->private;
-	struct transaction_stats_s *ts = v;
-
-	++*pos;
-	if (v == SEQ_START_TOKEN)
-		return jbd2_history_skip_empty(s, s->stats + s->start, 1);
-	else
-		return jbd2_history_skip_empty(s, ++ts, 0);
-}
-
-static int jbd2_seq_history_show(struct seq_file *seq, void *v)
-{
-	struct transaction_stats_s *ts = v;
-	if (v == SEQ_START_TOKEN) {
-		seq_printf(seq, "%-4s %-5s %-5s %-5s %-5s %-5s %-5s %-6s %-5s "
-				"%-5s %-5s %-5s %-5s %-5s\n", "R/C", "tid",
-				"wait", "run", "lock", "flush", "log", "hndls",
-				"block", "inlog", "ctime", "write", "drop",
-				"close");
-		return 0;
-	}
-	if (ts->ts_type == JBD2_STATS_RUN)
-		seq_printf(seq, "%-4s %-5lu %-5u %-5u %-5u %-5u %-5u "
-				"%-6lu %-5lu %-5lu\n", "R", ts->ts_tid,
-				jiffies_to_msecs(ts->u.run.rs_wait),
-				jiffies_to_msecs(ts->u.run.rs_running),
-				jiffies_to_msecs(ts->u.run.rs_locked),
-				jiffies_to_msecs(ts->u.run.rs_flushing),
-				jiffies_to_msecs(ts->u.run.rs_logging),
-				ts->u.run.rs_handle_count,
-				ts->u.run.rs_blocks,
-				ts->u.run.rs_blocks_logged);
-	else if (ts->ts_type == JBD2_STATS_CHECKPOINT)
-		seq_printf(seq, "%-4s %-5lu %48s %-5u %-5lu %-5lu %-5lu\n",
-				"C", ts->ts_tid, " ",
-				jiffies_to_msecs(ts->u.chp.cs_chp_time),
-				ts->u.chp.cs_written, ts->u.chp.cs_dropped,
-				ts->u.chp.cs_forced_to_close);
-	else
-		J_ASSERT(0);
-	return 0;
-}
-
-static void jbd2_seq_history_stop(struct seq_file *seq, void *v)
-{
-}
-
-static struct seq_operations jbd2_seq_history_ops = {
-	.start  = jbd2_seq_history_start,
-	.next   = jbd2_seq_history_next,
-	.stop   = jbd2_seq_history_stop,
-	.show   = jbd2_seq_history_show,
-};
-
-static int jbd2_seq_history_open(struct inode *inode, struct file *file)
-{
-	journal_t *journal = PDE(inode)->data;
-	struct jbd2_stats_proc_session *s;
-	int rc, size;
-
-	s = kmalloc(sizeof(*s), GFP_KERNEL);
-	if (s == NULL)
-		return -ENOMEM;
-	size = sizeof(struct transaction_stats_s) * journal->j_history_max;
-	s->stats = kmalloc(size, GFP_KERNEL);
-	if (s->stats == NULL) {
-		kfree(s);
-		return -ENOMEM;
-	}
-	spin_lock(&journal->j_history_lock);
-	memcpy(s->stats, journal->j_history, size);
-	s->max = journal->j_history_max;
-	s->start = journal->j_history_cur % s->max;
-	spin_unlock(&journal->j_history_lock);
-
-	rc = seq_open(file, &jbd2_seq_history_ops);
-	if (rc == 0) {
-		struct seq_file *m = file->private_data;
-		m->private = s;
-	} else {
-		kfree(s->stats);
-		kfree(s);
-	}
-	return rc;
-
-}
-
-static int jbd2_seq_history_release(struct inode *inode, struct file *file)
-{
-	struct seq_file *seq = file->private_data;
-	struct jbd2_stats_proc_session *s = seq->private;
-
-	kfree(s->stats);
-	kfree(s);
-	return seq_release(inode, file);
-}
-
-static struct file_operations jbd2_seq_history_fops = {
-	.owner		= THIS_MODULE,
-	.open           = jbd2_seq_history_open,
-	.read           = seq_read,
-	.llseek         = seq_lseek,
-	.release        = jbd2_seq_history_release,
 };
 
 static void *jbd2_seq_info_start(struct seq_file *seq, loff_t *pos)
@@ -818,27 +692,29 @@ static int jbd2_seq_info_show(struct seq_file *seq, void *v)
 
 	if (v != SEQ_START_TOKEN)
 		return 0;
-	seq_printf(seq, "%lu transaction, each upto %u blocks\n",
+	seq_printf(seq, "%lu transaction, each up to %u blocks\n",
 			s->stats->ts_tid,
 			s->journal->j_max_transaction_buffers);
 	if (s->stats->ts_tid == 0)
 		return 0;
 	seq_printf(seq, "average: \n  %ums waiting for transaction\n",
-	    jiffies_to_msecs(s->stats->u.run.rs_wait / s->stats->ts_tid));
+	    jiffies_to_msecs(s->stats->run.rs_wait / s->stats->ts_tid));
 	seq_printf(seq, "  %ums running transaction\n",
-	    jiffies_to_msecs(s->stats->u.run.rs_running / s->stats->ts_tid));
+	    jiffies_to_msecs(s->stats->run.rs_running / s->stats->ts_tid));
 	seq_printf(seq, "  %ums transaction was being locked\n",
-	    jiffies_to_msecs(s->stats->u.run.rs_locked / s->stats->ts_tid));
+	    jiffies_to_msecs(s->stats->run.rs_locked / s->stats->ts_tid));
 	seq_printf(seq, "  %ums flushing data (in ordered mode)\n",
-	    jiffies_to_msecs(s->stats->u.run.rs_flushing / s->stats->ts_tid));
+	    jiffies_to_msecs(s->stats->run.rs_flushing / s->stats->ts_tid));
 	seq_printf(seq, "  %ums logging transaction\n",
-	    jiffies_to_msecs(s->stats->u.run.rs_logging / s->stats->ts_tid));
+	    jiffies_to_msecs(s->stats->run.rs_logging / s->stats->ts_tid));
+	seq_printf(seq, "  %lluus average transaction commit time\n",
+		   div_u64(s->journal->j_average_commit_time, 1000));
 	seq_printf(seq, "  %lu handles per transaction\n",
-	    s->stats->u.run.rs_handle_count / s->stats->ts_tid);
+	    s->stats->run.rs_handle_count / s->stats->ts_tid);
 	seq_printf(seq, "  %lu blocks per transaction\n",
-	    s->stats->u.run.rs_blocks / s->stats->ts_tid);
+	    s->stats->run.rs_blocks / s->stats->ts_tid);
 	seq_printf(seq, "  %lu logged blocks per transaction\n",
-	    s->stats->u.run.rs_blocks_logged / s->stats->ts_tid);
+	    s->stats->run.rs_blocks_logged / s->stats->ts_tid);
 	return 0;
 }
 
@@ -846,7 +722,7 @@ static void jbd2_seq_info_stop(struct seq_file *seq, void *v)
 {
 }
 
-static struct seq_operations jbd2_seq_info_ops = {
+static const struct seq_operations jbd2_seq_info_ops = {
 	.start  = jbd2_seq_info_start,
 	.next   = jbd2_seq_info_next,
 	.stop   = jbd2_seq_info_stop,
@@ -894,7 +770,7 @@ static int jbd2_seq_info_release(struct inode *inode, struct file *file)
 	return seq_release(inode, file);
 }
 
-static struct file_operations jbd2_seq_info_fops = {
+static const struct file_operations jbd2_seq_info_fops = {
 	.owner		= THIS_MODULE,
 	.open           = jbd2_seq_info_open,
 	.read           = seq_read,
@@ -908,8 +784,6 @@ static void jbd2_stats_proc_init(journal_t *journal)
 {
 	journal->j_proc_entry = proc_mkdir(journal->j_devname, proc_jbd2_stats);
 	if (journal->j_proc_entry) {
-		proc_create_data("history", S_IRUGO, journal->j_proc_entry,
-				 &jbd2_seq_history_fops, journal);
 		proc_create_data("info", S_IRUGO, journal->j_proc_entry,
 				 &jbd2_seq_info_fops, journal);
 	}
@@ -918,25 +792,7 @@ static void jbd2_stats_proc_init(journal_t *journal)
 static void jbd2_stats_proc_exit(journal_t *journal)
 {
 	remove_proc_entry("info", journal->j_proc_entry);
-	remove_proc_entry("history", journal->j_proc_entry);
 	remove_proc_entry(journal->j_devname, proc_jbd2_stats);
-}
-
-static void journal_init_stats(journal_t *journal)
-{
-	int size;
-
-	if (!proc_jbd2_stats)
-		return;
-
-	journal->j_history_max = 100;
-	size = sizeof(struct transaction_stats_s) * journal->j_history_max;
-	journal->j_history = kzalloc(size, GFP_KERNEL);
-	if (!journal->j_history) {
-		journal->j_history_max = 0;
-		return;
-	}
-	spin_lock_init(&journal->j_history_lock);
 }
 
 /*
@@ -970,6 +826,8 @@ static journal_t * journal_init_common (void)
 	spin_lock_init(&journal->j_state_lock);
 
 	journal->j_commit_interval = (HZ * JBD2_DEFAULT_MAX_COMMIT_AGE);
+	journal->j_min_batch_time = 0;
+	journal->j_max_batch_time = 15000; /* 15ms */
 
 	/* The journal is marked for error until we succeed with recovery! */
 	journal->j_flags = JBD2_ABORT;
@@ -981,7 +839,7 @@ static journal_t * journal_init_common (void)
 		goto fail;
 	}
 
-	journal_init_stats(journal);
+	spin_lock_init(&journal->j_history_lock);
 
 	return journal;
 fail:
@@ -1025,15 +883,14 @@ journal_t * jbd2_journal_init_dev(struct block_device *bdev,
 
 	/* journal descriptor can store up to n blocks -bzzz */
 	journal->j_blocksize = blocksize;
+	jbd2_stats_proc_init(journal);
 	n = journal->j_blocksize / sizeof(journal_block_tag_t);
 	journal->j_wbufsize = n;
 	journal->j_wbuf = kmalloc(n * sizeof(struct buffer_head*), GFP_KERNEL);
 	if (!journal->j_wbuf) {
 		printk(KERN_ERR "%s: Cant allocate bhs for commit thread\n",
 			__func__);
-		kfree(journal);
-		journal = NULL;
-		goto out;
+		goto out_err;
 	}
 	journal->j_dev = bdev;
 	journal->j_fs_dev = fs_dev;
@@ -1043,14 +900,23 @@ journal_t * jbd2_journal_init_dev(struct block_device *bdev,
 	p = journal->j_devname;
 	while ((p = strchr(p, '/')))
 		*p = '!';
-	jbd2_stats_proc_init(journal);
 
 	bh = __getblk(journal->j_dev, start, journal->j_blocksize);
-	J_ASSERT(bh != NULL);
+	if (!bh) {
+		printk(KERN_ERR
+		       "%s: Cannot get buffer for journal superblock\n",
+		       __func__);
+		goto out_err;
+	}
 	journal->j_sb_buffer = bh;
 	journal->j_superblock = (journal_superblock_t *)bh->b_data;
-out:
+
 	return journal;
+out_err:
+	kfree(journal->j_wbuf);
+	jbd2_stats_proc_exit(journal);
+	kfree(journal);
+	return NULL;
 }
 
 /**
@@ -1080,7 +946,7 @@ journal_t * jbd2_journal_init_inode (struct inode *inode)
 	while ((p = strchr(p, '/')))
 		*p = '!';
 	p = journal->j_devname + strlen(journal->j_devname);
-	sprintf(p, ":%lu", journal->j_inode->i_ino);
+	sprintf(p, "-%lu", journal->j_inode->i_ino);
 	jbd_debug(1,
 		  "journal %p: inode %s/%ld, size %Ld, bits %d, blksize %ld\n",
 		  journal, inode->i_sb->s_id, inode->i_ino,
@@ -1098,8 +964,7 @@ journal_t * jbd2_journal_init_inode (struct inode *inode)
 	if (!journal->j_wbuf) {
 		printk(KERN_ERR "%s: Cant allocate bhs for commit thread\n",
 			__func__);
-		kfree(journal);
-		return NULL;
+		goto out_err;
 	}
 
 	err = jbd2_journal_bmap(journal, 0, &blocknr);
@@ -1107,16 +972,25 @@ journal_t * jbd2_journal_init_inode (struct inode *inode)
 	if (err) {
 		printk(KERN_ERR "%s: Cannnot locate journal superblock\n",
 		       __func__);
-		kfree(journal);
-		return NULL;
+		goto out_err;
 	}
 
 	bh = __getblk(journal->j_dev, blocknr, journal->j_blocksize);
-	J_ASSERT(bh != NULL);
+	if (!bh) {
+		printk(KERN_ERR
+		       "%s: Cannot get buffer for journal superblock\n",
+		       __func__);
+		goto out_err;
+	}
 	journal->j_sb_buffer = bh;
 	journal->j_superblock = (journal_superblock_t *)bh->b_data;
 
 	return journal;
+out_err:
+	kfree(journal->j_wbuf);
+	jbd2_stats_proc_exit(journal);
+	kfree(journal);
+	return NULL;
 }
 
 /*
@@ -1145,6 +1019,12 @@ static int journal_reset(journal_t *journal)
 
 	first = be32_to_cpu(sb->s_first);
 	last = be32_to_cpu(sb->s_maxlen);
+	if (first + JBD2_MIN_JOURNAL_BLOCKS > last + 1) {
+		printk(KERN_ERR "JBD: Journal too short (blocks %llu-%llu).\n",
+		       first, last);
+		journal_fail_superblock(journal);
+		return -EINVAL;
+	}
 
 	journal->j_first = first;
 	journal->j_last = last;
@@ -1162,77 +1042,6 @@ static int journal_reset(journal_t *journal)
 	/* Add the dynamic fields and write it to disk. */
 	jbd2_journal_update_superblock(journal, 1);
 	return jbd2_journal_start_thread(journal);
-}
-
-/**
- * int jbd2_journal_create() - Initialise the new journal file
- * @journal: Journal to create. This structure must have been initialised
- *
- * Given a journal_t structure which tells us which disk blocks we can
- * use, create a new journal superblock and initialise all of the
- * journal fields from scratch.
- **/
-int jbd2_journal_create(journal_t *journal)
-{
-	unsigned long long blocknr;
-	struct buffer_head *bh;
-	journal_superblock_t *sb;
-	int i, err;
-
-	if (journal->j_maxlen < JBD2_MIN_JOURNAL_BLOCKS) {
-		printk (KERN_ERR "Journal length (%d blocks) too short.\n",
-			journal->j_maxlen);
-		journal_fail_superblock(journal);
-		return -EINVAL;
-	}
-
-	if (journal->j_inode == NULL) {
-		/*
-		 * We don't know what block to start at!
-		 */
-		printk(KERN_EMERG
-		       "%s: creation of journal on external device!\n",
-		       __func__);
-		BUG();
-	}
-
-	/* Zero out the entire journal on disk.  We cannot afford to
-	   have any blocks on disk beginning with JBD2_MAGIC_NUMBER. */
-	jbd_debug(1, "JBD: Zeroing out journal blocks...\n");
-	for (i = 0; i < journal->j_maxlen; i++) {
-		err = jbd2_journal_bmap(journal, i, &blocknr);
-		if (err)
-			return err;
-		bh = __getblk(journal->j_dev, blocknr, journal->j_blocksize);
-		lock_buffer(bh);
-		memset (bh->b_data, 0, journal->j_blocksize);
-		BUFFER_TRACE(bh, "marking dirty");
-		mark_buffer_dirty(bh);
-		BUFFER_TRACE(bh, "marking uptodate");
-		set_buffer_uptodate(bh);
-		unlock_buffer(bh);
-		__brelse(bh);
-	}
-
-	sync_blockdev(journal->j_dev);
-	jbd_debug(1, "JBD: journal cleared.\n");
-
-	/* OK, fill in the initial static fields in the new superblock */
-	sb = journal->j_superblock;
-
-	sb->s_header.h_magic	 = cpu_to_be32(JBD2_MAGIC_NUMBER);
-	sb->s_header.h_blocktype = cpu_to_be32(JBD2_SUPERBLOCK_V2);
-
-	sb->s_blocksize	= cpu_to_be32(journal->j_blocksize);
-	sb->s_maxlen	= cpu_to_be32(journal->j_maxlen);
-	sb->s_first	= cpu_to_be32(1);
-
-	journal->j_transaction_sequence = 1;
-
-	journal->j_flags &= ~JBD2_ABORT;
-	journal->j_format_version = 2;
-
-	return journal_reset(journal);
 }
 
 /**
@@ -1460,9 +1269,12 @@ recovery_error:
  *
  * Release a journal_t structure once it is no longer in use by the
  * journaled object.
+ * Return <0 if we couldn't clean up the journal.
  */
-void jbd2_journal_destroy(journal_t *journal)
+int jbd2_journal_destroy(journal_t *journal)
 {
+	int err = 0;
+
 	/* Wait for the commit thread to wake up and die. */
 	journal_kill_thread(journal);
 
@@ -1476,7 +1288,9 @@ void jbd2_journal_destroy(journal_t *journal)
 	spin_lock(&journal->j_list_lock);
 	while (journal->j_checkpoint_transactions != NULL) {
 		spin_unlock(&journal->j_list_lock);
+		mutex_lock(&journal->j_checkpoint_mutex);
 		jbd2_log_do_checkpoint(journal);
+		mutex_unlock(&journal->j_checkpoint_mutex);
 		spin_lock(&journal->j_list_lock);
 	}
 
@@ -1485,11 +1299,16 @@ void jbd2_journal_destroy(journal_t *journal)
 	J_ASSERT(journal->j_checkpoint_transactions == NULL);
 	spin_unlock(&journal->j_list_lock);
 
-	/* We can now mark the journal as empty. */
-	journal->j_tail = 0;
-	journal->j_tail_sequence = ++journal->j_transaction_sequence;
 	if (journal->j_sb_buffer) {
-		jbd2_journal_update_superblock(journal, 1);
+		if (!is_journal_aborted(journal)) {
+			/* We can now mark the journal as empty. */
+			journal->j_tail = 0;
+			journal->j_tail_sequence =
+				++journal->j_transaction_sequence;
+			jbd2_journal_update_superblock(journal, 1);
+		} else {
+			err = -EIO;
+		}
 		brelse(journal->j_sb_buffer);
 	}
 
@@ -1501,6 +1320,8 @@ void jbd2_journal_destroy(journal_t *journal)
 		jbd2_journal_destroy_revoke(journal);
 	kfree(journal->j_wbuf);
 	kfree(journal);
+
+	return err;
 }
 
 
@@ -1726,10 +1547,16 @@ int jbd2_journal_flush(journal_t *journal)
 	spin_lock(&journal->j_list_lock);
 	while (!err && journal->j_checkpoint_transactions != NULL) {
 		spin_unlock(&journal->j_list_lock);
+		mutex_lock(&journal->j_checkpoint_mutex);
 		err = jbd2_log_do_checkpoint(journal);
+		mutex_unlock(&journal->j_checkpoint_mutex);
 		spin_lock(&journal->j_list_lock);
 	}
 	spin_unlock(&journal->j_list_lock);
+
+	if (is_journal_aborted(journal))
+		return -EIO;
+
 	jbd2_cleanup_journal_tail(journal);
 
 	/* Finally, mark the journal as really needing no recovery.
@@ -1751,7 +1578,7 @@ int jbd2_journal_flush(journal_t *journal)
 	J_ASSERT(journal->j_head == journal->j_tail);
 	J_ASSERT(journal->j_tail_sequence == journal->j_transaction_sequence);
 	spin_unlock(&journal->j_state_lock);
-	return err;
+	return 0;
 }
 
 /**
@@ -1795,27 +1622,10 @@ int jbd2_journal_wipe(journal_t *journal, int write)
 }
 
 /*
- * journal_dev_name: format a character string to describe on what
- * device this journal is present.
- */
-
-static const char *journal_dev_name(journal_t *journal, char *buffer)
-{
-	struct block_device *bdev;
-
-	if (journal->j_inode)
-		bdev = journal->j_inode->i_sb->s_bdev;
-	else
-		bdev = journal->j_dev;
-
-	return bdevname(bdev, buffer);
-}
-
-/*
  * Journal abort has very specific semantics, which we describe
  * for journal abort.
  *
- * Two internal function, which provide abort to te jbd layer
+ * Two internal functions, which provide abort to the jbd layer
  * itself are here.
  */
 
@@ -1827,13 +1637,12 @@ static const char *journal_dev_name(journal_t *journal, char *buffer)
 void __jbd2_journal_abort_hard(journal_t *journal)
 {
 	transaction_t *transaction;
-	char b[BDEVNAME_SIZE];
 
 	if (journal->j_flags & JBD2_ABORT)
 		return;
 
 	printk(KERN_ERR "Aborting journal on device %s.\n",
-		journal_dev_name(journal, b));
+	       journal->j_devname);
 
 	spin_lock(&journal->j_state_lock);
 	journal->j_flags |= JBD2_ABORT;
@@ -1914,7 +1723,7 @@ void jbd2_journal_abort(journal_t *journal, int errno)
  * int jbd2_journal_errno () - returns the journal's error state.
  * @journal: journal to examine.
  *
- * This is the errno numbet set with jbd2_journal_abort(), the last
+ * This is the errno number set with jbd2_journal_abort(), the last
  * time the journal was mounted - if the journal was stopped
  * without calling abort this will be 0.
  *
@@ -1938,7 +1747,7 @@ int jbd2_journal_errno(journal_t *journal)
  * int jbd2_journal_clear_err () - clears the journal's error state
  * @journal: journal to act on.
  *
- * An error must be cleared or Acked to take a FS out of readonly
+ * An error must be cleared or acked to take a FS out of readonly
  * mode.
  */
 int jbd2_journal_clear_err(journal_t *journal)
@@ -1958,7 +1767,7 @@ int jbd2_journal_clear_err(journal_t *journal)
  * void jbd2_journal_ack_err() - Ack journal err.
  * @journal: journal to act on.
  *
- * An error must be cleared or Acked to take a FS out of readonly
+ * An error must be cleared or acked to take a FS out of readonly
  * mode.
  */
 void jbd2_journal_ack_err(journal_t *journal)
@@ -2411,6 +2220,72 @@ static void __exit journal_exit(void)
 	jbd2_remove_jbd_stats_proc_entry();
 	jbd2_journal_destroy_caches();
 }
+
+/* 
+ * jbd2_dev_to_name is a utility function used by the jbd2 and ext4 
+ * tracing infrastructure to map a dev_t to a device name.
+ *
+ * The caller should use rcu_read_lock() in order to make sure the
+ * device name stays valid until its done with it.  We use
+ * rcu_read_lock() as well to make sure we're safe in case the caller
+ * gets sloppy, and because rcu_read_lock() is cheap and can be safely
+ * nested.
+ */
+struct devname_cache {
+	struct rcu_head	rcu;
+	dev_t		device;
+	char		devname[BDEVNAME_SIZE];
+};
+#define CACHE_SIZE_BITS 6
+static struct devname_cache *devcache[1 << CACHE_SIZE_BITS];
+static DEFINE_SPINLOCK(devname_cache_lock);
+
+static void free_devcache(struct rcu_head *rcu)
+{
+	kfree(rcu);
+}
+
+const char *jbd2_dev_to_name(dev_t device)
+{
+	int	i = hash_32(device, CACHE_SIZE_BITS);
+	char	*ret;
+	struct block_device *bd;
+	static struct devname_cache *new_dev;
+
+	rcu_read_lock();
+	if (devcache[i] && devcache[i]->device == device) {
+		ret = devcache[i]->devname;
+		rcu_read_unlock();
+		return ret;
+	}
+	rcu_read_unlock();
+
+	new_dev = kmalloc(sizeof(struct devname_cache), GFP_KERNEL);
+	if (!new_dev)
+		return "NODEV-ALLOCFAILURE"; /* Something non-NULL */
+	spin_lock(&devname_cache_lock);
+	if (devcache[i]) {
+		if (devcache[i]->device == device) {
+			kfree(new_dev);
+			ret = devcache[i]->devname;
+			spin_unlock(&devname_cache_lock);
+			return ret;
+		}
+		call_rcu(&devcache[i]->rcu, free_devcache);
+	}
+	devcache[i] = new_dev;
+	devcache[i]->device = device;
+	bd = bdget(device);
+	if (bd) {
+		bdevname(bd, devcache[i]->devname);
+		bdput(bd);
+	} else
+		__bdevname(device, devcache[i]->devname);
+	ret = devcache[i]->devname;
+	spin_unlock(&devname_cache_lock);
+	return ret;
+}
+EXPORT_SYMBOL(jbd2_dev_to_name);
 
 MODULE_LICENSE("GPL");
 module_init(journal_init);

@@ -5,7 +5,7 @@
 #include <linux/pci.h>
 #include <linux/init.h>
 #include <linux/dmi.h>
-#include "pci.h"
+#include <asm/pci_x86.h>
 
 /*
  * Functions for accessing PCI base (first 256 bytes) and extended
@@ -173,7 +173,7 @@ static int pci_conf2_write(unsigned int seg, unsigned int bus,
 
 #undef PCI_CONF2_ADDRESS
 
-static struct pci_raw_ops pci_direct_conf2 = {
+struct pci_raw_ops pci_direct_conf2 = {
 	.read =		pci_conf2_read,
 	.write =	pci_conf2_write,
 };
@@ -192,13 +192,14 @@ static struct pci_raw_ops pci_direct_conf2 = {
 static int __init pci_sanity_check(struct pci_raw_ops *o)
 {
 	u32 x = 0;
-	int devfn;
+	int year, devfn;
 
 	if (pci_probe & PCI_NO_CHECKS)
 		return 1;
 	/* Assume Type 1 works for newer systems.
 	   This handles machines that don't have anything on PCI Bus 0. */
-	if (dmi_get_year(DMI_BIOS_DATE) >= 2001)
+	dmi_get_date(DMI_BIOS_DATE, &year, NULL, NULL);
+	if (year >= 2001)
 		return 1;
 
 	for (devfn = 0; devfn < 0x100; devfn++) {
@@ -289,6 +290,7 @@ int __init pci_direct_probe(void)
 
 	if (pci_check_type1()) {
 		raw_pci_ops = &pci_direct_conf1;
+		port_cf9_safe = true;
 		return 1;
 	}
 	release_resource(region);
@@ -305,6 +307,7 @@ int __init pci_direct_probe(void)
 
 	if (pci_check_type2()) {
 		raw_pci_ops = &pci_direct_conf2;
+		port_cf9_safe = true;
 		return 2;
 	}
 

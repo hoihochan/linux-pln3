@@ -1,17 +1,14 @@
 /*
- *  include/asm-s390/system.h
+ * Copyright IBM Corp. 1999, 2009
  *
- *  S390 version
- *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
- *    Author(s): Martin Schwidefsky (schwidefsky@de.ibm.com),
- *
- *  Derived from "include/asm-i386/system.h"
+ * Author(s): Martin Schwidefsky <schwidefsky@de.ibm.com>
  */
 
 #ifndef __ASM_SYSTEM_H
 #define __ASM_SYSTEM_H
 
 #include <linux/kernel.h>
+#include <linux/errno.h>
 #include <asm/types.h>
 #include <asm/ptrace.h>
 #include <asm/setup.h>
@@ -98,13 +95,9 @@ static inline void restore_access_regs(unsigned int *acrs)
 	prev = __switch_to(prev,next);					     \
 } while (0)
 
-#ifdef CONFIG_VIRT_CPU_ACCOUNTING
-extern void account_vtime(struct task_struct *);
+extern void account_vtime(struct task_struct *, struct task_struct *);
 extern void account_tick_vtime(struct task_struct *);
 extern void account_system_vtime(struct task_struct *);
-#else
-#define account_vtime(x) do { /* empty */ } while (0)
-#endif
 
 #ifdef CONFIG_PFAULT
 extern void pfault_irq_init(void);
@@ -116,15 +109,11 @@ extern void pfault_fini(void);
 #define pfault_fini()		do { } while (0)
 #endif /* CONFIG_PFAULT */
 
-#ifdef CONFIG_PAGE_STATES
 extern void cmma_init(void);
-#else
-static inline void cmma_init(void) { }
-#endif
 
 #define finish_arch_switch(prev) do {					     \
 	set_fs(current->thread.mm_segment);				     \
-	account_vtime(prev);						     \
+	account_vtime(prev, current);					     \
 } while (0)
 
 #define nop() asm volatile("nop")
@@ -413,8 +402,6 @@ __set_psw_mask(unsigned long mask)
 #define local_mcck_enable()  __set_psw_mask(psw_kernel_bits)
 #define local_mcck_disable() __set_psw_mask(psw_kernel_bits & ~PSW_MASK_MCHECK)
 
-int stfle(unsigned long long *list, int doublewords);
-
 #ifdef CONFIG_SMP
 
 extern void smp_ctl_set_bit(int cr, int bit);
@@ -438,6 +425,23 @@ static inline unsigned int stfl(void)
 	return S390_lowcore.stfl_fac_list;
 }
 
+static inline int __stfle(unsigned long long *list, int doublewords)
+{
+	typedef struct { unsigned long long _[doublewords]; } addrtype;
+	register unsigned long __nr asm("0") = doublewords - 1;
+
+	asm volatile(".insn s,0xb2b00000,%0" /* stfle */
+		     : "=m" (*(addrtype *) list), "+d" (__nr) : : "cc");
+	return __nr + 1;
+}
+
+static inline int stfle(unsigned long long *list, int doublewords)
+{
+	if (!(stfl() & (1UL << 24)))
+		return -EOPNOTSUPP;
+	return __stfle(list, doublewords);
+}
+
 static inline unsigned short stap(void)
 {
 	unsigned short cpu_address;
@@ -456,6 +460,20 @@ extern void (*_machine_power_off)(void);
 extern psw_t sysc_restore_trace_psw;
 extern psw_t io_restore_trace_psw;
 #endif
+
+static inline int tprot(unsigned long addr)
+{
+	int rc = -EFAULT;
+
+	asm volatile(
+		"	tprot	0(%1),0\n"
+		"0:	ipm	%0\n"
+		"	srl	%0,28\n"
+		"1:\n"
+		EX_TABLE(0b,1b)
+		: "+d" (rc) : "a" (addr) : "cc");
+	return rc;
+}
 
 #endif /* __KERNEL__ */
 

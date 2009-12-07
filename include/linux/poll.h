@@ -6,10 +6,10 @@
 #ifdef __KERNEL__
 
 #include <linux/compiler.h>
+#include <linux/ktime.h>
 #include <linux/wait.h>
 #include <linux/string.h>
 #include <linux/fs.h>
-#include <linux/sched.h>
 #include <asm/uaccess.h>
 
 /* ~832 bytes of stack space used max in sys_select/sys_poll before allocating
@@ -32,6 +32,7 @@ typedef void (*poll_queue_proc)(struct file *, wait_queue_head_t *, struct poll_
 
 typedef struct poll_table_struct {
 	poll_queue_proc qproc;
+	unsigned long key;
 } poll_table;
 
 static inline void poll_wait(struct file * filp, wait_queue_head_t * wait_address, poll_table *p)
@@ -43,12 +44,14 @@ static inline void poll_wait(struct file * filp, wait_queue_head_t * wait_addres
 static inline void init_poll_funcptr(poll_table *pt, poll_queue_proc qproc)
 {
 	pt->qproc = qproc;
+	pt->key   = ~0UL; /* all events enabled */
 }
 
 struct poll_table_entry {
-	struct file * filp;
+	struct file *filp;
+	unsigned long key;
 	wait_queue_t wait;
-	wait_queue_head_t * wait_address;
+	wait_queue_head_t *wait_address;
 };
 
 /*
@@ -56,7 +59,9 @@ struct poll_table_entry {
  */
 struct poll_wqueues {
 	poll_table pt;
-	struct poll_table_page * table;
+	struct poll_table_page *table;
+	struct task_struct *polling_task;
+	int triggered;
 	int error;
 	int inline_index;
 	struct poll_table_entry inline_entries[N_INLINE_POLL_ENTRIES];
@@ -64,6 +69,13 @@ struct poll_wqueues {
 
 extern void poll_initwait(struct poll_wqueues *pwq);
 extern void poll_freewait(struct poll_wqueues *pwq);
+extern int poll_schedule_timeout(struct poll_wqueues *pwq, int state,
+				 ktime_t *expires, unsigned long slack);
+
+static inline int poll_schedule(struct poll_wqueues *pwq, int state)
+{
+	return poll_schedule_timeout(pwq, state, NULL, 0);
+}
 
 /*
  * Scaleable version of the fd_set.
@@ -114,11 +126,13 @@ void zero_fd_set(unsigned long nr, unsigned long *fdset)
 
 #define MAX_INT64_SECONDS (((s64)(~((u64)0)>>1)/HZ)-1)
 
-extern int do_select(int n, fd_set_bits *fds, s64 *timeout);
+extern int do_select(int n, fd_set_bits *fds, struct timespec *end_time);
 extern int do_sys_poll(struct pollfd __user * ufds, unsigned int nfds,
-		       s64 *timeout);
+		       struct timespec *end_time);
 extern int core_sys_select(int n, fd_set __user *inp, fd_set __user *outp,
-			   fd_set __user *exp, s64 *timeout);
+			   fd_set __user *exp, struct timespec *end_time);
+
+extern int poll_select_set_timeout(struct timespec *to, long sec, long nsec);
 
 #endif /* KERNEL */
 

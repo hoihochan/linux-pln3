@@ -41,8 +41,8 @@
 #include <linux/interrupt.h>
 #include <linux/sysfs.h>
 #include <linux/module.h>
+#include <linux/io.h>
 
-#include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/atomic.h>
 #include <asm/mach/time.h>
@@ -53,10 +53,11 @@
 #include <mach/clock.h>
 #include <mach/sram.h>
 #include <mach/tc.h>
-#include <mach/pm.h>
 #include <mach/mux.h>
 #include <mach/dma.h>
 #include <mach/dmtimer.h>
+
+#include "pm.h"
 
 static unsigned int arm_sleep_save[ARM_SLEEP_SAVE_SIZE];
 static unsigned short dsp_sleep_save[DSP_SLEEP_SAVE_SIZE];
@@ -101,7 +102,7 @@ static void (*omap_sram_suspend)(unsigned long r0, unsigned long r1) = NULL;
  * going idle we continue to do idle even if we get
  * a clock tick interrupt . .
  */
-void omap_pm_idle(void)
+void omap1_pm_idle(void)
 {
 	extern __u32 arm_idlect1_mask;
 	__u32 use_idlect1 = arm_idlect1_mask;
@@ -222,11 +223,12 @@ static void omap_pm_wakeup_setup(void)
 #define EN_APICK	6	/* ARM_IDLECT2 */
 #define DSP_EN		1	/* ARM_RSTCT1 */
 
-void omap_pm_suspend(void)
+void omap1_pm_suspend(void)
 {
 	unsigned long arg0 = 0, arg1 = 0;
 
-	printk("PM: OMAP%x is trying to enter deep sleep...\n", system_rev);
+	printk(KERN_INFO "PM: OMAP%x is trying to enter deep sleep...\n",
+		omap_rev());
 
 	omap_serial_wake_trigger(1);
 
@@ -421,7 +423,8 @@ void omap_pm_suspend(void)
 
 	omap_serial_wake_trigger(0);
 
-	printk("PM: OMAP%x is re-starting from deep sleep...\n", system_rev);
+	printk(KERN_INFO "PM: OMAP%x is re-starting from deep sleep...\n",
+		omap_rev());
 }
 
 #if defined(DEBUG) && defined(CONFIG_PROC_FS)
@@ -608,7 +611,7 @@ static int omap_pm_enter(suspend_state_t state)
 	{
 	case PM_SUSPEND_STANDBY:
 	case PM_SUSPEND_MEM:
-		omap_pm_suspend();
+		omap1_pm_suspend();
 		break;
 	default:
 		return -EINVAL;
@@ -681,7 +684,7 @@ static int __init omap_pm_init(void)
 		return -ENODEV;
 	}
 
-	pm_idle = omap_pm_idle;
+	pm_idle = omap1_pm_idle;
 
 	if (cpu_is_omap730())
 		setup_irq(INT_730_WAKE_UP_REQ, &omap_wakeup_irq);

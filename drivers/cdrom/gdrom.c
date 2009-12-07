@@ -490,14 +490,15 @@ static struct cdrom_device_ops gdrom_ops = {
 	.n_minors		= 1,
 };
 
-static int gdrom_bdops_open(struct inode *inode, struct file *file)
+static int gdrom_bdops_open(struct block_device *bdev, fmode_t mode)
 {
-	return cdrom_open(gd.cd_info, inode, file);
+	return cdrom_open(gd.cd_info, bdev, mode);
 }
 
-static int gdrom_bdops_release(struct inode *inode, struct file *file)
+static int gdrom_bdops_release(struct gendisk *disk, fmode_t mode)
 {
-	return cdrom_release(gd.cd_info, file);
+	cdrom_release(gd.cd_info, mode);
+	return 0;
 }
 
 static int gdrom_bdops_mediachanged(struct gendisk *disk)
@@ -505,18 +506,18 @@ static int gdrom_bdops_mediachanged(struct gendisk *disk)
 	return cdrom_media_changed(gd.cd_info);
 }
 
-static int gdrom_bdops_ioctl(struct inode *inode, struct file *file,
+static int gdrom_bdops_ioctl(struct block_device *bdev, fmode_t mode,
 	unsigned cmd, unsigned long arg)
 {
-	return cdrom_ioctl(file, gd.cd_info, inode, cmd, arg);
+	return cdrom_ioctl(gd.cd_info, bdev, mode, cmd, arg);
 }
 
-static struct block_device_operations gdrom_bdops = {
+static const struct block_device_operations gdrom_bdops = {
 	.owner			= THIS_MODULE,
 	.open			= gdrom_bdops_open,
 	.release		= gdrom_bdops_release,
 	.media_changed		= gdrom_bdops_mediachanged,
-	.ioctl			= gdrom_bdops_ioctl,
+	.locked_ioctl		= gdrom_bdops_ioctl,
 };
 
 static irqreturn_t gdrom_command_interrupt(int irq, void *dev_id)
@@ -583,8 +584,8 @@ static void gdrom_readdisk_dma(struct work_struct *work)
 	list_for_each_safe(elem, next, &gdrom_deferred) {
 		req = list_entry(elem, struct request, queuelist);
 		spin_unlock(&gdrom_lock);
-		block = req->sector/GD_TO_BLK + GD_SESSION_OFFSET;
-		block_cnt = req->nr_sectors/GD_TO_BLK;
+		block = blk_rq_pos(req)/GD_TO_BLK + GD_SESSION_OFFSET;
+		block_cnt = blk_rq_sectors(req)/GD_TO_BLK;
 		ctrl_outl(PHYSADDR(req->buffer), GDROM_DMA_STARTADDR_REG);
 		ctrl_outl(block_cnt * GDROM_HARD_SECTOR, GDROM_DMA_LENGTH_REG);
 		ctrl_outl(1, GDROM_DMA_DIRECTION_REG);
@@ -624,46 +625,42 @@ static void gdrom_readdisk_dma(struct work_struct *work)
 		ctrl_outb(1, GDROM_DMA_STATUS_REG);
 		wait_event_interruptible_timeout(request_queue,
 			gd.transfer == 0, GDROM_DEFAULT_TIMEOUT);
-		err = gd.transfer;
+		err = gd.transfer ? -EIO : 0;
 		gd.transfer = 0;
 		gd.pending = 0;
 		/* now seek to take the request spinlock
 		* before handling ending the request */
 		spin_lock(&gdrom_lock);
 		list_del_init(&req->queuelist);
-		end_dequeued_request(req, 1 - err);
+		__blk_end_request_all(req, err);
 	}
 	spin_unlock(&gdrom_lock);
 	kfree(read_command);
-}
-
-static void gdrom_request_handler_dma(struct request *req)
-{
-	/* dequeue, add to list of deferred work
-	* and then schedule workqueue */
-	blkdev_dequeue_request(req);
-	list_add_tail(&req->queuelist, &gdrom_deferred);
-	schedule_work(&work);
 }
 
 static void gdrom_request(struct request_queue *rq)
 {
 	struct request *req;
 
-	while ((req = elv_next_request(rq)) != NULL) {
+	while ((req = blk_fetch_request(rq)) != NULL) {
 		if (!blk_fs_request(req)) {
 			printk(KERN_DEBUG "GDROM: Non-fs request ignored\n");
-			end_request(req, 0);
+			__blk_end_request_all(req, -EIO);
+			continue;
 		}
 		if (rq_data_dir(req) != READ) {
 			printk(KERN_NOTICE "GDROM: Read only device -");
 			printk(" write request ignored\n");
-			end_request(req, 0);
+			__blk_end_request_all(req, -EIO);
+			continue;
 		}
-		if (req->nr_sectors)
-			gdrom_request_handler_dma(req);
-		else
-			end_request(req, 0);
+
+		/*
+		 * Add to list of deferred work and then schedule
+		 * workqueue.
+		 */
+		list_add_tail(&req->queuelist, &gdrom_deferred);
+		schedule_work(&work);
 	}
 }
 
@@ -742,7 +739,7 @@ static void __devinit probe_gdrom_setupdisk(void)
 
 static int __devinit probe_gdrom_setupqueue(void)
 {
-	blk_queue_hardsect_size(gd.gdrom_rq, GDROM_HARD_SECTOR);
+	blk_queue_logical_block_size(gd.gdrom_rq, GDROM_HARD_SECTOR);
 	/* using DMA so memory will need to be contiguous */
 	blk_queue_max_hw_segments(gd.gdrom_rq, 1);
 	/* set a large max size to get most from DMA */

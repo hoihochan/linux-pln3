@@ -44,7 +44,7 @@
 	do {							\
 		if (acpiphp_debug)				\
 			printk(KERN_DEBUG "%s: " format,	\
-				MY_NAME , ## arg); 		\
+				MY_NAME , ## arg);		\
 	} while (0)
 #define err(format, arg...) printk(KERN_ERR "%s: " format, MY_NAME , ## arg)
 #define info(format, arg...) printk(KERN_INFO "%s: " format, MY_NAME , ## arg)
@@ -91,9 +91,6 @@ struct acpiphp_bridge {
 	/* PCI-to-PCI bridge device */
 	struct pci_dev *pci_dev;
 
-	/* ACPI 2.0 _HPP parameters */
-	struct hotplug_params hpp;
-
 	spinlock_t res_lock;
 };
 
@@ -113,7 +110,7 @@ struct acpiphp_slot {
 
 	u8		device;		/* pci device# */
 
-	u32		sun;		/* ACPI _SUN (slot unique number) */
+	unsigned long long sun;		/* ACPI _SUN (slot unique number) */
 	u32		flags;		/* see below */
 };
 
@@ -129,7 +126,6 @@ struct acpiphp_func {
 	struct acpiphp_bridge *bridge;	/* Ejectable PCI-to-PCI bridge */
 
 	struct list_head sibling;
-	struct pci_dev *pci_dev;
 	struct notifier_block nb;
 	acpi_handle	handle;
 

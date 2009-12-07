@@ -15,7 +15,7 @@
     incorporated herein by reference.
     Donald Becker may be reached at becker@scyld.com
     
-    Updated for 2.5.x by Alan Cox <alan@redhat.com>
+    Updated for 2.5.x by Alan Cox <alan@lxorguk.ukuu.org.uk>
 
 ======================================================================*/
 
@@ -149,13 +149,15 @@ static void tc589_reset(struct net_device *dev);
 static void media_check(unsigned long arg);
 static int el3_config(struct net_device *dev, struct ifmap *map);
 static int el3_open(struct net_device *dev);
-static int el3_start_xmit(struct sk_buff *skb, struct net_device *dev);
+static netdev_tx_t el3_start_xmit(struct sk_buff *skb,
+					struct net_device *dev);
 static irqreturn_t el3_interrupt(int irq, void *dev_id);
 static void update_stats(struct net_device *dev);
 static struct net_device_stats *el3_get_stats(struct net_device *dev);
 static int el3_rx(struct net_device *dev);
 static int el3_close(struct net_device *dev);
 static void el3_tx_timeout(struct net_device *dev);
+static void set_rx_mode(struct net_device *dev);
 static void set_multicast_list(struct net_device *dev);
 static const struct ethtool_ops netdev_ethtool_ops;
 
@@ -168,6 +170,19 @@ static void tc589_detach(struct pcmcia_device *p_dev);
     with Card Services.
 
 ======================================================================*/
+
+static const struct net_device_ops el3_netdev_ops = {
+	.ndo_open 		= el3_open,
+	.ndo_stop 		= el3_close,
+	.ndo_start_xmit		= el3_start_xmit,
+	.ndo_tx_timeout 	= el3_tx_timeout,
+	.ndo_set_config		= el3_config,
+	.ndo_get_stats		= el3_get_stats,
+	.ndo_set_multicast_list = set_multicast_list,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+};
 
 static int tc589_probe(struct pcmcia_device *link)
 {
@@ -195,17 +210,9 @@ static int tc589_probe(struct pcmcia_device *link)
     link->conf.IntType = INT_MEMORY_AND_IO;
     link->conf.ConfigIndex = 1;
 
-    /* The EL3-specific entries in the device structure. */
-    dev->hard_start_xmit = &el3_start_xmit;
-    dev->set_config = &el3_config;
-    dev->get_stats = &el3_get_stats;
-    dev->set_multicast_list = &set_multicast_list;
-    dev->open = &el3_open;
-    dev->stop = &el3_close;
-#ifdef HAVE_TX_TIMEOUT
-    dev->tx_timeout = el3_tx_timeout;
+    dev->netdev_ops = &el3_netdev_ops;
     dev->watchdog_timeo = TX_TIMEOUT;
-#endif
+
     SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
 
     return tc589_config(link);
@@ -255,7 +262,6 @@ static int tc589_config(struct pcmcia_device *link)
     int last_fn, last_ret, i, j, multi = 0, fifo;
     unsigned int ioaddr;
     char *ram_split[] = {"5:3", "3:1", "1:1", "3:5"};
-    DECLARE_MAC_BUF(mac);
     
     DEBUG(0, "3c589_config(0x%p)\n", link);
 
@@ -278,9 +284,10 @@ static int tc589_config(struct pcmcia_device *link)
 	if (multi && (j & 0x80)) continue;
 	link->io.BasePort1 = j ^ 0x300;
 	i = pcmcia_request_io(link, &link->io);
-	if (i == CS_SUCCESS) break;
+	if (i == 0)
+		break;
     }
-    if (i != CS_SUCCESS) {
+    if (i != 0) {
 	cs_error(link, RequestIO, i);
 	goto failed;
     }
@@ -295,7 +302,7 @@ static int tc589_config(struct pcmcia_device *link)
     /* The 3c589 has an extra EEPROM for configuration info, including
        the hardware address.  The 3c562 puts the address in the CIS. */
     tuple.DesiredTuple = 0x88;
-    if (pcmcia_get_first_tuple(link, &tuple) == CS_SUCCESS) {
+    if (pcmcia_get_first_tuple(link, &tuple) == 0) {
 	pcmcia_get_tuple_data(link, &tuple);
 	for (i = 0; i < 3; i++)
 	    phys_addr[i] = htons(le16_to_cpu(buf[i]));
@@ -332,9 +339,9 @@ static int tc589_config(struct pcmcia_device *link)
     strcpy(lp->node.dev_name, dev->name);
 
     printk(KERN_INFO "%s: 3Com 3c%s, io %#3lx, irq %d, "
-	   "hw_addr %s\n",
+	   "hw_addr %pM\n",
 	   dev->name, (multi ? "562" : "589"), dev->base_addr, dev->irq,
-	   print_mac(mac, dev->dev_addr));
+	   dev->dev_addr);
     printk(KERN_INFO "  %dK FIFO split %s Rx:Tx, %s xcvr\n",
 	   (fifo & 7) ? 32 : 8, ram_split[(fifo >> 16) & 3],
 	   if_names[dev->if_port]);
@@ -483,8 +490,7 @@ static void tc589_reset(struct net_device *dev)
     /* Switch to register set 1 for normal use. */
     EL3WINDOW(1);
 
-    /* Accept b-cast and phys addr only. */
-    outw(SetRxFilter | RxStation | RxBroadcast, ioaddr + EL3_CMD);
+    set_rx_mode(dev);
     outw(StatsEnable, ioaddr + EL3_CMD); /* Turn on statistics. */
     outw(RxEnable, ioaddr + EL3_CMD); /* Enable the receiver. */
     outw(TxEnable, ioaddr + EL3_CMD); /* Enable transmitter. */
@@ -599,7 +605,8 @@ static void pop_tx_status(struct net_device *dev)
     }
 }
 
-static int el3_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t el3_start_xmit(struct sk_buff *skb,
+					struct net_device *dev)
 {
     unsigned int ioaddr = dev->base_addr;
     struct el3_private *priv = netdev_priv(dev);
@@ -630,7 +637,7 @@ static int el3_start_xmit(struct sk_buff *skb, struct net_device *dev)
     spin_unlock_irqrestore(&priv->lock, flags);    
     dev_kfree_skb(skb);
     
-    return 0;
+    return NETDEV_TX_OK;
 }
 
 /* The EL3 interrupt handler. */
@@ -695,7 +702,7 @@ static irqreturn_t el3_interrupt(int irq, void *dev_id)
 		if (fifo_diag & 0x2000) {
 		    /* Rx underrun */
 		    tc589_wait_for_completion(dev, RxReset);
-		    set_multicast_list(dev);
+		    set_rx_mode(dev);
 		    outw(RxEnable, ioaddr + EL3_CMD);
 		}
 		outw(AckIntr | AdapterFailure, ioaddr + EL3_CMD);
@@ -857,7 +864,8 @@ static int el3_rx(struct net_device *dev)
     DEBUG(3, "%s: in rx_packet(), status %4.4x, rx_status %4.4x.\n",
 	  dev->name, inw(ioaddr+EL3_STATUS), inw(ioaddr+RX_STATUS));
     while (!((rx_status = inw(ioaddr + RX_STATUS)) & 0x8000) &&
-	   (--worklimit >= 0)) {
+		    worklimit > 0) {
+	worklimit--;
 	if (rx_status & 0x4000) { /* Error, update stats. */
 	    short error = rx_status & 0x3800;
 	    dev->stats.rx_errors++;
@@ -883,7 +891,6 @@ static int el3_rx(struct net_device *dev)
 			(pkt_len+3)>>2);
 		skb->protocol = eth_type_trans(skb, dev);
 		netif_rx(skb);
-		dev->last_rx = jiffies;
 		dev->stats.rx_packets++;
 		dev->stats.rx_bytes += pkt_len;
 	    } else {
@@ -900,19 +907,26 @@ static int el3_rx(struct net_device *dev)
     return 0;
 }
 
-static void set_multicast_list(struct net_device *dev)
+static void set_rx_mode(struct net_device *dev)
 {
-    struct el3_private *lp = netdev_priv(dev);
-    struct pcmcia_device *link = lp->p_dev;
     unsigned int ioaddr = dev->base_addr;
     u16 opts = SetRxFilter | RxStation | RxBroadcast;
 
-    if (!pcmcia_dev_present(link)) return;
     if (dev->flags & IFF_PROMISC)
 	opts |= RxMulticast | RxProm;
     else if (dev->mc_count || (dev->flags & IFF_ALLMULTI))
 	opts |= RxMulticast;
     outw(opts, ioaddr + EL3_CMD);
+}
+
+static void set_multicast_list(struct net_device *dev)
+{
+	struct el3_private *priv = netdev_priv(dev);
+	unsigned long flags;
+
+	spin_lock_irqsave(&priv->lock, flags);
+	set_rx_mode(dev);
+	spin_unlock_irqrestore(&priv->lock, flags);
 }
 
 static int el3_close(struct net_device *dev)
@@ -962,8 +976,8 @@ static struct pcmcia_device_id tc589_ids[] = {
 	PCMCIA_MFC_DEVICE_PROD_ID1(0, "Motorola MARQUIS", 0xf03e4e77),
 	PCMCIA_DEVICE_MANF_CARD(0x0101, 0x0589),
 	PCMCIA_DEVICE_PROD_ID12("Farallon", "ENet", 0x58d93fc4, 0x992c2202),
-	PCMCIA_MFC_DEVICE_CIS_MANF_CARD(0, 0x0101, 0x0035, "3CXEM556.cis"),
-	PCMCIA_MFC_DEVICE_CIS_MANF_CARD(0, 0x0101, 0x003d, "3CXEM556.cis"),
+	PCMCIA_MFC_DEVICE_CIS_MANF_CARD(0, 0x0101, 0x0035, "cis/3CXEM556.cis"),
+	PCMCIA_MFC_DEVICE_CIS_MANF_CARD(0, 0x0101, 0x003d, "cis/3CXEM556.cis"),
 	PCMCIA_DEVICE_NULL,
 };
 MODULE_DEVICE_TABLE(pcmcia, tc589_ids);

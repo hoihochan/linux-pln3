@@ -26,11 +26,11 @@
 #include <linux/debugfs.h>
 #include <linux/fsnotify.h>
 #include <linux/string.h>
-
-#define DEBUGFS_MAGIC	0x64626720
+#include <linux/magic.h>
 
 static struct vfsmount *debugfs_mount;
 static int debugfs_mount_count;
+static bool debugfs_registered;
 
 static struct inode *debugfs_get_inode(struct super_block *sb, int mode, dev_t dev)
 {
@@ -38,9 +38,6 @@ static struct inode *debugfs_get_inode(struct super_block *sb, int mode, dev_t d
 
 	if (inode) {
 		inode->i_mode = mode;
-		inode->i_uid = 0;
-		inode->i_gid = 0;
-		inode->i_blocks = 0;
 		inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 		switch (mode & S_IFMT) {
 		default:
@@ -406,6 +403,7 @@ void debugfs_remove_recursive(struct dentry *dentry)
 		}
 		child = list_entry(parent->d_subdirs.next, struct dentry,
 				d_u.d_child);
+ next_sibling:
 
 		/*
 		 * If "child" isn't empty, walk down the tree and
@@ -419,6 +417,16 @@ void debugfs_remove_recursive(struct dentry *dentry)
 		}
 		__debugfs_remove(child, parent);
 		if (parent->d_subdirs.next == &child->d_u.d_child) {
+			/*
+			 * Try the next sibling.
+			 */
+			if (child->d_u.d_child.next != &parent->d_subdirs) {
+				child = list_entry(child->d_u.d_child.next,
+						   struct dentry,
+						   d_u.d_child);
+				goto next_sibling;
+			}
+
 			/*
 			 * Avoid infinite loop if we fail to remove
 			 * one dentry.
@@ -500,6 +508,16 @@ exit:
 }
 EXPORT_SYMBOL_GPL(debugfs_rename);
 
+/**
+ * debugfs_initialized - Tells whether debugfs has been registered
+ */
+bool debugfs_initialized(void)
+{
+	return debugfs_registered;
+}
+EXPORT_SYMBOL_GPL(debugfs_initialized);
+
+
 static struct kobject *debug_kobj;
 
 static int __init debugfs_init(void)
@@ -513,11 +531,16 @@ static int __init debugfs_init(void)
 	retval = register_filesystem(&debug_fs_type);
 	if (retval)
 		kobject_put(debug_kobj);
+	else
+		debugfs_registered = true;
+
 	return retval;
 }
 
 static void __exit debugfs_exit(void)
 {
+	debugfs_registered = false;
+
 	simple_release_fs(&debugfs_mount, &debugfs_mount_count);
 	unregister_filesystem(&debug_fs_type);
 	kobject_put(debug_kobj);

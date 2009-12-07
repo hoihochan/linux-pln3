@@ -64,7 +64,7 @@ void iforce_usb_xmit(struct iforce *iforce)
 
 	if ( (n=usb_submit_urb(iforce->out, GFP_ATOMIC)) ) {
 		clear_bit(IFORCE_XMIT_RUNNING, iforce->xmit_flags);
-		warn("usb_submit_urb failed %d\n", n);
+		dev_warn(&iforce->dev->dev, "usb_submit_urb failed %d\n", n);
 	}
 
 	/* The IFORCE_XMIT_RUNNING bit is not cleared here. That's intended.
@@ -223,6 +223,7 @@ static struct usb_device_id iforce_usb_ids [] = {
 	{ USB_DEVICE(0x05ef, 0x8884) },		/* AVB Mag Turbo Force */
 	{ USB_DEVICE(0x05ef, 0x8888) },		/* AVB Top Shot FFB Racing Wheel */
 	{ USB_DEVICE(0x061c, 0xc0a4) },         /* ACT LABS Force RS */
+	{ USB_DEVICE(0x061c, 0xc084) },         /* ACT LABS Force RS */
 	{ USB_DEVICE(0x06f8, 0x0001) },		/* Guillemot Race Leader Force Feedback */
 	{ USB_DEVICE(0x06f8, 0x0004) },		/* Guillemot Force Feedback Racing Wheel */
 	{ USB_DEVICE(0x06f8, 0xa302) },		/* Guillemot Jet Leader 3D */

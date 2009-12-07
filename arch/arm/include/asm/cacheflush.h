@@ -10,11 +10,11 @@
 #ifndef _ASMARM_CACHEFLUSH_H
 #define _ASMARM_CACHEFLUSH_H
 
-#include <linux/sched.h>
 #include <linux/mm.h>
 
 #include <asm/glue.h>
 #include <asm/shmparam.h>
+#include <asm/cachetype.h>
 
 #define CACHE_COLOUR(vaddr)	((vaddr & (SHMLBA - 1)) >> PAGE_SHIFT)
 
@@ -44,6 +44,14 @@
 #if defined(CONFIG_CPU_ARM920T) || defined(CONFIG_CPU_ARM922T) || \
     defined(CONFIG_CPU_ARM925T) || defined(CONFIG_CPU_ARM1020)
 # define MULTI_CACHE 1
+#endif
+
+#if defined(CONFIG_CPU_FA526)
+# ifdef _CACHE
+#  define MULTI_CACHE 1
+# else
+#  define _CACHE fa
+# endif
 #endif
 
 #if defined(CONFIG_CPU_ARM926T)
@@ -91,6 +99,14 @@
 #  define MULTI_CACHE 1
 # else
 #  define _CACHE xsc3
+# endif
+#endif
+
+#if defined(CONFIG_CPU_MOHAWK)
+# ifdef _CACHE
+#  define MULTI_CACHE 1
+# else
+#  define _CACHE mohawk
 # endif
 #endif
 
@@ -296,16 +312,6 @@ static inline void outer_flush_range(unsigned long start, unsigned long end)
 #endif
 
 /*
- * flush_cache_vmap() is used when creating mappings (eg, via vmap,
- * vmalloc, ioremap etc) in kernel space for pages.  Since the
- * direct-mappings of these pages may contain cached data, we need
- * to do a full cache flush to ensure that writebacks don't corrupt
- * data placed into these pages via the new mappings.
- */
-#define flush_cache_vmap(start, end)		flush_cache_all()
-#define flush_cache_vunmap(start, end)		flush_cache_all()
-
-/*
  * Copy user data from/to a page which is mapped into a different
  * processes address space.  Really, we want to allow our "user
  * space" model to handle this.
@@ -328,14 +334,14 @@ static inline void outer_flush_range(unsigned long start, unsigned long end)
 #ifndef CONFIG_CPU_CACHE_VIPT
 static inline void flush_cache_mm(struct mm_struct *mm)
 {
-	if (cpu_isset(smp_processor_id(), mm->cpu_vm_mask))
+	if (cpumask_test_cpu(smp_processor_id(), mm_cpumask(mm)))
 		__cpuc_flush_user_all();
 }
 
 static inline void
 flush_cache_range(struct vm_area_struct *vma, unsigned long start, unsigned long end)
 {
-	if (cpu_isset(smp_processor_id(), vma->vm_mm->cpu_vm_mask))
+	if (cpumask_test_cpu(smp_processor_id(), mm_cpumask(vma->vm_mm)))
 		__cpuc_flush_user_range(start & PAGE_MASK, PAGE_ALIGN(end),
 					vma->vm_flags);
 }
@@ -343,7 +349,7 @@ flush_cache_range(struct vm_area_struct *vma, unsigned long start, unsigned long
 static inline void
 flush_cache_page(struct vm_area_struct *vma, unsigned long user_addr, unsigned long pfn)
 {
-	if (cpu_isset(smp_processor_id(), vma->vm_mm->cpu_vm_mask)) {
+	if (cpumask_test_cpu(smp_processor_id(), mm_cpumask(vma->vm_mm))) {
 		unsigned long addr = user_addr & PAGE_MASK;
 		__cpuc_flush_user_range(addr, addr + PAGE_SIZE, vma->vm_flags);
 	}
@@ -354,7 +360,7 @@ flush_ptrace_access(struct vm_area_struct *vma, struct page *page,
 			 unsigned long uaddr, void *kaddr,
 			 unsigned long len, int write)
 {
-	if (cpu_isset(smp_processor_id(), vma->vm_mm->cpu_vm_mask)) {
+	if (cpumask_test_cpu(smp_processor_id(), mm_cpumask(vma->vm_mm))) {
 		unsigned long addr = (unsigned long)kaddr;
 		__cpuc_coherent_kern_range(addr, addr + len);
 	}
@@ -408,9 +414,14 @@ extern void __flush_dcache_page(struct address_space *mapping, struct page *page
 
 static inline void __flush_icache_all(void)
 {
+#ifdef CONFIG_ARM_ERRATA_411920
+	extern void v6_icache_inval_all(void);
+	v6_icache_inval_all();
+#else
 	asm("mcr	p15, 0, %0, c7, c5, 0	@ invalidate I-cache\n"
 	    :
 	    : "r" (0));
+#endif
 }
 
 #define ARCH_HAS_FLUSH_ANON_PAGE
@@ -421,6 +432,14 @@ static inline void flush_anon_page(struct vm_area_struct *vma,
 				struct page *, unsigned long);
 	if (PageAnon(page))
 		__flush_anon_page(vma, page, vmaddr);
+}
+
+#define ARCH_HAS_FLUSH_KERNEL_DCACHE_PAGE
+static inline void flush_kernel_dcache_page(struct page *page)
+{
+	/* highmem pages are always flushed upon kunmap already */
+	if ((cache_is_vivt() || cache_is_vipt_aliasing()) && !PageHighMem(page))
+		__cpuc_flush_dcache_page(page_address(page));
 }
 
 #define flush_dcache_mmap_lock(mapping) \
@@ -444,94 +463,29 @@ static inline void flush_ioremap_region(unsigned long phys, void __iomem *virt,
 	dmac_inv_range(start, start + size);
 }
 
-#define __cacheid_present(val)			(val != read_cpuid(CPUID_ID))
-#define __cacheid_type_v7(val)			((val & (7 << 29)) == (4 << 29))
-
-#define __cacheid_vivt_prev7(val)		((val & (15 << 25)) != (14 << 25))
-#define __cacheid_vipt_prev7(val)		((val & (15 << 25)) == (14 << 25))
-#define __cacheid_vipt_nonaliasing_prev7(val)	((val & (15 << 25 | 1 << 23)) == (14 << 25))
-#define __cacheid_vipt_aliasing_prev7(val)	((val & (15 << 25 | 1 << 23)) == (14 << 25 | 1 << 23))
-
-#define __cacheid_vivt(val)			(__cacheid_type_v7(val) ? 0 : __cacheid_vivt_prev7(val))
-#define __cacheid_vipt(val)			(__cacheid_type_v7(val) ? 1 : __cacheid_vipt_prev7(val))
-#define __cacheid_vipt_nonaliasing(val)		(__cacheid_type_v7(val) ? 1 : __cacheid_vipt_nonaliasing_prev7(val))
-#define __cacheid_vipt_aliasing(val)		(__cacheid_type_v7(val) ? 0 : __cacheid_vipt_aliasing_prev7(val))
-#define __cacheid_vivt_asid_tagged_instr(val)	(__cacheid_type_v7(val) ? ((val & (3 << 14)) == (1 << 14)) : 0)
-
-#if defined(CONFIG_CPU_CACHE_VIVT) && !defined(CONFIG_CPU_CACHE_VIPT)
 /*
- * VIVT caches only
+ * flush_cache_vmap() is used when creating mappings (eg, via vmap,
+ * vmalloc, ioremap etc) in kernel space for pages.  On non-VIPT
+ * caches, since the direct-mappings of these pages may contain cached
+ * data, we need to do a full cache flush to ensure that writebacks
+ * don't corrupt data placed into these pages via the new mappings.
  */
-#define cache_is_vivt()			1
-#define cache_is_vipt()			0
-#define cache_is_vipt_nonaliasing()	0
-#define cache_is_vipt_aliasing()	0
-#define icache_is_vivt_asid_tagged()	0
+static inline void flush_cache_vmap(unsigned long start, unsigned long end)
+{
+	if (!cache_is_vipt_nonaliasing())
+		flush_cache_all();
+	else
+		/*
+		 * set_pte_at() called from vmap_pte_range() does not
+		 * have a DSB after cleaning the cache line.
+		 */
+		dsb();
+}
 
-#elif !defined(CONFIG_CPU_CACHE_VIVT) && defined(CONFIG_CPU_CACHE_VIPT)
-/*
- * VIPT caches only
- */
-#define cache_is_vivt()			0
-#define cache_is_vipt()			1
-#define cache_is_vipt_nonaliasing()					\
-	({								\
-		unsigned int __val = read_cpuid(CPUID_CACHETYPE);	\
-		__cacheid_vipt_nonaliasing(__val);			\
-	})
-
-#define cache_is_vipt_aliasing()					\
-	({								\
-		unsigned int __val = read_cpuid(CPUID_CACHETYPE);	\
-		__cacheid_vipt_aliasing(__val);				\
-	})
-
-#define icache_is_vivt_asid_tagged()					\
-	({								\
-		unsigned int __val = read_cpuid(CPUID_CACHETYPE);	\
-		__cacheid_vivt_asid_tagged_instr(__val);		\
-	})
-
-#else
-/*
- * VIVT or VIPT caches.  Note that this is unreliable since ARM926
- * and V6 CPUs satisfy the "(val & (15 << 25)) == (14 << 25)" test.
- * There's no way to tell from the CacheType register what type (!)
- * the cache is.
- */
-#define cache_is_vivt()							\
-	({								\
-		unsigned int __val = read_cpuid(CPUID_CACHETYPE);	\
-		(!__cacheid_present(__val)) || __cacheid_vivt(__val);	\
-	})
-		
-#define cache_is_vipt()							\
-	({								\
-		unsigned int __val = read_cpuid(CPUID_CACHETYPE);	\
-		__cacheid_present(__val) && __cacheid_vipt(__val);	\
-	})
-
-#define cache_is_vipt_nonaliasing()					\
-	({								\
-		unsigned int __val = read_cpuid(CPUID_CACHETYPE);	\
-		__cacheid_present(__val) &&				\
-		 __cacheid_vipt_nonaliasing(__val);			\
-	})
-
-#define cache_is_vipt_aliasing()					\
-	({								\
-		unsigned int __val = read_cpuid(CPUID_CACHETYPE);	\
-		__cacheid_present(__val) &&				\
-		 __cacheid_vipt_aliasing(__val);			\
-	})
-
-#define icache_is_vivt_asid_tagged()					\
-	({								\
-		unsigned int __val = read_cpuid(CPUID_CACHETYPE);	\
-		__cacheid_present(__val) &&				\
-		 __cacheid_vivt_asid_tagged_instr(__val);		\
-	})
-
-#endif
+static inline void flush_cache_vunmap(unsigned long start, unsigned long end)
+{
+	if (!cache_is_vipt_nonaliasing())
+		flush_cache_all();
+}
 
 #endif

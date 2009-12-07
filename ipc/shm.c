@@ -39,6 +39,7 @@
 #include <linux/nsproxy.h>
 #include <linux/mount.h>
 #include <linux/ipc_namespace.h>
+#include <linux/ima.h>
 
 #include <asm/uaccess.h>
 
@@ -54,7 +55,7 @@ struct shm_file_data {
 #define shm_file_data(file) (*((struct shm_file_data **)&(file)->private_data))
 
 static const struct file_operations shm_file_operations;
-static struct vm_operations_struct shm_vm_ops;
+static const struct vm_operations_struct shm_vm_ops;
 
 #define shm_ids(ns)	((ns)->ids[IPC_SHM_IDS])
 
@@ -75,7 +76,7 @@ void shm_init_ns(struct ipc_namespace *ns)
 	ns->shm_ctlall = SHMALL;
 	ns->shm_ctlmni = SHMMNI;
 	ns->shm_tot = 0;
-	ipc_init_ids(&ns->ids[IPC_SHM_IDS]);
+	ipc_init_ids(&shm_ids(ns));
 }
 
 /*
@@ -173,7 +174,7 @@ static void shm_destroy(struct ipc_namespace *ns, struct shmid_kernel *shp)
 	shm_unlock(shp);
 	if (!is_file_hugepages(shp->shm_file))
 		shmem_lock(shp->shm_file, 0, shp->mlock_user);
-	else
+	else if (shp->mlock_user)
 		user_shm_unlock(shp->shm_file->f_path.dentry->d_inode->i_size,
 						shp->mlock_user);
 	fput (shp->shm_file);
@@ -311,7 +312,7 @@ static const struct file_operations shm_file_operations = {
 	.get_unmapped_area	= shm_get_unmapped_area,
 };
 
-static struct vm_operations_struct shm_vm_ops = {
+static const struct vm_operations_struct shm_vm_ops = {
 	.open	= shm_open,	/* callback for a new vm-area open */
 	.close	= shm_close,	/* callback for when the vm-area is released */
 	.fault	= shm_fault,
@@ -340,6 +341,7 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 	struct file * file;
 	char name[13];
 	int id;
+	int acctflag = 0;
 
 	if (size < SHMMIN || size > ns->shm_ctlmax)
 		return -EINVAL;
@@ -364,18 +366,19 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 
 	sprintf (name, "SYSV%08x", key);
 	if (shmflg & SHM_HUGETLB) {
-		/* hugetlb_file_setup takes care of mlock user accounting */
-		file = hugetlb_file_setup(name, size);
-		shp->mlock_user = current->user;
+		/* hugetlb_file_setup applies strict accounting */
+		if (shmflg & SHM_NORESERVE)
+			acctflag = VM_NORESERVE;
+		file = hugetlb_file_setup(name, size, acctflag,
+					&shp->mlock_user, HUGETLB_SHMFS_INODE);
 	} else {
-		int acctflag = VM_ACCOUNT;
 		/*
 		 * Do not allow no accounting for OVERCOMMIT_NEVER, even
 	 	 * if it's asked for.
 		 */
 		if  ((shmflg & SHM_NORESERVE) &&
 				sysctl_overcommit_memory != OVERCOMMIT_NEVER)
-			acctflag = 0;
+			acctflag = VM_NORESERVE;
 		file = shmem_file_setup(name, size, acctflag);
 	}
 	error = PTR_ERR(file);
@@ -407,6 +410,8 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 	return error;
 
 no_id:
+	if (is_file_hugepages(file) && shp->mlock_user)
+		user_shm_unlock(size, shp->mlock_user);
 	fput(file);
 no_file:
 	security_shm_free(shp);
@@ -551,12 +556,14 @@ static void shm_get_stat(struct ipc_namespace *ns, unsigned long *rss,
 	in_use = shm_ids(ns).in_use;
 
 	for (total = 0, next_id = 0; total < in_use; next_id++) {
+		struct kern_ipc_perm *ipc;
 		struct shmid_kernel *shp;
 		struct inode *inode;
 
-		shp = idr_find(&shm_ids(ns).ipcs_idr, next_id);
-		if (shp == NULL)
+		ipc = idr_find(&shm_ids(ns).ipcs_idr, next_id);
+		if (ipc == NULL)
 			continue;
+		shp = container_of(ipc, struct shmid_kernel, shm_perm);
 
 		inode = shp->shm_file->f_path.dentry->d_inode;
 
@@ -648,7 +655,7 @@ SYSCALL_DEFINE3(shmctl, int, shmid, int, cmd, struct shmid_ds __user *, buf)
 		if (err)
 			return err;
 
-		memset(&shminfo,0,sizeof(shminfo));
+		memset(&shminfo, 0, sizeof(shminfo));
 		shminfo.shmmni = shminfo.shmseg = ns->shm_ctlmni;
 		shminfo.shmmax = ns->shm_ctlmax;
 		shminfo.shmall = ns->shm_ctlall;
@@ -673,7 +680,7 @@ SYSCALL_DEFINE3(shmctl, int, shmid, int, cmd, struct shmid_ds __user *, buf)
 		if (err)
 			return err;
 
-		memset(&shm_info,0,sizeof(shm_info));
+		memset(&shm_info, 0, sizeof(shm_info));
 		down_read(&shm_ids(ns).rw_mutex);
 		shm_info.used_ids = shm_ids(ns).in_use;
 		shm_get_stat (ns, &shm_info.shm_rss, &shm_info.shm_swp);
@@ -682,7 +689,7 @@ SYSCALL_DEFINE3(shmctl, int, shmid, int, cmd, struct shmid_ds __user *, buf)
 		shm_info.swap_successes = 0;
 		err = ipc_get_maxid(&shm_ids(ns));
 		up_read(&shm_ids(ns).rw_mutex);
-		if(copy_to_user (buf, &shm_info, sizeof(shm_info))) {
+		if (copy_to_user(buf, &shm_info, sizeof(shm_info))) {
 			err = -EFAULT;
 			goto out;
 		}
@@ -695,11 +702,6 @@ SYSCALL_DEFINE3(shmctl, int, shmid, int, cmd, struct shmid_ds __user *, buf)
 	{
 		struct shmid64_ds tbuf;
 		int result;
-
-		if (!buf) {
-			err = -EFAULT;
-			goto out;
-		}
 
 		if (cmd == SHM_STAT) {
 			shp = shm_lock(ns, shmid);
@@ -716,7 +718,7 @@ SYSCALL_DEFINE3(shmctl, int, shmid, int, cmd, struct shmid_ds __user *, buf)
 			}
 			result = 0;
 		}
-		err=-EACCES;
+		err = -EACCES;
 		if (ipcperms (&shp->shm_perm, S_IRUGO))
 			goto out_unlock;
 		err = security_shm_shmctl(shp, cmd);
@@ -741,20 +743,23 @@ SYSCALL_DEFINE3(shmctl, int, shmid, int, cmd, struct shmid_ds __user *, buf)
 	case SHM_LOCK:
 	case SHM_UNLOCK:
 	{
+		struct file *uninitialized_var(shm_file);
+
+		lru_add_drain_all();  /* drain pagevecs to lru lists */
+
 		shp = shm_lock_check(ns, shmid);
 		if (IS_ERR(shp)) {
 			err = PTR_ERR(shp);
 			goto out;
 		}
 
-		err = audit_ipc_obj(&(shp->shm_perm));
-		if (err)
-			goto out_unlock;
+		audit_ipc_obj(&(shp->shm_perm));
 
 		if (!capable(CAP_IPC_LOCK)) {
+			uid_t euid = current_euid();
 			err = -EPERM;
-			if (current->euid != shp->shm_perm.uid &&
-			    current->euid != shp->shm_perm.cuid)
+			if (euid != shp->shm_perm.uid &&
+			    euid != shp->shm_perm.cuid)
 				goto out_unlock;
 			if (cmd == SHM_LOCK &&
 			    !current->signal->rlim[RLIMIT_MEMLOCK].rlim_cur)
@@ -766,7 +771,7 @@ SYSCALL_DEFINE3(shmctl, int, shmid, int, cmd, struct shmid_ds __user *, buf)
 			goto out_unlock;
 		
 		if(cmd==SHM_LOCK) {
-			struct user_struct * user = current->user;
+			struct user_struct *user = current_user();
 			if (!is_file_hugepages(shp->shm_file)) {
 				err = shmem_lock(shp->shm_file, 1, user);
 				if (!err && !(shp->shm_perm.mode & SHM_LOCKED)){
@@ -817,7 +822,7 @@ long do_shmat(int shmid, char __user *shmaddr, int shmflg, ulong *raddr)
 	struct ipc_namespace *ns;
 	struct shm_file_data *sfd;
 	struct path path;
-	mode_t f_mode;
+	fmode_t f_mode;
 
 	err = -EINVAL;
 	if (shmid < 0)
@@ -887,6 +892,7 @@ long do_shmat(int shmid, char __user *shmaddr, int shmflg, ulong *raddr)
 	file = alloc_file(path.mnt, path.dentry, f_mode, &shm_file_operations);
 	if (!file)
 		goto out_free;
+	ima_counts_get(file);
 
 	file->private_data = sfd;
 	file->f_mapping = shp->shm_file->f_mapping;
@@ -964,10 +970,13 @@ SYSCALL_DEFINE3(shmat, int, shmid, char __user *, shmaddr, int, shmflg)
 SYSCALL_DEFINE1(shmdt, char __user *, shmaddr)
 {
 	struct mm_struct *mm = current->mm;
-	struct vm_area_struct *vma, *next;
+	struct vm_area_struct *vma;
 	unsigned long addr = (unsigned long)shmaddr;
-	loff_t size = 0;
 	int retval = -EINVAL;
+#ifdef CONFIG_MMU
+	loff_t size = 0;
+	struct vm_area_struct *next;
+#endif
 
 	if (addr & ~PAGE_MASK)
 		return retval;
@@ -996,6 +1005,7 @@ SYSCALL_DEFINE1(shmdt, char __user *, shmaddr)
 	 */
 	vma = find_vma(mm, addr);
 
+#ifdef CONFIG_MMU
 	while (vma) {
 		next = vma->vm_next;
 
@@ -1039,6 +1049,17 @@ SYSCALL_DEFINE1(shmdt, char __user *, shmaddr)
 			do_munmap(mm, vma->vm_start, vma->vm_end - vma->vm_start);
 		vma = next;
 	}
+
+#else /* CONFIG_MMU */
+	/* under NOMMU conditions, the exact address to be destroyed must be
+	 * given */
+	retval = -EINVAL;
+	if (vma->vm_start == addr && vma->vm_ops == &shm_vm_ops) {
+		do_munmap(mm, vma->vm_start, vma->vm_end - vma->vm_start);
+		retval = 0;
+	}
+
+#endif
 
 	up_write(&mm->mmap_sem);
 	return retval;

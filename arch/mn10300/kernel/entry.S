@@ -20,7 +20,7 @@
 #include <asm/intctl-regs.h>
 #include <asm/busctl-regs.h>
 #include <asm/timer-regs.h>
-#include <asm/unit/leds.h>
+#include <unit/leds.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/errno.h>
@@ -76,7 +76,7 @@ ENTRY(system_call)
 	cmp	nr_syscalls,d0
 	bcc	syscall_badsys
 	btst	_TIF_SYSCALL_TRACE,(TI_flags,a2)
-	bne	syscall_trace_entry
+	bne	syscall_entry_trace
 syscall_call:
 	add	d0,d0,a1
 	add	a1,a1
@@ -104,11 +104,10 @@ restore_all:
 syscall_exit_work:
 	btst	_TIF_SYSCALL_TRACE,d2
 	beq	work_pending
-	__sti				# could let do_syscall_trace() call
+	__sti				# could let syscall_trace_exit() call
 					# schedule() instead
 	mov	fp,d0
-	mov	1,d1
-	call	do_syscall_trace[],0	# do_syscall_trace(regs,entryexit)
+	call	syscall_trace_exit[],0	# do_syscall_trace(regs)
 	jmp	resume_userspace
 
 	ALIGN
@@ -138,13 +137,11 @@ work_notifysig:
 	jmp	resume_userspace
 
 	# perform syscall entry tracing
-syscall_trace_entry:
+syscall_entry_trace:
 	mov	-ENOSYS,d0
 	mov	d0,(REG_D0,fp)
 	mov	fp,d0
-	clr	d1
-	call	do_syscall_trace[],0
-	mov	(REG_ORIG_D0,fp),d0
+	call	syscall_trace_entry[],0	# returns the syscall number to actually use
 	mov	(REG_D1,fp),d1
 	cmp	nr_syscalls,d0
 	bcs	syscall_call
@@ -180,6 +177,7 @@ ENTRY(resume_userspace)
 
 #ifdef CONFIG_PREEMPT
 ENTRY(resume_kernel)
+	__cli
 	mov	(TI_preempt_count,a2),d0	# non-zero preempt_count ?
 	cmp	0,d0
 	bne	restore_all
@@ -190,7 +188,7 @@ need_resched:
 	mov	(REG_EPSW,fp),d0
 	and	EPSW_IM,d0
 	cmp	EPSW_IM_7,d0		# interrupts off (exception path) ?
-	beq	restore_all
+	bne	restore_all
 	call	preempt_schedule_irq[],0
 	jmp	need_resched
 #endif
@@ -722,6 +720,10 @@ ENTRY(sys_call_table)
 	.long sys_dup3
 	.long sys_pipe2
 	.long sys_inotify_init1
+	.long sys_preadv
+	.long sys_pwritev		/* 335 */
+	.long sys_rt_tgsigqueueinfo
+	.long sys_perf_event_open
 
 
 nr_syscalls=(.-sys_call_table)/4

@@ -26,13 +26,16 @@
 #include <linux/interrupt.h>
 #include <linux/amba/bus.h>
 #include <linux/amba/clcd.h>
+#include <linux/amba/pl061.h>
+#include <linux/amba/mmci.h>
 #include <linux/clocksource.h>
 #include <linux/clockchips.h>
 #include <linux/cnt32_to_63.h>
+#include <linux/io.h>
 
+#include <asm/clkdev.h>
 #include <asm/system.h>
 #include <mach/hardware.h>
-#include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/leds.h>
 #include <asm/hardware/arm_timer.h>
@@ -45,7 +48,6 @@
 #include <asm/mach/irq.h>
 #include <asm/mach/time.h>
 #include <asm/mach/map.h>
-#include <asm/mach/mmc.h>
 
 #include "core.h"
 #include "clock.h"
@@ -95,8 +97,7 @@ sic_handle_irq(unsigned int irq, struct irq_desc *desc)
 
 		irq += IRQ_SIC_START;
 
-		desc = irq_desc + irq;
-		desc_handle_irq(irq, desc);
+		generic_handle_irq(irq);
 	} while (status);
 }
 
@@ -116,7 +117,7 @@ void __init versatile_init_irq(void)
 {
 	unsigned int i;
 
-	vic_init(VA_VIC_BASE, IRQ_VIC_START, ~0);
+	vic_init(VA_VIC_BASE, IRQ_VIC_START, ~0, 0);
 
 	set_irq_chained_handler(IRQ_VICSOURCE31, sic_handle_irq);
 
@@ -335,10 +336,23 @@ static struct resource versatile_i2c_resource = {
 
 static struct platform_device versatile_i2c_device = {
 	.name			= "versatile-i2c",
-	.id			= -1,
+	.id			= 0,
 	.num_resources		= 1,
 	.resource		= &versatile_i2c_resource,
 };
+
+static struct i2c_board_info versatile_i2c_board_info[] = {
+	{
+		I2C_BOARD_INFO("ds1338", 0xd0 >> 1),
+	},
+};
+
+static int __init versatile_i2c_init(void)
+{
+	return i2c_register_board_info(0, versatile_i2c_board_info,
+				       ARRAY_SIZE(versatile_i2c_board_info));
+}
+arch_initcall(versatile_i2c_init);
 
 #define VERSATILE_SYSMCI	(__io_address(VERSATILE_SYS_BASE) + VERSATILE_SYS_MCI_OFFSET)
 
@@ -355,9 +369,11 @@ unsigned int mmc_status(struct device *dev)
 	return readl(VERSATILE_SYSMCI) & mask;
 }
 
-static struct mmc_platform_data mmc0_plat_data = {
+static struct mmci_platform_data mmc0_plat_data = {
 	.ocr_mask	= MMC_VDD_32_33|MMC_VDD_33_34,
 	.status		= mmc_status,
+	.gpio_wp	= -1,
+	.gpio_cd	= -1,
 };
 
 /*
@@ -374,22 +390,60 @@ static const struct icst307_params versatile_oscvco_params = {
 
 static void versatile_oscvco_set(struct clk *clk, struct icst307_vco vco)
 {
-	void __iomem *sys_lock = __io_address(VERSATILE_SYS_BASE) + VERSATILE_SYS_LOCK_OFFSET;
-	void __iomem *sys_osc = __io_address(VERSATILE_SYS_BASE) + VERSATILE_SYS_OSCCLCD_OFFSET;
+	void __iomem *sys = __io_address(VERSATILE_SYS_BASE);
+	void __iomem *sys_lock = sys + VERSATILE_SYS_LOCK_OFFSET;
 	u32 val;
 
-	val = readl(sys_osc) & ~0x7ffff;
+	val = readl(sys + clk->oscoff) & ~0x7ffff;
 	val |= vco.v | (vco.r << 9) | (vco.s << 16);
 
 	writel(0xa05f, sys_lock);
-	writel(val, sys_osc);
+	writel(val, sys + clk->oscoff);
 	writel(0, sys_lock);
 }
 
-static struct clk versatile_clcd_clk = {
-	.name	= "CLCDCLK",
+static struct clk osc4_clk = {
 	.params	= &versatile_oscvco_params,
-	.setvco = versatile_oscvco_set,
+	.oscoff	= VERSATILE_SYS_OSCCLCD_OFFSET,
+	.setvco	= versatile_oscvco_set,
+};
+
+/*
+ * These are fixed clocks.
+ */
+static struct clk ref24_clk = {
+	.rate	= 24000000,
+};
+
+static struct clk_lookup lookups[] = {
+	{	/* UART0 */
+		.dev_id		= "dev:f1",
+		.clk		= &ref24_clk,
+	}, {	/* UART1 */
+		.dev_id		= "dev:f2",
+		.clk		= &ref24_clk,
+	}, {	/* UART2 */
+		.dev_id		= "dev:f3",
+		.clk		= &ref24_clk,
+	}, {	/* UART3 */
+		.dev_id		= "fpga:09",
+		.clk		= &ref24_clk,
+	}, {	/* KMI0 */
+		.dev_id		= "fpga:06",
+		.clk		= &ref24_clk,
+	}, {	/* KMI1 */
+		.dev_id		= "fpga:07",
+		.clk		= &ref24_clk,
+	}, {	/* MMC0 */
+		.dev_id		= "fpga:05",
+		.clk		= &ref24_clk,
+	}, {	/* MMC1 */
+		.dev_id		= "fpga:0b",
+		.clk		= &ref24_clk,
+	}, {	/* CLCD */
+		.dev_id		= "dev:20",
+		.clk		= &osc4_clk,
+	}
 };
 
 /*
@@ -654,6 +708,16 @@ static struct clcd_board clcd_plat_data = {
 	.remove		= versatile_clcd_remove,
 };
 
+static struct pl061_platform_data gpio0_plat_data = {
+	.gpio_base	= 0,
+	.irq_base	= IRQ_GPIO0_START,
+};
+
+static struct pl061_platform_data gpio1_plat_data = {
+	.gpio_base	= 8,
+	.irq_base	= IRQ_GPIO1_START,
+};
+
 #define AACI_IRQ	{ IRQ_AACI, NO_IRQ }
 #define AACI_DMA	{ 0x80, 0x81 }
 #define MMCI0_IRQ	{ IRQ_MMCI0A,IRQ_SIC_MMCI0B }
@@ -716,8 +780,8 @@ AMBA_DEVICE(clcd,  "dev:20",  CLCD,     &clcd_plat_data);
 AMBA_DEVICE(dmac,  "dev:30",  DMAC,     NULL);
 AMBA_DEVICE(sctl,  "dev:e0",  SCTL,     NULL);
 AMBA_DEVICE(wdog,  "dev:e1",  WATCHDOG, NULL);
-AMBA_DEVICE(gpio0, "dev:e4",  GPIO0,    NULL);
-AMBA_DEVICE(gpio1, "dev:e5",  GPIO1,    NULL);
+AMBA_DEVICE(gpio0, "dev:e4",  GPIO0,    &gpio0_plat_data);
+AMBA_DEVICE(gpio1, "dev:e5",  GPIO1,    &gpio1_plat_data);
 AMBA_DEVICE(rtc,   "dev:e8",  RTC,      NULL);
 AMBA_DEVICE(sci0,  "dev:f0",  SCI,      NULL);
 AMBA_DEVICE(uart0, "dev:f1",  UART0,    NULL);
@@ -787,7 +851,8 @@ void __init versatile_init(void)
 {
 	int i;
 
-	clk_register(&versatile_clcd_clk);
+	for (i = 0; i < ARRAY_SIZE(lookups); i++)
+		clkdev_add(&lookups[i]);
 
 	platform_device_register(&versatile_flash_device);
 	platform_device_register(&versatile_i2c_device);
@@ -895,7 +960,7 @@ static struct irqaction versatile_timer_irq = {
 	.handler	= versatile_timer_interrupt,
 };
 
-static cycle_t versatile_get_cycles(void)
+static cycle_t versatile_get_cycles(struct clocksource *cs)
 {
 	return ~readl(TIMER3_VA_BASE + TIMER_VALUE);
 }
@@ -966,7 +1031,7 @@ static void __init versatile_timer_init(void)
 	timer0_clockevent.min_delta_ns =
 		clockevent_delta2ns(0xf, &timer0_clockevent);
 
-	timer0_clockevent.cpumask = cpumask_of_cpu(0);
+	timer0_clockevent.cpumask = cpumask_of(0);
 	clockevents_register_device(&timer0_clockevent);
 }
 

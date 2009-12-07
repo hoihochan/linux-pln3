@@ -10,10 +10,11 @@
  *
  *  This is the "shell" of the ARMv6 processor support.
  */
+#include <linux/init.h>
 #include <linux/linkage.h>
 #include <asm/assembler.h>
 #include <asm/asm-offsets.h>
-#include <asm/elf.h>
+#include <asm/hwcap.h>
 #include <asm/pgtable-hwdef.h>
 #include <asm/pgtable.h>
 
@@ -31,8 +32,10 @@
 
 #ifndef CONFIG_SMP
 #define TTB_FLAGS	TTB_RGN_WBWA
+#define PMD_FLAGS	PMD_SECT_WB
 #else
 #define TTB_FLAGS	TTB_RGN_WBWA|TTB_S
+#define PMD_FLAGS	PMD_SECT_WBWA|PMD_SECT_S
 #endif
 
 ENTRY(cpu_v6_proc_init)
@@ -71,6 +74,8 @@ ENTRY(cpu_v6_reset)
  *	IRQs are already disabled.
  */
 ENTRY(cpu_v6_do_idle)
+	mov	r1, #0
+	mcr	p15, 0, r1, c7, c10, 4		@ DWB - WFI may enter a low-power mode
 	mcr	p15, 0, r1, c7, c0, 4		@ wait for interrupt
 	mov	pc, lr
 
@@ -114,46 +119,12 @@ ENTRY(cpu_v6_switch_mm)
  *		  (hardware version is stored at -1024 bytes)
  *	- pte   - PTE value to store
  *	- ext	- value for extended PTE bits
- *
- *	Permissions:
- *	  YUWD  APX AP1 AP0	SVC	User
- *	  0xxx   0   0   0	no acc	no acc
- *	  100x   1   0   1	r/o	no acc
- *	  10x0   1   0   1	r/o	no acc
- *	  1011   0   0   1	r/w	no acc
- *	  110x   0   1   0	r/w	r/o
- *	  11x0   0   1   0	r/w	r/o
- *	  1111   0   1   1	r/w	r/w
  */
+	armv6_mt_table cpu_v6
+
 ENTRY(cpu_v6_set_pte_ext)
 #ifdef CONFIG_MMU
-	str	r1, [r0], #-2048		@ linux version
-
-	bic	r3, r1, #0x000003f0
-	bic	r3, r3, #0x00000003
-	orr	r3, r3, r2
-	orr	r3, r3, #PTE_EXT_AP0 | 2
-
-	tst	r1, #L_PTE_WRITE
-	tstne	r1, #L_PTE_DIRTY
-	orreq	r3, r3, #PTE_EXT_APX
-
-	tst	r1, #L_PTE_USER
-	orrne	r3, r3, #PTE_EXT_AP1
-	tstne	r3, #PTE_EXT_APX
-	bicne	r3, r3, #PTE_EXT_APX | PTE_EXT_AP0
-
-	tst	r1, #L_PTE_YOUNG
-	biceq	r3, r3, #PTE_EXT_APX | PTE_EXT_AP_MASK
-
-	tst	r1, #L_PTE_EXEC
-	orreq	r3, r3, #PTE_EXT_XN
-
-	tst	r1, #L_PTE_PRESENT
-	moveq	r3, #0
-
-	str	r3, [r0]
-	mcr	p15, 0, r0, c7, c10, 1 @ flush_pte
+	armv6_set_pte_ext cpu_v6
 #endif
 	mov	pc, lr
 
@@ -164,7 +135,7 @@ cpu_v6_name:
 	.asciz	"ARMv6-compatible processor"
 	.align
 
-	.section ".text.init", #alloc, #execinstr
+	__INIT
 
 /*
  *	__v6_setup
@@ -201,6 +172,9 @@ __v6_setup:
 #endif /* CONFIG_MMU */
 	adr	r5, v6_crval
 	ldmia	r5, {r5, r6}
+#ifdef CONFIG_CPU_ENDIAN_BE8
+	orr	r6, r6, #1 << 25		@ big-endian page tables
+#endif
 	mrc	p15, 0, r0, c1, c0, 0		@ read control register
 	bic	r0, r0, r5			@ clear bits them
 	orr	r0, r0, r6			@ set them
@@ -219,7 +193,7 @@ v6_crval:
 	.type	v6_processor_functions, #object
 ENTRY(v6_processor_functions)
 	.word	v6_early_abort
-	.word	pabort_noifar
+	.word	v6_pabort
 	.word	cpu_v6_proc_init
 	.word	cpu_v6_proc_fin
 	.word	cpu_v6_reset
@@ -250,10 +224,9 @@ __v6_proc_info:
 	.long	0x0007b000
 	.long	0x0007f000
 	.long   PMD_TYPE_SECT | \
-		PMD_SECT_BUFFERABLE | \
-		PMD_SECT_CACHEABLE | \
 		PMD_SECT_AP_WRITE | \
-		PMD_SECT_AP_READ
+		PMD_SECT_AP_READ | \
+		PMD_FLAGS
 	.long   PMD_TYPE_SECT | \
 		PMD_SECT_XN | \
 		PMD_SECT_AP_WRITE | \

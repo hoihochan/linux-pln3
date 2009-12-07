@@ -14,9 +14,9 @@
 #ifndef __ASM_AVR32_ATOMIC_H
 #define __ASM_AVR32_ATOMIC_H
 
+#include <linux/types.h>
 #include <asm/system.h>
 
-typedef struct { volatile int counter; } atomic_t;
 #define ATOMIC_INIT(i)  { (i) }
 
 #define atomic_read(v)		((v)->counter)
@@ -196,6 +196,6 @@ static inline int atomic_sub_if_positive(int i, atomic_t *v)
 #define smp_mb__before_atomic_inc()	barrier()
 #define smp_mb__after_atomic_inc()	barrier()
 
-#include <asm-generic/atomic.h>
+#include <asm-generic/atomic-long.h>
 
 #endif /*  __ASM_AVR32_ATOMIC_H */

@@ -3,13 +3,16 @@
 
 #include <linux/fs.h>
 
+struct ctl_table;
+struct user_struct;
+
 #ifdef CONFIG_HUGETLB_PAGE
 
 #include <linux/mempolicy.h>
 #include <linux/shm.h>
 #include <asm/tlbflush.h>
 
-struct ctl_table;
+int PageHuge(struct page *page);
 
 static inline int is_vm_hugetlb_page(struct vm_area_struct *vma)
 {
@@ -17,23 +20,26 @@ static inline int is_vm_hugetlb_page(struct vm_area_struct *vma)
 }
 
 void reset_vma_resv_huge_pages(struct vm_area_struct *vma);
-int hugetlb_sysctl_handler(struct ctl_table *, int, struct file *, void __user *, size_t *, loff_t *);
-int hugetlb_overcommit_handler(struct ctl_table *, int, struct file *, void __user *, size_t *, loff_t *);
-int hugetlb_treat_movable_handler(struct ctl_table *, int, struct file *, void __user *, size_t *, loff_t *);
+int hugetlb_sysctl_handler(struct ctl_table *, int, void __user *, size_t *, loff_t *);
+int hugetlb_overcommit_handler(struct ctl_table *, int, void __user *, size_t *, loff_t *);
+int hugetlb_treat_movable_handler(struct ctl_table *, int, void __user *, size_t *, loff_t *);
 int copy_hugetlb_page_range(struct mm_struct *, struct mm_struct *, struct vm_area_struct *);
-int follow_hugetlb_page(struct mm_struct *, struct vm_area_struct *, struct page **, struct vm_area_struct **, unsigned long *, int *, int, int);
+int follow_hugetlb_page(struct mm_struct *, struct vm_area_struct *,
+			struct page **, struct vm_area_struct **,
+			unsigned long *, int *, int, unsigned int flags);
 void unmap_hugepage_range(struct vm_area_struct *,
 			unsigned long, unsigned long, struct page *);
 void __unmap_hugepage_range(struct vm_area_struct *,
 			unsigned long, unsigned long, struct page *);
 int hugetlb_prefault(struct address_space *, struct vm_area_struct *);
-int hugetlb_report_meminfo(char *);
+void hugetlb_report_meminfo(struct seq_file *);
 int hugetlb_report_node_meminfo(int, char *);
 unsigned long hugetlb_total_pages(void);
 int hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
-			unsigned long address, int write_access);
+			unsigned long address, unsigned int flags);
 int hugetlb_reserve_pages(struct inode *inode, long from, long to,
-						struct vm_area_struct *vma);
+						struct vm_area_struct *vma,
+						int acctflags);
 void hugetlb_unreserve_pages(struct inode *inode, long offset, long freed);
 
 extern unsigned long hugepages_treat_as_movable;
@@ -60,6 +66,11 @@ void hugetlb_change_protection(struct vm_area_struct *vma,
 
 #else /* !CONFIG_HUGETLB_PAGE */
 
+static inline int PageHuge(struct page *page)
+{
+	return 0;
+}
+
 static inline int is_vm_hugetlb_page(struct vm_area_struct *vma)
 {
 	return 0;
@@ -79,7 +90,9 @@ static inline unsigned long hugetlb_total_pages(void)
 #define copy_hugetlb_page_range(src, dst, vma)	({ BUG(); 0; })
 #define hugetlb_prefault(mapping, vma)		({ BUG(); 0; })
 #define unmap_hugepage_range(vma, start, end, page)	BUG()
-#define hugetlb_report_meminfo(buf)		0
+static inline void hugetlb_report_meminfo(struct seq_file *m)
+{
+}
 #define hugetlb_report_node_meminfo(n, buf)	0
 #define follow_huge_pmd(mm, addr, pmd, write)	NULL
 #define follow_huge_pud(mm, addr, pud, write)	NULL
@@ -88,7 +101,7 @@ static inline unsigned long hugetlb_total_pages(void)
 #define pud_huge(x)	0
 #define is_hugepage_only_range(mm, addr, len)	0
 #define hugetlb_free_pgd_range(tlb, addr, end, floor, ceiling) ({BUG(); 0; })
-#define hugetlb_fault(mm, vma, addr, write)	({ BUG(); 0; })
+#define hugetlb_fault(mm, vma, addr, flags)	({ BUG(); 0; })
 
 #define hugetlb_change_protection(vma, address, end, newprot)
 
@@ -98,6 +111,21 @@ static inline unsigned long hugetlb_total_pages(void)
 #endif
 
 #endif /* !CONFIG_HUGETLB_PAGE */
+
+#define HUGETLB_ANON_FILE "anon_hugepage"
+
+enum {
+	/*
+	 * The file will be used as an shm file so shmfs accounting rules
+	 * apply
+	 */
+	HUGETLB_SHMFS_INODE     = 1,
+	/*
+	 * The file is being created on the internal vfs mount and shmfs
+	 * accounting rules do not apply
+	 */
+	HUGETLB_ANONHUGE_INODE  = 2,
+};
 
 #ifdef CONFIG_HUGETLBFS
 struct hugetlbfs_config {
@@ -135,8 +163,9 @@ static inline struct hugetlbfs_sb_info *HUGETLBFS_SB(struct super_block *sb)
 }
 
 extern const struct file_operations hugetlbfs_file_operations;
-extern struct vm_operations_struct hugetlb_vm_ops;
-struct file *hugetlb_file_setup(const char *name, size_t);
+extern const struct vm_operations_struct hugetlb_vm_ops;
+struct file *hugetlb_file_setup(const char *name, size_t size, int acct,
+				struct user_struct **user, int creat_flags);
 int hugetlb_get_quota(struct address_space *mapping, long delta);
 void hugetlb_put_quota(struct address_space *mapping, long delta);
 
@@ -156,9 +185,13 @@ static inline void set_file_hugepages(struct file *file)
 }
 #else /* !CONFIG_HUGETLBFS */
 
-#define is_file_hugepages(file)		0
-#define set_file_hugepages(file)	BUG()
-#define hugetlb_file_setup(name,size)	ERR_PTR(-ENOSYS)
+#define is_file_hugepages(file)			0
+#define set_file_hugepages(file)		BUG()
+static inline struct file *hugetlb_file_setup(const char *name, size_t size,
+		int acctflag, struct user_struct **user, int creat_flags)
+{
+	return ERR_PTR(-ENOSYS);
+}
 
 #endif /* !CONFIG_HUGETLBFS */
 
@@ -173,7 +206,8 @@ unsigned long hugetlb_get_unmapped_area(struct file *file, unsigned long addr,
 #define HSTATE_NAME_LEN 32
 /* Defines one hugetlb page size */
 struct hstate {
-	int hugetlb_next_nid;
+	int next_nid_to_alloc;
+	int next_nid_to_free;
 	unsigned int order;
 	unsigned long mask;
 	unsigned long max_huge_pages;
@@ -231,6 +265,10 @@ static inline unsigned long huge_page_size(struct hstate *h)
 	return (unsigned long)PAGE_SIZE << h->order;
 }
 
+extern unsigned long vma_kernel_pagesize(struct vm_area_struct *vma);
+
+extern unsigned long vma_mmu_pagesize(struct vm_area_struct *vma);
+
 static inline unsigned long huge_page_mask(struct hstate *h)
 {
 	return h->mask;
@@ -271,6 +309,8 @@ struct hstate {};
 #define hstate_inode(i) NULL
 #define huge_page_size(h) PAGE_SIZE
 #define huge_page_mask(h) PAGE_MASK
+#define vma_kernel_pagesize(v) PAGE_SIZE
+#define vma_mmu_pagesize(v) PAGE_SIZE
 #define huge_page_order(h) 0
 #define huge_page_shift(h) PAGE_SHIFT
 static inline unsigned int pages_per_huge_page(struct hstate *h)

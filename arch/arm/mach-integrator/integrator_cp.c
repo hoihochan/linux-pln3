@@ -19,9 +19,12 @@
 #include <linux/amba/bus.h>
 #include <linux/amba/kmi.h>
 #include <linux/amba/clcd.h>
+#include <linux/amba/mmci.h>
+#include <linux/io.h>
 
+#include <asm/clkdev.h>
+#include <mach/clkdev.h>
 #include <mach/hardware.h>
-#include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/setup.h>
 #include <asm/mach-types.h>
@@ -33,12 +36,10 @@
 #include <asm/mach/arch.h>
 #include <asm/mach/flash.h>
 #include <asm/mach/irq.h>
-#include <asm/mach/mmc.h>
 #include <asm/mach/map.h>
 #include <asm/mach/time.h>
 
 #include "common.h"
-#include "clock.h"
 
 #define INTCP_PA_MMC_BASE		0x1c000000
 #define INTCP_PA_AACI_BASE		0x1d000000
@@ -48,14 +49,14 @@
 
 #define INTCP_PA_CLCD_BASE		0xc0000000
 
-#define INTCP_VA_CIC_BASE		0xf1000040
-#define INTCP_VA_PIC_BASE		0xf1400000
-#define INTCP_VA_SIC_BASE		0xfca00000
+#define INTCP_VA_CIC_BASE		IO_ADDRESS(INTEGRATOR_HDR_BASE) + 0x40
+#define INTCP_VA_PIC_BASE		IO_ADDRESS(INTEGRATOR_IC_BASE)
+#define INTCP_VA_SIC_BASE		IO_ADDRESS(0xca000000)
 
 #define INTCP_PA_ETH_BASE		0xc8000000
 #define INTCP_ETH_SIZE			0x10
 
-#define INTCP_VA_CTRL_BASE		0xfcb00000
+#define INTCP_VA_CTRL_BASE		IO_ADDRESS(0xcb000000)
 #define INTCP_FLASHPROG			0x04
 #define CINTEGRATOR_FLASHPROG_FLVPPEN	(1 << 0)
 #define CINTEGRATOR_FLASHPROG_FLWREN	(1 << 1)
@@ -120,12 +121,12 @@ static struct map_desc intcp_io_desc[] __initdata = {
 		.length		= SZ_4K,
 		.type		= MT_DEVICE
 	}, {
-		.virtual	= 0xfca00000,
+		.virtual	= IO_ADDRESS(0xca000000),
 		.pfn		= __phys_to_pfn(0xca000000),
 		.length		= SZ_4K,
 		.type		= MT_DEVICE
 	}, {
-		.virtual	= 0xfcb00000,
+		.virtual	= IO_ADDRESS(0xcb000000),
 		.pfn		= __phys_to_pfn(0xcb000000),
 		.length		= SZ_4K,
 		.type		= MT_DEVICE
@@ -217,8 +218,7 @@ sic_handle_irq(unsigned int irq, struct irq_desc *desc)
 
 		irq += IRQ_SIC_START;
 
-		desc = irq_desc + irq;
-		desc_handle_irq(irq, desc);
+		generic_handle_irq(irq);
 	} while (status);
 }
 
@@ -290,15 +290,16 @@ static void cp_auxvco_set(struct clk *clk, struct icst525_vco vco)
 	writel(0, CM_LOCK);
 }
 
-static struct clk cp_clcd_clk = {
-	.name	= "CLCDCLK",
+static struct clk cp_auxclk = {
 	.params	= &cp_auxvco_params,
 	.setvco = cp_auxvco_set,
 };
 
-static struct clk cp_mmci_clk = {
-	.name	= "MCLK",
-	.rate	= 14745600,
+static struct clk_lookup cp_lookups[] = {
+	{	/* CLCD */
+		.dev_id		= "mb:c0",
+		.clk		= &cp_auxclk,
+	},
 };
 
 /*
@@ -393,20 +394,22 @@ static struct platform_device *intcp_devs[] __initdata = {
  */
 static unsigned int mmc_status(struct device *dev)
 {
-	unsigned int status = readl(0xfca00004);
-	writel(8, 0xfcb00008);
+	unsigned int status = readl(IO_ADDRESS(0xca000000) + 4);
+	writel(8, IO_ADDRESS(0xcb000000) + 8);
 
 	return status & 8;
 }
 
-static struct mmc_platform_data mmc_data = {
+static struct mmci_platform_data mmc_data = {
 	.ocr_mask	= MMC_VDD_32_33|MMC_VDD_33_34,
 	.status		= mmc_status,
+	.gpio_wp	= -1,
+	.gpio_cd	= -1,
 };
 
 static struct amba_device mmc_device = {
 	.dev		= {
-		.bus_id	= "mb:1c",
+		.init_name = "mb:1c",
 		.platform_data = &mmc_data,
 	},
 	.res		= {
@@ -420,7 +423,7 @@ static struct amba_device mmc_device = {
 
 static struct amba_device aaci_device = {
 	.dev		= {
-		.bus_id	= "mb:1d",
+		.init_name = "mb:1d",
 	},
 	.res		= {
 		.start	= INTCP_PA_AACI_BASE,
@@ -531,7 +534,7 @@ static struct clcd_board clcd_data = {
 
 static struct amba_device clcd_device = {
 	.dev		= {
-		.bus_id	= "mb:c0",
+		.init_name = "mb:c0",
 		.coherent_dma_mask = ~0,
 		.platform_data = &clcd_data,
 	},
@@ -555,8 +558,8 @@ static void __init intcp_init(void)
 {
 	int i;
 
-	clk_register(&cp_clcd_clk);
-	clk_register(&cp_mmci_clk);
+	for (i = 0; i < ARRAY_SIZE(cp_lookups); i++)
+		clkdev_add(&cp_lookups[i]);
 
 	platform_add_devices(intcp_devs, ARRAY_SIZE(intcp_devs));
 

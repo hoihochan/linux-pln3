@@ -59,7 +59,7 @@ struct ifb_private {
 static int numifbs = 2;
 
 static void ri_tasklet(unsigned long dev);
-static int ifb_xmit(struct sk_buff *skb, struct net_device *dev);
+static netdev_tx_t ifb_xmit(struct sk_buff *skb, struct net_device *dev);
 static int ifb_open(struct net_device *dev);
 static int ifb_close(struct net_device *dev);
 
@@ -98,12 +98,13 @@ static void ri_tasklet(unsigned long dev)
 		stats->tx_packets++;
 		stats->tx_bytes +=skb->len;
 
-		skb->dev = __dev_get_by_index(&init_net, skb->iif);
+		skb->dev = dev_get_by_index(&init_net, skb->iif);
 		if (!skb->dev) {
 			dev_kfree_skb(skb);
 			stats->tx_dropped++;
 			break;
 		}
+		dev_put(skb->dev);
 		skb->iif = _dev->ifindex;
 
 		if (from & AT_EGRESS) {
@@ -137,28 +138,33 @@ resched:
 
 }
 
+static const struct net_device_ops ifb_netdev_ops = {
+	.ndo_open	= ifb_open,
+	.ndo_stop	= ifb_close,
+	.ndo_start_xmit	= ifb_xmit,
+	.ndo_validate_addr = eth_validate_addr,
+};
+
 static void ifb_setup(struct net_device *dev)
 {
 	/* Initialize the device structure. */
-	dev->hard_start_xmit = ifb_xmit;
-	dev->open = &ifb_open;
-	dev->stop = &ifb_close;
 	dev->destructor = free_netdev;
+	dev->netdev_ops = &ifb_netdev_ops;
 
 	/* Fill in device structure with ethernet-generic values. */
 	ether_setup(dev);
 	dev->tx_queue_len = TX_Q_LIMIT;
-	dev->change_mtu = NULL;
+
 	dev->flags |= IFF_NOARP;
 	dev->flags &= ~IFF_MULTICAST;
+	dev->priv_flags &= ~IFF_XMIT_DST_RELEASE;
 	random_ether_addr(dev->dev_addr);
 }
 
-static int ifb_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t ifb_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct ifb_private *dp = netdev_priv(dev);
 	struct net_device_stats *stats = &dev->stats;
-	int ret = 0;
 	u32 from = G_TC_FROM(skb->tc_verd);
 
 	stats->rx_packets++;
@@ -167,7 +173,7 @@ static int ifb_xmit(struct sk_buff *skb, struct net_device *dev)
 	if (!(from & (AT_INGRESS|AT_EGRESS)) || !skb->iif) {
 		dev_kfree_skb(skb);
 		stats->rx_dropped++;
-		return ret;
+		return NETDEV_TX_OK;
 	}
 
 	if (skb_queue_len(&dp->rq) >= dev->tx_queue_len) {
@@ -181,7 +187,7 @@ static int ifb_xmit(struct sk_buff *skb, struct net_device *dev)
 		tasklet_schedule(&dp->ifb_tasklet);
 	}
 
-	return ret;
+	return NETDEV_TX_OK;
 }
 
 static int ifb_close(struct net_device *dev)

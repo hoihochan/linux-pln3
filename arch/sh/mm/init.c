@@ -23,7 +23,19 @@
 
 DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
 pgd_t swapper_pg_dir[PTRS_PER_PGD];
-unsigned long cached_to_uncached = 0;
+
+#ifdef CONFIG_SUPERH32
+/*
+ * Handle trivial transitions between cached and uncached
+ * segments, making use of the 1:1 mapping relationship in
+ * 512MB lowmem.
+ *
+ * This is the offset of the uncached section from its cached alias.
+ * Default value only valid in 29 bit mode, in 32bit mode will be
+ * overridden in pmb_init.
+ */
+unsigned long cached_to_uncached = P2SEG - P1SEG;
+#endif
 
 #ifdef CONFIG_MMU
 static void set_pte_phys(unsigned long addr, unsigned long phys, pgprot_t prot)
@@ -58,9 +70,7 @@ static void set_pte_phys(unsigned long addr, unsigned long phys, pgprot_t prot)
 	}
 
 	set_pte(pte, pfn_pte(phys >> PAGE_SHIFT, prot));
-
-	if (cached_to_uncached)
-		flush_tlb_one(get_asid(), addr);
+	local_flush_tlb_one(get_asid(), addr);
 }
 
 /*
@@ -96,28 +106,31 @@ void __init page_table_range_init(unsigned long start, unsigned long end,
 	pgd_t *pgd;
 	pud_t *pud;
 	pmd_t *pmd;
-	int pgd_idx;
+	pte_t *pte;
+	int i, j, k;
 	unsigned long vaddr;
 
-	vaddr = start & PMD_MASK;
-	end = (end + PMD_SIZE - 1) & PMD_MASK;
-	pgd_idx = pgd_index(vaddr);
-	pgd = pgd_base + pgd_idx;
+	vaddr = start;
+	i = __pgd_offset(vaddr);
+	j = __pud_offset(vaddr);
+	k = __pmd_offset(vaddr);
+	pgd = pgd_base + i;
 
-	for ( ; (pgd_idx < PTRS_PER_PGD) && (vaddr != end); pgd++, pgd_idx++) {
-		BUG_ON(pgd_none(*pgd));
-		pud = pud_offset(pgd, 0);
-		BUG_ON(pud_none(*pud));
-		pmd = pmd_offset(pud, 0);
-
-		if (!pmd_present(*pmd)) {
-			pte_t *pte_table;
-			pte_table = (pte_t *)alloc_bootmem_low_pages(PAGE_SIZE);
-			memset(pte_table, 0, PAGE_SIZE);
-			pmd_populate_kernel(&init_mm, pmd, pte_table);
+	for ( ; (i < PTRS_PER_PGD) && (vaddr != end); pgd++, i++) {
+		pud = (pud_t *)pgd;
+		for ( ; (j < PTRS_PER_PUD) && (vaddr != end); pud++, j++) {
+			pmd = (pmd_t *)pud;
+			for (; (k < PTRS_PER_PMD) && (vaddr != end); pmd++, k++) {
+				if (pmd_none(*pmd)) {
+					pte = (pte_t *) alloc_bootmem_low_pages(PAGE_SIZE);
+					pmd_populate_kernel(&init_mm, pmd, pte);
+					BUG_ON(pte != pte_offset_kernel(pmd, 0));
+				}
+				vaddr += PMD_SIZE;
+			}
+			k = 0;
 		}
-
-		vaddr += PMD_SIZE;
+		j = 0;
 	}
 }
 #endif	/* CONFIG_MMU */
@@ -128,6 +141,7 @@ void __init page_table_range_init(unsigned long start, unsigned long end,
 void __init paging_init(void)
 {
 	unsigned long max_zone_pfns[MAX_NR_ZONES];
+	unsigned long vaddr, end;
 	int nid;
 
 	/* We don't need to map the kernel through the TLB, as
@@ -139,10 +153,16 @@ void __init paging_init(void)
 	 * check for a null value. */
 	set_TTB(swapper_pg_dir);
 
-	/* Populate the relevant portions of swapper_pg_dir so that
+	/*
+	 * Populate the relevant portions of swapper_pg_dir so that
 	 * we can use the fixmap entries without calling kmalloc.
-	 * pte's will be filled in by __set_fixmap(). */
-	page_table_range_init(FIXADDR_START, FIXADDR_TOP, swapper_pg_dir);
+	 * pte's will be filled in by __set_fixmap().
+	 */
+	vaddr = __fix_to_virt(__end_of_fixed_addresses - 1) & PMD_MASK;
+	end = (FIXADDR_TOP + PMD_SIZE - 1) & PMD_MASK;
+	page_table_range_init(vaddr, end, swapper_pg_dir);
+
+	kmap_coherent_init();
 
 	memset(max_zone_pfns, 0, sizeof(max_zone_pfns));
 
@@ -162,23 +182,9 @@ void __init paging_init(void)
 
 	free_area_init_nodes(max_zone_pfns);
 
-#ifdef CONFIG_SUPERH32
 	/* Set up the uncached fixmap */
 	set_fixmap_nocache(FIX_UNCACHED, __pa(&__uncached_start));
-
-#ifdef CONFIG_29BIT
-	/*
-	 * Handle trivial transitions between cached and uncached
-	 * segments, making use of the 1:1 mapping relationship in
-	 * 512MB lowmem.
-	 */
-	cached_to_uncached = P2SEG - P1SEG;
-#endif
-#endif
 }
-
-static struct kcore_list kcore_mem, kcore_vmalloc;
-int after_bootmem = 0;
 
 void __init mem_init(void)
 {
@@ -207,29 +213,24 @@ void __init mem_init(void)
 			high_memory = node_high_memory;
 	}
 
+	/* Set this up early, so we can take care of the zero page */
+	cpu_cache_init();
+
 	/* clear the zero-page */
 	memset(empty_zero_page, 0, PAGE_SIZE);
 	__flush_wback_region(empty_zero_page, PAGE_SIZE);
-
-	after_bootmem = 1;
 
 	codesize =  (unsigned long) &_etext - (unsigned long) &_text;
 	datasize =  (unsigned long) &_edata - (unsigned long) &_etext;
 	initsize =  (unsigned long) &__init_end - (unsigned long) &__init_begin;
 
-	kclist_add(&kcore_mem, __va(0), max_low_pfn << PAGE_SHIFT);
-	kclist_add(&kcore_vmalloc, (void *)VMALLOC_START,
-		   VMALLOC_END - VMALLOC_START);
-
 	printk(KERN_INFO "Memory: %luk/%luk available (%dk kernel code, "
 	       "%dk data, %dk init)\n",
-		(unsigned long) nr_free_pages() << (PAGE_SHIFT-10),
+		nr_free_pages() << (PAGE_SHIFT-10),
 		num_physpages << (PAGE_SHIFT-10),
 		codesize >> 10,
 		datasize >> 10,
 		initsize >> 10);
-
-	p3_cache_init();
 
 	/* Initialize the vDSO */
 	vsyscall_init();
@@ -265,6 +266,35 @@ void free_initrd_mem(unsigned long start, unsigned long end)
 }
 #endif
 
+#if THREAD_SHIFT < PAGE_SHIFT
+static struct kmem_cache *thread_info_cache;
+
+struct thread_info *alloc_thread_info(struct task_struct *tsk)
+{
+	struct thread_info *ti;
+
+	ti = kmem_cache_alloc(thread_info_cache, GFP_KERNEL);
+	if (unlikely(ti == NULL))
+		return NULL;
+#ifdef CONFIG_DEBUG_STACK_USAGE
+	memset(ti, 0, THREAD_SIZE);
+#endif
+	return ti;
+}
+
+void free_thread_info(struct thread_info *ti)
+{
+	kmem_cache_free(thread_info_cache, ti);
+}
+
+void thread_info_cache_init(void)
+{
+	thread_info_cache = kmem_cache_create("thread_info", THREAD_SIZE,
+					      THREAD_SIZE, 0, NULL);
+	BUG_ON(thread_info_cache == NULL);
+}
+#endif /* THREAD_SHIFT < PAGE_SHIFT */
+
 #ifdef CONFIG_MEMORY_HOTPLUG
 int arch_add_memory(int nid, u64 start, u64 size)
 {
@@ -276,7 +306,8 @@ int arch_add_memory(int nid, u64 start, u64 size)
 	pgdat = NODE_DATA(nid);
 
 	/* We only have ZONE_NORMAL, so this is easy.. */
-	ret = __add_pages(pgdat->node_zones + ZONE_NORMAL, start_pfn, nr_pages);
+	ret = __add_pages(nid, pgdat->node_zones + ZONE_NORMAL,
+				start_pfn, nr_pages);
 	if (unlikely(ret))
 		printk("%s: Failed, __add_pages() == %d\n", __func__, ret);
 
@@ -292,4 +323,4 @@ int memory_add_physaddr_to_nid(u64 addr)
 }
 EXPORT_SYMBOL_GPL(memory_add_physaddr_to_nid);
 #endif
-#endif
+#endif /* CONFIG_MEMORY_HOTPLUG */

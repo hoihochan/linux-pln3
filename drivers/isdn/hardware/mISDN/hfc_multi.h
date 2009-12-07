@@ -2,10 +2,6 @@
  * see notice in hfc_multi.c
  */
 
-extern void ztdummy_extern_interrupt(void);
-extern void ztdummy_register_interrupt(void);
-extern int ztdummy_unregister_interrupt(void);
-
 #define DEBUG_HFCMULTI_FIFO	0x00010000
 #define	DEBUG_HFCMULTI_CRC	0x00020000
 #define	DEBUG_HFCMULTI_INIT	0x00040000
@@ -13,12 +9,23 @@ extern int ztdummy_unregister_interrupt(void);
 #define	DEBUG_HFCMULTI_MODE	0x00100000
 #define	DEBUG_HFCMULTI_MSG	0x00200000
 #define	DEBUG_HFCMULTI_STATE	0x00400000
+#define	DEBUG_HFCMULTI_FILL	0x00800000
 #define	DEBUG_HFCMULTI_SYNC	0x01000000
 #define	DEBUG_HFCMULTI_DTMF	0x02000000
 #define	DEBUG_HFCMULTI_LOCK	0x80000000
 
 #define	PCI_ENA_REGIO	0x01
 #define	PCI_ENA_MEMIO	0x02
+
+#define XHFC_IRQ	4		/* SIU_IRQ2 */
+#define XHFC_MEMBASE	0xFE000000
+#define XHFC_MEMSIZE    0x00001000
+#define XHFC_OFFSET	0x00001000
+#define PA_XHFC_A0	0x0020		/* PA10 */
+#define PB_XHFC_IRQ1	0x00000100	/* PB23 */
+#define PB_XHFC_IRQ2	0x00000200	/* PB22 */
+#define PB_XHFC_IRQ3	0x00000400	/* PB21 */
+#define PB_XHFC_IRQ4	0x00000800	/* PB20 */
 
 /*
  * NOTE: some registers are assigned multiple times due to different modes
@@ -47,6 +54,7 @@ struct hfc_chan {
 	int		conf;	/* conference setting of TX slot */
 	int		txpending;	/* if there is currently data in */
 					/* the FIFO 0=no, 1=yes, 2=splloop */
+	int		Zfill;	/* rx-fifo level on last hfcmulti_tx */
 	int		rx_off; /* set to turn fifo receive off */
 	int		coeff_count; /* curren coeff block */
 	s32		*coeff; /* memory pointer to 8 coeff blocks */
@@ -65,6 +73,7 @@ struct hfcm_hw {
 	u_char	r_sci_msk;
 	u_char	r_tx0, r_tx1;
 	u_char	a_st_ctrl0[8];
+	u_char	r_bert_wd_md;
 	timer_t	timer;
 };
 
@@ -82,6 +91,11 @@ struct hfcm_hw {
 #define	HFC_CFG_CRC4		10 /* disable CRC-4 Multiframe mode, */
 					/* use double frame instead. */
 
+#define HFC_TYPE_E1		1 /* controller is HFC-E1 */
+#define HFC_TYPE_4S		4 /* controller is HFC-4S */
+#define HFC_TYPE_8S		8 /* controller is HFC-8S */
+#define HFC_TYPE_XHFC		5 /* controller is XHFC */
+
 #define	HFC_CHIP_EXRAM_128	0 /* external ram 128k */
 #define	HFC_CHIP_EXRAM_512	1 /* external ram 256k */
 #define	HFC_CHIP_REVISION0	2 /* old fifo handling */
@@ -89,19 +103,22 @@ struct hfcm_hw {
 #define	HFC_CHIP_PCM_MASTER	4 /* PCM is master */
 #define	HFC_CHIP_RX_SYNC	5 /* disable pll sync for pcm */
 #define	HFC_CHIP_DTMF		6 /* DTMF decoding is enabled */
-#define	HFC_CHIP_ULAW		7 /* ULAW mode */
-#define	HFC_CHIP_CLOCK2		8 /* double clock mode */
-#define	HFC_CHIP_E1CLOCK_GET	9 /* always get clock from E1 interface */
-#define	HFC_CHIP_E1CLOCK_PUT	10 /* always put clock from E1 interface */
-#define	HFC_CHIP_WATCHDOG	11 /* whether we should send signals */
+#define	HFC_CHIP_CONF		7 /* conference handling is enabled */
+#define	HFC_CHIP_ULAW		8 /* ULAW mode */
+#define	HFC_CHIP_CLOCK2		9 /* double clock mode */
+#define	HFC_CHIP_E1CLOCK_GET	10 /* always get clock from E1 interface */
+#define	HFC_CHIP_E1CLOCK_PUT	11 /* always put clock from E1 interface */
+#define	HFC_CHIP_WATCHDOG	12 /* whether we should send signals */
 					/* to the watchdog */
-#define	HFC_CHIP_B410P		12 /* whether we have a b410p with echocan in */
+#define	HFC_CHIP_B410P		13 /* whether we have a b410p with echocan in */
 					/* hw */
-#define	HFC_CHIP_PLXSD		13 /* whether we have a Speech-Design PLX */
+#define	HFC_CHIP_PLXSD		14 /* whether we have a Speech-Design PLX */
+#define	HFC_CHIP_EMBSD          15 /* whether we have a SD Embedded board */
 
 #define HFC_IO_MODE_PCIMEM	0x00 /* normal memory mapped IO */
 #define HFC_IO_MODE_REGIO	0x01 /* PCI io access */
 #define HFC_IO_MODE_PLXSD	0x02 /* access HFC via PLX9030 */
+#define HFC_IO_MODE_EMBSD	0x03 /* direct access */
 
 /* table entry in the PCI devices list */
 struct hm_map {
@@ -114,6 +131,7 @@ struct hm_map {
 	int opticalsupport;
 	int dip_type;
 	int io_mode;
+	int irq;
 };
 
 struct hfc_multi {
@@ -121,7 +139,7 @@ struct hfc_multi {
 	struct hm_map	*mtyp;
 	int		id;
 	int		pcm;	/* id of pcm bus */
-	int		type;
+	int		ctype;	/* controller type */
 	int		ports;
 
 	u_int		irq;	/* irq used by card */
@@ -161,15 +179,23 @@ struct hfc_multi {
 				int len);
 	void		(*write_fifo)(struct hfc_multi *hc, u_char *data,
 				int len);
-	u_long		pci_origmembase, plx_origmembase, dsp_origmembase;
-	u_char		*pci_membase; /* PCI memory (MUST BE BYTE POINTER) */
-	u_char		*plx_membase; /* PLX memory */
-	u_char		*dsp_membase; /* DSP on PLX */
+	u_long		pci_origmembase, plx_origmembase;
+	void __iomem	*pci_membase; /* PCI memory */
+	void __iomem	*plx_membase; /* PLX memory */
+	u_long		xhfc_origmembase;
+	u_char		*xhfc_membase;
+	u_long		*xhfc_memaddr, *xhfc_memdata;
+#ifdef CONFIG_MISDN_HFCMULTI_8xx
+	struct immap	*immap;
+#endif
+	u_long		pb_irqmsk;	/* Portbit mask to check the IRQ line */
 	u_long		pci_iobase; /* PCI IO */
 	struct hfcm_hw	hw;	/* remember data of write-only-registers */
 
 	u_long		chip;	/* chip configuration */
 	int		masterclk; /* port that provides master clock -1=off */
+	unsigned char	silence;/* silence byte */
+	unsigned char	silence_data[128];/* silence block */
 	int		dtmf;	/* flag that dtmf is currently in process */
 	int		Flen;	/* F-buffer size */
 	int		Zlen;	/* Z-buffer size (must be int for calculation)*/
@@ -197,6 +223,9 @@ struct hfc_multi {
 	int		e1_resync; /* resync jobs */
 
 	spinlock_t	lock;	/* the lock */
+
+	struct mISDNclock *iclock; /* isdn clock support */
+	int		iclock_on;
 
 	/*
 	 * the channel index is counted from 0, regardless where the channel

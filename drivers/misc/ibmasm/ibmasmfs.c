@@ -97,7 +97,7 @@ static int ibmasmfs_get_super(struct file_system_type *fst,
 	return get_sb_single(fst, flags, data, ibmasmfs_fill_super, mnt);
 }
 
-static struct super_operations ibmasmfs_s_ops = {
+static const struct super_operations ibmasmfs_s_ops = {
 	.statfs		= simple_statfs,
 	.drop_inode	= generic_delete_inode,
 };
@@ -146,8 +146,6 @@ static struct inode *ibmasmfs_make_inode(struct super_block *sb, int mode)
 
 	if (ret) {
 		ret->i_mode = mode;
-		ret->i_uid = ret->i_gid = 0;
-		ret->i_blocks = 0;
 		ret->i_atime = ret->i_mtime = ret->i_ctime = CURRENT_TIME;
 	}
 	return ret;

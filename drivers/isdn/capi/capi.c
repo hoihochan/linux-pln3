@@ -277,7 +277,7 @@ static void capiminor_free(struct capiminor *mp)
 	list_del(&mp->list);
 	write_unlock_irqrestore(&capiminor_list_lock, flags);
 
-	if (mp->ttyskb) kfree_skb(mp->ttyskb);
+	kfree_skb(mp->ttyskb);
 	mp->ttyskb = NULL;
 	skb_queue_purge(&mp->inqueue);
 	skb_queue_purge(&mp->outqueue);
@@ -603,7 +603,7 @@ static void capi_recv_message(struct capi20_appl *ap, struct sk_buff *skb)
 
 	if (CAPIMSG_CMD(skb->data) == CAPI_CONNECT_B3_CONF) {
 		u16 info = CAPIMSG_U16(skb->data, 12); // Info field
-		if (info == 0) {
+		if ((info & 0xff00) == 0) {
 			mutex_lock(&cdev->ncci_list_mtx);
 			capincci_alloc(cdev, CAPIMSG_NCCI(skb->data));
 			mutex_unlock(&cdev->ncci_list_mtx);
@@ -1231,7 +1231,7 @@ static int capinc_tty_ioctl(struct tty_struct *tty, struct file * file,
 	int error = 0;
 	switch (cmd) {
 	default:
-		error = n_tty_ioctl (tty, file, cmd, arg);
+		error = n_tty_ioctl_helper(tty, file, cmd, arg);
 		break;
 	}
 	return error;
@@ -1331,12 +1331,6 @@ static void capinc_tty_send_xchar(struct tty_struct *tty, char ch)
 #endif
 }
 
-static int capinc_tty_read_proc(char *page, char **start, off_t off,
-				int count, int *eof, void *data)
-{
-	return 0;
-}
-
 static struct tty_driver *capinc_tty_driver;
 
 static const struct tty_operations capinc_ops = {
@@ -1358,7 +1352,6 @@ static const struct tty_operations capinc_ops = {
 	.flush_buffer = capinc_tty_flush_buffer,
 	.set_ldisc = capinc_tty_set_ldisc,
 	.send_xchar = capinc_tty_send_xchar,
-	.read_proc = capinc_tty_read_proc,
 };
 
 static int capinc_tty_init(void)
@@ -1553,8 +1546,7 @@ static int __init capi_init(void)
 		return PTR_ERR(capi_class);
 	}
 
-	device_create_drvdata(capi_class, NULL, MKDEV(capi_major, 0), NULL,
-			      "capi");
+	device_create(capi_class, NULL, MKDEV(capi_major, 0), NULL, "capi");
 
 #ifdef CONFIG_ISDN_CAPI_MIDDLEWARE
 	if (capinc_tty_init() < 0) {

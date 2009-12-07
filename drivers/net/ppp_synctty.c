@@ -182,15 +182,13 @@ static DEFINE_RWLOCK(disc_data_lock);
 
 static struct syncppp *sp_get(struct tty_struct *tty)
 {
-	unsigned long flags;
 	struct syncppp *ap;
 
-	read_lock_irqsave(&disc_data_lock, flags);
+	read_lock(&disc_data_lock);
 	ap = tty->disc_data;
 	if (ap != NULL)
 		atomic_inc(&ap->refcnt);
-	read_unlock_irqrestore(&disc_data_lock, flags);
-
+	read_unlock(&disc_data_lock);
 	return ap;
 }
 
@@ -208,6 +206,7 @@ ppp_sync_open(struct tty_struct *tty)
 {
 	struct syncppp *ap;
 	int err;
+	int speed;
 
 	if (tty->ops->write == NULL)
 		return -EOPNOTSUPP;
@@ -236,6 +235,8 @@ ppp_sync_open(struct tty_struct *tty)
 	ap->chan.ops = &sync_ops;
 	ap->chan.mtu = PPP_MRU;
 	ap->chan.hdrlen = 2;	/* for A/C bytes */
+	speed = tty_get_baud_rate(tty);
+	ap->chan.speed = speed;
 	err = ppp_register_channel(&ap->chan);
 	if (err)
 		goto out_free;
@@ -261,13 +262,12 @@ ppp_sync_open(struct tty_struct *tty)
 static void
 ppp_sync_close(struct tty_struct *tty)
 {
-	unsigned long flags;
 	struct syncppp *ap;
 
-	write_lock_irqsave(&disc_data_lock, flags);
+	write_lock_irq(&disc_data_lock);
 	ap = tty->disc_data;
 	tty->disc_data = NULL;
-	write_unlock_irqrestore(&disc_data_lock, flags);
+	write_unlock_irq(&disc_data_lock);
 	if (!ap)
 		return;
 
@@ -284,8 +284,7 @@ ppp_sync_close(struct tty_struct *tty)
 
 	ppp_unregister_channel(&ap->chan);
 	skb_queue_purge(&ap->rqueue);
-	if (ap->tpkt)
-		kfree_skb(ap->tpkt);
+	kfree_skb(ap->tpkt);
 	kfree(ap);
 }
 
@@ -336,9 +335,6 @@ ppp_synctty_ioctl(struct tty_struct *tty, struct file *file,
 	err = -EFAULT;
 	switch (cmd) {
 	case PPPIOCGCHAN:
-		err = -ENXIO;
-		if (!ap)
-			break;
 		err = -EFAULT;
 		if (put_user(ppp_channel_index(&ap->chan), p))
 			break;
@@ -346,9 +342,6 @@ ppp_synctty_ioctl(struct tty_struct *tty, struct file *file,
 		break;
 
 	case PPPIOCGUNIT:
-		err = -ENXIO;
-		if (!ap)
-			break;
 		err = -EFAULT;
 		if (put_user(ppp_unit_number(&ap->chan), p))
 			break;

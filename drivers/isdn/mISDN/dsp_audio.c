@@ -30,7 +30,7 @@ EXPORT_SYMBOL(dsp_audio_s16_to_law);
 /* alaw -> ulaw */
 u8 dsp_audio_alaw_to_ulaw[256];
 /* ulaw -> alaw */
-u8 dsp_audio_ulaw_to_alaw[256];
+static u8 dsp_audio_ulaw_to_alaw[256];
 u8 dsp_silence;
 
 
@@ -210,9 +210,8 @@ dsp_audio_generate_seven(void)
 		j = 0;
 		for (k = 0; k < 256; k++) {
 			if (dsp_audio_alaw_to_s32[k]
-				< dsp_audio_alaw_to_s32[i]) {
-			j++;
-			}
+			    < dsp_audio_alaw_to_s32[i])
+				j++;
 		}
 		sorted_alaw[j] = i;
 	}

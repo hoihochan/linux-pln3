@@ -56,7 +56,6 @@ extern unsigned int sun4u_build_msi(u32 portid, unsigned int *virt_irq_p,
 				    unsigned long imap_base,
 				    unsigned long iclr_base);
 extern void sun4u_destroy_msi(unsigned int virt_irq);
-extern unsigned int sbus_build_irq(void *sbus, unsigned int ino);
 
 extern unsigned char virt_irq_alloc(unsigned int dev_handle,
 				    unsigned int dev_ino);
@@ -90,11 +89,12 @@ static inline unsigned long get_softint(void)
 	return retval;
 }
 
-void __trigger_all_cpu_backtrace(void);
-#define trigger_all_cpu_backtrace() __trigger_all_cpu_backtrace()
+void arch_trigger_all_cpu_backtrace(void);
+#define arch_trigger_all_cpu_backtrace arch_trigger_all_cpu_backtrace
 
 extern void *hardirq_stack[NR_CPUS];
 extern void *softirq_stack[NR_CPUS];
 #define __ARCH_HAS_DO_SOFTIRQ
+#define ARCH_HAS_NMI_WATCHDOG
 
 #endif

@@ -24,6 +24,7 @@
 
 #include "irq.h"
 #include "i8254.h"
+#include "x86.h"
 
 /*
  * check if there are pending timer events
@@ -48,6 +49,9 @@ int kvm_cpu_has_interrupt(struct kvm_vcpu *v)
 {
 	struct kvm_pic *s;
 
+	if (!irqchip_in_kernel(v->kvm))
+		return v->arch.interrupt.pending;
+
 	if (kvm_apic_has_interrupt(v) == -1) {	/* LAPIC */
 		if (kvm_apic_accept_pic_intr(v)) {
 			s = pic_irqchip(v->kvm);	/* PIC */
@@ -67,12 +71,15 @@ int kvm_cpu_get_interrupt(struct kvm_vcpu *v)
 	struct kvm_pic *s;
 	int vector;
 
+	if (!irqchip_in_kernel(v->kvm))
+		return v->arch.interrupt.nr;
+
 	vector = kvm_get_apic_interrupt(v);	/* APIC */
 	if (vector == -1) {
 		if (kvm_apic_accept_pic_intr(v)) {
 			s = pic_irqchip(v->kvm);
 			s->output = 0;		/* PIC */
-			vector = kvm_pic_read_irq(s);
+			vector = kvm_pic_read_irq(v->kvm);
 		}
 	}
 	return vector;
@@ -86,14 +93,6 @@ void kvm_inject_pending_timer_irqs(struct kvm_vcpu *vcpu)
 	/* TODO: PIT, RTC etc. */
 }
 EXPORT_SYMBOL_GPL(kvm_inject_pending_timer_irqs);
-
-void kvm_timer_intr_post(struct kvm_vcpu *vcpu, int vec)
-{
-	kvm_apic_timer_intr_post(vcpu, vec);
-	kvm_pit_timer_intr_post(vcpu, vec);
-	/* TODO: PIT, RTC etc. */
-}
-EXPORT_SYMBOL_GPL(kvm_timer_intr_post);
 
 void __kvm_migrate_timers(struct kvm_vcpu *vcpu)
 {

@@ -66,31 +66,25 @@ void lsapic_write(struct kvm_vcpu *v, unsigned long addr,
 
 	switch (addr) {
 	case PIB_OFST_INTA:
-		/*panic_domain(NULL, "Undefined write on PIB INTA\n");*/
-		panic_vm(v);
+		panic_vm(v, "Undefined write on PIB INTA\n");
 		break;
 	case PIB_OFST_XTP:
 		if (length == 1) {
 			vlsapic_write_xtp(v, val);
 		} else {
-			/*panic_domain(NULL,
-			"Undefined write on PIB XTP\n");*/
-			panic_vm(v);
+			panic_vm(v, "Undefined write on PIB XTP\n");
 		}
 		break;
 	default:
 		if (PIB_LOW_HALF(addr)) {
-			/*lower half */
+			/*Lower half */
 			if (length != 8)
-				/*panic_domain(NULL,
-				"Can't LHF write with size %ld!\n",
-				length);*/
-				panic_vm(v);
+				panic_vm(v, "Can't LHF write with size %ld!\n",
+						length);
 			else
 				vlsapic_write_ipi(v, addr, val);
-		} else {   /*	upper half
-				printk("IPI-UHF write %lx\n",addr);*/
-			panic_vm(v);
+		} else {   /*Upper half */
+			panic_vm(v, "IPI-UHF write %lx\n", addr);
 		}
 		break;
 	}
@@ -108,22 +102,18 @@ unsigned long lsapic_read(struct kvm_vcpu *v, unsigned long addr,
 		if (length == 1) /* 1 byte load */
 			; /* There is no i8259, there is no INTA access*/
 		else
-			/*panic_domain(NULL,"Undefined read on PIB INTA\n"); */
-			panic_vm(v);
+			panic_vm(v, "Undefined read on PIB INTA\n");
 
 		break;
 	case PIB_OFST_XTP:
 		if (length == 1) {
 			result = VLSAPIC_XTP(v);
-			/* printk("read xtp %lx\n", result); */
 		} else {
-			/*panic_domain(NULL,
-			"Undefined read on PIB XTP\n");*/
-			panic_vm(v);
+			panic_vm(v, "Undefined read on PIB XTP\n");
 		}
 		break;
 	default:
-		panic_vm(v);
+		panic_vm(v, "Undefined addr access for lsapic!\n");
 		break;
 	}
 	return result;
@@ -162,7 +152,7 @@ static void mmio_access(struct kvm_vcpu *vcpu, u64 src_pa, u64 *dest,
 			/* it's necessary to ensure zero extending */
 			*dest = p->u.ioreq.data & (~0UL >> (64-(s*8)));
 	} else
-		panic_vm(vcpu);
+		panic_vm(vcpu, "Unhandled mmio access returned!\n");
 out:
 	local_irq_restore(psr);
 	return ;
@@ -257,7 +247,8 @@ void emulate_io_inst(struct kvm_vcpu *vcpu, u64 padr, u64 ma)
 		vcpu_get_fpreg(vcpu, inst.M9.f2, &v);
 		/* Write high word. FIXME: this is a kludge!  */
 		v.u.bits[1] &= 0x3ffff;
-		mmio_access(vcpu, padr + 8, &v.u.bits[1], 8, ma, IOREQ_WRITE);
+		mmio_access(vcpu, padr + 8, (u64 *)&v.u.bits[1], 8,
+			    ma, IOREQ_WRITE);
 		data = v.u.bits[0];
 		size = 3;
 	} else if (inst.M10.major == 7 && inst.M10.x6 == 0x3B) {
@@ -275,7 +266,8 @@ void emulate_io_inst(struct kvm_vcpu *vcpu, u64 padr, u64 ma)
 
 		/* Write high word.FIXME: this is a kludge!  */
 		v.u.bits[1] &= 0x3ffff;
-		mmio_access(vcpu, padr + 8, &v.u.bits[1], 8, ma, IOREQ_WRITE);
+		mmio_access(vcpu, padr + 8, (u64 *)&v.u.bits[1],
+			    8, ma, IOREQ_WRITE);
 		data = v.u.bits[0];
 		size = 3;
 	} else if (inst.M10.major == 7 && inst.M10.x6 == 0x31) {
@@ -324,7 +316,9 @@ void emulate_io_inst(struct kvm_vcpu *vcpu, u64 padr, u64 ma)
 		return;
 	} else {
 		inst_type = -1;
-		panic_vm(vcpu);
+		panic_vm(vcpu, "Unsupported MMIO access instruction! \
+				Bunld[0]=0x%lx, Bundle[1]=0x%lx\n",
+				bundle.i64[0], bundle.i64[1]);
 	}
 
 	size = 1 << size;
@@ -335,7 +329,7 @@ void emulate_io_inst(struct kvm_vcpu *vcpu, u64 padr, u64 ma)
 		if (inst_type == SL_INTEGER)
 			vcpu_set_gr(vcpu, inst.M1.r1, data, 0);
 		else
-			panic_vm(vcpu);
+			panic_vm(vcpu, "Unsupported instruction type!\n");
 
 	}
 	vcpu_increment_iip(vcpu);

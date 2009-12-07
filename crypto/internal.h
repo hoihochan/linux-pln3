@@ -25,6 +25,7 @@
 #include <linux/notifier.h>
 #include <linux/rwsem.h>
 #include <linux/slab.h>
+#include <linux/fips.h>
 
 /* Crypto notification events. */
 enum {
@@ -59,18 +60,6 @@ static inline void crypto_exit_proc(void)
 { }
 #endif
 
-static inline unsigned int crypto_digest_ctxsize(struct crypto_alg *alg)
-{
-	unsigned int len = alg->cra_ctxsize;
-
-	if (alg->cra_alignmask) {
-		len = ALIGN(len, (unsigned long)alg->cra_alignmask + 1);
-		len += alg->cra_digest.dia_digestsize;
-	}
-
-	return len;
-}
-
 static inline unsigned int crypto_cipher_ctxsize(struct crypto_alg *alg)
 {
 	return alg->cra_ctxsize;
@@ -82,31 +71,35 @@ static inline unsigned int crypto_compress_ctxsize(struct crypto_alg *alg)
 }
 
 struct crypto_alg *crypto_mod_get(struct crypto_alg *alg);
-struct crypto_alg *__crypto_alg_lookup(const char *name, u32 type, u32 mask);
+struct crypto_alg *crypto_alg_lookup(const char *name, u32 type, u32 mask);
 struct crypto_alg *crypto_alg_mod_lookup(const char *name, u32 type, u32 mask);
 
-int crypto_init_digest_ops(struct crypto_tfm *tfm);
-int crypto_init_digest_ops_async(struct crypto_tfm *tfm);
 int crypto_init_cipher_ops(struct crypto_tfm *tfm);
 int crypto_init_compress_ops(struct crypto_tfm *tfm);
 
-void crypto_exit_digest_ops(struct crypto_tfm *tfm);
 void crypto_exit_cipher_ops(struct crypto_tfm *tfm);
 void crypto_exit_compress_ops(struct crypto_tfm *tfm);
 
+struct crypto_larval *crypto_larval_alloc(const char *name, u32 type, u32 mask);
 void crypto_larval_kill(struct crypto_alg *alg);
 struct crypto_alg *crypto_larval_lookup(const char *name, u32 type, u32 mask);
 void crypto_larval_error(const char *name, u32 type, u32 mask);
+void crypto_alg_tested(const char *name, int err);
 
 void crypto_shoot_alg(struct crypto_alg *alg);
 struct crypto_tfm *__crypto_alloc_tfm(struct crypto_alg *alg, u32 type,
 				      u32 mask);
-
-int crypto_register_instance(struct crypto_template *tmpl,
-			     struct crypto_instance *inst);
+void *crypto_create_tfm(struct crypto_alg *alg,
+			const struct crypto_type *frontend);
+struct crypto_alg *crypto_find_alg(const char *alg_name,
+				   const struct crypto_type *frontend,
+				   u32 type, u32 mask);
+void *crypto_alloc_tfm(const char *alg_name,
+		       const struct crypto_type *frontend, u32 type, u32 mask);
 
 int crypto_register_notifier(struct notifier_block *nb);
 int crypto_unregister_notifier(struct notifier_block *nb);
+int crypto_probing_notify(unsigned long val, void *v);
 
 static inline void crypto_alg_put(struct crypto_alg *alg)
 {
@@ -139,9 +132,9 @@ static inline int crypto_is_moribund(struct crypto_alg *alg)
 	return alg->cra_flags & (CRYPTO_ALG_DEAD | CRYPTO_ALG_DYING);
 }
 
-static inline int crypto_notify(unsigned long val, void *v)
+static inline void crypto_notify(unsigned long val, void *v)
 {
-	return blocking_notifier_call_chain(&crypto_chain, val, v);
+	blocking_notifier_call_chain(&crypto_chain, val, v);
 }
 
 #endif	/* _CRYPTO_INTERNAL_H */

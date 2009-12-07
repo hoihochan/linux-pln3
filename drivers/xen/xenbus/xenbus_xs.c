@@ -184,6 +184,7 @@ void *xenbus_dev_request_and_reply(struct xsd_sockmsg *msg)
 
 	return ret;
 }
+EXPORT_SYMBOL(xenbus_dev_request_and_reply);
 
 /* Send message to xs, get kmalloc'ed reply.  ERR_PTR() on error. */
 static void *xs_talkv(struct xenbus_transaction t,
@@ -671,6 +672,8 @@ void xs_resume(void)
 {
 	struct xenbus_watch *watch;
 	char token[sizeof(watch) * 2 + 1];
+
+	xb_init_comms();
 
 	mutex_unlock(&xs_state.response_mutex);
 	mutex_unlock(&xs_state.request_mutex);

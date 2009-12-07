@@ -10,10 +10,11 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <linux/ftrace.h>
 #include <linux/errno.h>
 #include <linux/kernel_stat.h>
 #include <linux/interrupt.h>
-#include <asm/cpu.h>
+#include <asm/cputime.h>
 #include <asm/lowcore.h>
 #include <asm/s390_ext.h>
 #include <asm/irq_regs.h>
@@ -112,15 +113,15 @@ int unregister_early_external_interrupt(__u16 code, ext_int_handler_t handler,
 	return 0;
 }
 
-void do_extint(struct pt_regs *regs, unsigned short code)
+void __irq_entry do_extint(struct pt_regs *regs, unsigned short code)
 {
         ext_int_info_t *p;
         int index;
 	struct pt_regs *old_regs;
 
 	old_regs = set_irq_regs(regs);
-	irq_enter();
 	s390_idle_check();
+	irq_enter();
 	if (S390_lowcore.int_clock >= S390_lowcore.clock_comparator)
 		/* Serve timer interrupts first. */
 		clock_comparator_work();

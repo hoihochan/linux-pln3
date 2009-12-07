@@ -156,7 +156,7 @@ static void __init init_ioports(void)
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(sbc8560_pins); i++) {
-		struct cpm_pin *pin = &sbc8560_pins[i];
+		const struct cpm_pin *pin = &sbc8560_pins[i];
 		cpm2_set_pin(pin->port, pin->pin, pin->flags);
 	}
 
@@ -194,22 +194,17 @@ static void __init sbc8560_setup_arch(void)
 static void sbc8560_show_cpuinfo(struct seq_file *m)
 {
 	uint pvid, svid, phid1;
-	uint memsize = total_memory;
 
 	pvid = mfspr(SPRN_PVR);
 	svid = mfspr(SPRN_SVR);
 
 	seq_printf(m, "Vendor\t\t: Wind River\n");
-	seq_printf(m, "Machine\t\t: SBC8560\n");
 	seq_printf(m, "PVR\t\t: 0x%x\n", pvid);
 	seq_printf(m, "SVR\t\t: 0x%x\n", svid);
 
 	/* Display cpu Pll setting */
 	phid1 = mfspr(SPRN_HID1);
 	seq_printf(m, "PLL setting\t: 0x%x\n", ((phid1 >> 24) & 0x3f));
-
-	/* Display the amount of memory */
-	seq_printf(m, "Memory\t\t: %d MB\n", memsize / (1024 * 1024));
 }
 
 static struct of_device_id __initdata of_bus_ids[] = {
@@ -218,6 +213,7 @@ static struct of_device_id __initdata of_bus_ids[] = {
 	{ .name = "cpm", },
 	{ .name = "localbus", },
 	{ .compatible = "simple-bus", },
+	{ .compatible = "gianfar", },
 	{},
 };
 
@@ -271,6 +267,43 @@ arch_initcall(sbc8560_rtc_init);
 
 #endif	/* M48T59 */
 
+static __u8 __iomem *brstcr;
+
+static int __init sbc8560_bdrstcr_init(void)
+{
+	struct device_node *np;
+	struct resource res;
+
+	np = of_find_compatible_node(NULL, NULL, "wrs,sbc8560-brstcr");
+	if (np == NULL) {
+		printk(KERN_WARNING "sbc8560: No board specific RSTCR in DTB.\n");
+		return -ENODEV;
+	}
+
+	of_address_to_resource(np, 0, &res);
+
+	printk(KERN_INFO "sbc8560: Found BRSTCR at i/o 0x%x\n", res.start);
+
+	brstcr = ioremap(res.start, res.end - res.start);
+	if(!brstcr)
+		printk(KERN_WARNING "sbc8560: ioremap of brstcr failed.\n");
+
+	of_node_put(np);
+
+	return 0;
+}
+
+arch_initcall(sbc8560_bdrstcr_init);
+
+void sbc8560_rstcr_restart(char * cmd)
+{
+	local_irq_disable();
+	if(brstcr)
+		clrbits8(brstcr, 0x80);
+
+	while(1);
+}
+
 define_machine(sbc8560) {
 	.name			= "SBC8560",
 	.probe			= sbc8560_probe,
@@ -278,7 +311,7 @@ define_machine(sbc8560) {
 	.init_IRQ		= sbc8560_pic_init,
 	.show_cpuinfo		= sbc8560_show_cpuinfo,
 	.get_irq		= mpic_get_irq,
-	.restart		= fsl_rstcr_restart,
+	.restart		= sbc8560_rstcr_restart,
 	.calibrate_decr		= generic_calibrate_decr,
 	.progress		= udbg_progress,
 };

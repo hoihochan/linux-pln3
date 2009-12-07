@@ -5,6 +5,7 @@
 
 #include "linux/irqreturn.h"
 #include "linux/kd.h"
+#include "linux/sched.h"
 #include "chan_kern.h"
 #include "irq_kern.h"
 #include "irq_user.h"
@@ -275,6 +276,8 @@ int line_ioctl(struct tty_struct *tty, struct file * file,
 	case TIOCGLTC:
 	case TIOCSLTC:
 #endif
+	/* Note: these are out of date as we now have TCGETS2 etc but this
+	   whole lot should probably go away */
 	case TCGETS:
 	case TCSETSF:
 	case TCSETSW:

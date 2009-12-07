@@ -1,7 +1,5 @@
 /*
- *  arch/s390/kernel/head.S
- *
- * Copyright (C) IBM Corp. 1999,2006
+ * Copyright IBM Corp. 1999,2009
  *
  *    Author(s): Hartmut Penner <hp@de.ibm.com>
  *		 Martin Schwidefsky <schwidefsky@de.ibm.com>
@@ -23,11 +21,13 @@
  *
  */
 
+#include <linux/init.h>
 #include <asm/setup.h>
 #include <asm/lowcore.h>
 #include <asm/asm-offsets.h>
 #include <asm/thread_info.h>
 #include <asm/page.h>
+#include <asm/cpu.h>
 
 #ifdef CONFIG_64BIT
 #define ARCH_OFFSET	4
@@ -35,7 +35,7 @@
 #define ARCH_OFFSET	0
 #endif
 
-.section ".text.head","ax"
+__HEAD
 #ifndef CONFIG_IPL
 	.org   0
 	.long  0x00080000,0x80000000+startup	# Just a restart PSW
@@ -63,7 +63,7 @@
 	.org   0x100
 #
 # subroutine for loading from tape
-# Paramters:
+# Parameters:
 #  R1 = device number
 #  R2 = load address
 .Lloader:
@@ -460,6 +460,97 @@ start:
 	.byte 0xa8,0xa9,0xea,0xeb,0xec,0xed,0xee,0xef	# yz
 	.byte 0xf0,0xf1,0xf2,0xf3,0xf4,0xf5,0xf6,0xf7
 	.byte 0xf8,0xf9,0xfa,0xfb,0xfc,0xfd,0xfe,0xff
+
+#
+# startup-code at 0x10000, running in absolute addressing mode
+# this is called either by the ipl loader or directly by PSW restart
+# or linload or SALIPL
+#
+	.org	0x10000
+startup:basr	%r13,0			# get base
+.LPG0:
+	xc	0x200(256),0x200	# partially clear lowcore
+	xc	0x300(256),0x300
+	l	%r1,5f-.LPG0(%r13)
+	stck	0(%r1)
+	spt	6f-.LPG0(%r13)
+	mvc	__LC_LAST_UPDATE_CLOCK(8),0(%r1)
+	mvc	__LC_LAST_UPDATE_TIMER(8),6f-.LPG0(%r13)
+	mvc	__LC_EXIT_TIMER(8),5f-.LPG0(%r13)
+#ifndef CONFIG_MARCH_G5
+	# check capabilities against MARCH_{G5,Z900,Z990,Z9_109,Z10}
+	xc	__LC_STFL_FAC_LIST(8),__LC_STFL_FAC_LIST
+	stfl	__LC_STFL_FAC_LIST	# store facility list
+	tm	__LC_STFL_FAC_LIST,0x01	# stfle available ?
+	jz	0f
+	la	%r0,0
+	.insn	s,0xb2b00000,__LC_STFL_FAC_LIST	# store facility list extended
+0:	l	%r0,__LC_STFL_FAC_LIST
+	n	%r0,2f+8-.LPG0(%r13)
+	cl	%r0,2f+8-.LPG0(%r13)
+	jne	1f
+	l	%r0,__LC_STFL_FAC_LIST+4
+	n	%r0,2f+12-.LPG0(%r13)
+	cl	%r0,2f+12-.LPG0(%r13)
+	je	3f
+1:	l	%r15,.Lstack-.LPG0(%r13)
+	ahi	%r15,1<<(PAGE_SHIFT+THREAD_ORDER) # init_task_union+THREAD_SIZE
+	ahi	%r15,-96
+	la	%r2,.Lals_string-.LPG0(%r13)
+	l	%r3,.Lsclp_print-.LPG0(%r13)
+	basr	%r14,%r3
+	lpsw	2f-.LPG0(%r13)		# machine type not good enough, crash
+.Lals_string:
+	.asciz	"The Linux kernel requires more recent processor hardware"
+.Lsclp_print:
+	.long	_sclp_print_early
+.Lstack:
+	.long	init_thread_union
+	.align 16
+2:	.long	0x000a0000,0x8badcccc
+#if defined(CONFIG_64BIT)
+#if defined(CONFIG_MARCH_Z10)
+	.long 0xc100efe3, 0xf0680000
+#elif defined(CONFIG_MARCH_Z9_109)
+	.long 0xc100efc3, 0x00000000
+#elif defined(CONFIG_MARCH_Z990)
+	.long 0xc0002000, 0x00000000
+#elif defined(CONFIG_MARCH_Z900)
+	.long 0xc0000000, 0x00000000
+#endif
+#else
+#if defined(CONFIG_MARCH_Z10)
+	.long 0x8100c880, 0x00000000
+#elif defined(CONFIG_MARCH_Z9_109)
+	.long 0x8100c880, 0x00000000
+#elif defined(CONFIG_MARCH_Z990)
+	.long 0x80002000, 0x00000000
+#elif defined(CONFIG_MARCH_Z900)
+	.long 0x80000000, 0x00000000
+#endif
+#endif
+3:
+#endif
+
+	l	%r13,4f-.LPG0(%r13)
+	b	0(%r13)
+	.align	4
+4:	.long	startup_continue
+5:	.long	sched_clock_base_cc
+	.align	8
+6:	.long	0x7fffffff,0xffffffff
+
+#
+# params at 10400 (setup.h)
+#
+	.org	PARMAREA
+	.long	0,0			# IPL_DEVICE
+	.long	0,0			# INITRD_START
+	.long	0,0			# INITRD_SIZE
+
+	.org	COMMAND_LINE
+	.byte	"root=/dev/ram0 ro"
+	.byte	0
 
 #ifdef CONFIG_64BIT
 #include "head64.S"

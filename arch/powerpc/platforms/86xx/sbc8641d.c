@@ -25,7 +25,6 @@
 #include <asm/time.h>
 #include <asm/machdep.h>
 #include <asm/pci-bridge.h>
-#include <asm/mpc86xx.h>
 #include <asm/prom.h>
 #include <mm/mmu_decl.h>
 #include <asm/udbg.h>
@@ -63,21 +62,11 @@ sbc8641_setup_arch(void)
 static void
 sbc8641_show_cpuinfo(struct seq_file *m)
 {
-	struct device_node *root;
-	uint memsize = total_memory;
-	const char *model = "";
 	uint svid = mfspr(SPRN_SVR);
 
 	seq_printf(m, "Vendor\t\t: Wind River Systems\n");
 
-	root = of_find_node_by_path("/");
-	if (root)
-		model = of_get_property(root, "model", NULL);
-	seq_printf(m, "Machine\t\t: %s\n", model);
-	of_node_put(root);
-
 	seq_printf(m, "SVR\t\t: 0x%x\n", svid);
-	seq_printf(m, "Memory\t\t: %d MB\n", memsize / (1024 * 1024));
 }
 
 
@@ -113,6 +102,7 @@ mpc86xx_time_init(void)
 
 static __initdata struct of_device_id of_bus_ids[] = {
 	{ .compatible = "simple-bus", },
+	{ .compatible = "gianfar", },
 	{},
 };
 

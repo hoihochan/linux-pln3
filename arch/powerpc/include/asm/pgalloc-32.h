@@ -3,6 +3,8 @@
 
 #include <linux/threads.h>
 
+#define PTE_NONCACHE_NUM	0  /* dummy for now to share code w/ppc64 */
+
 extern void __bad_pte(pmd_t *pmd);
 
 extern pgd_t *pgd_alloc(struct mm_struct *mm);
@@ -14,7 +16,7 @@ extern void pgd_free(struct mm_struct *mm, pgd_t *pgd);
  */
 /* #define pmd_alloc_one(mm,address)       ({ BUG(); ((pmd_t *)2); }) */
 #define pmd_free(mm, x) 		do { } while (0)
-#define __pmd_free_tlb(tlb,x)		do { } while (0)
+#define __pmd_free_tlb(tlb,x,a)		do { } while (0)
 /* #define pgd_populate(mm, pmd, pte)      BUG() */
 
 #ifndef CONFIG_BOOKE
@@ -33,10 +35,13 @@ extern void pgd_free(struct mm_struct *mm, pgd_t *pgd);
 
 extern pte_t *pte_alloc_one_kernel(struct mm_struct *mm, unsigned long addr);
 extern pgtable_t pte_alloc_one(struct mm_struct *mm, unsigned long addr);
-extern void pte_free_kernel(struct mm_struct *mm, pte_t *pte);
-extern void pte_free(struct mm_struct *mm, pgtable_t pte);
 
-#define __pte_free_tlb(tlb, pte)	pte_free((tlb)->mm, (pte))
+static inline void pgtable_free(pgtable_free_t pgf)
+{
+	void *p = (void *)(pgf.val & ~PGF_CACHENUM_MASK);
+
+	free_page((unsigned long)p);
+}
 
 #define check_pgt_cache()	do { } while (0)
 

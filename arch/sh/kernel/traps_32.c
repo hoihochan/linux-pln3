@@ -13,6 +13,7 @@
  */
 #include <linux/kernel.h>
 #include <linux/ptrace.h>
+#include <linux/hardirq.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
 #include <linux/module.h>
@@ -23,26 +24,19 @@
 #include <linux/kdebug.h>
 #include <linux/kexec.h>
 #include <linux/limits.h>
+#include <linux/proc_fs.h>
+#include <linux/sysfs.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
 #include <asm/fpu.h>
-
-#ifdef CONFIG_SH_KGDB
-#include <asm/kgdb.h>
-#define CHK_REMOTE_DEBUG(regs)			\
-{						\
-	if (kgdb_debug_hook && !user_mode(regs))\
-		(*kgdb_debug_hook)(regs);       \
-}
-#else
-#define CHK_REMOTE_DEBUG(regs)
-#endif
+#include <asm/kprobes.h>
 
 #ifdef CONFIG_CPU_SH2
 # define TRAP_RESERVED_INST	4
 # define TRAP_ILLEGAL_SLOT_INST	6
 # define TRAP_ADDRESS_ERROR	9
 # ifdef CONFIG_CPU_SH2A
+#  define TRAP_UBC		12
 #  define TRAP_FPU_ERROR	13
 #  define TRAP_DIVZERO_ERROR	17
 #  define TRAP_DIVOVF_ERROR	18
@@ -50,6 +44,85 @@
 #else
 #define TRAP_RESERVED_INST	12
 #define TRAP_ILLEGAL_SLOT_INST	13
+#endif
+
+static unsigned long se_user;
+static unsigned long se_sys;
+static unsigned long se_half;
+static unsigned long se_word;
+static unsigned long se_dword;
+static unsigned long se_multi;
+/* bitfield: 1: warn 2: fixup 4: signal -> combinations 2|4 && 1|2|4 are not
+   valid! */
+static int se_usermode = 3;
+/* 0: no warning 1: print a warning message, disabled by default */
+static int se_kernmode_warn;
+
+#ifdef CONFIG_PROC_FS
+static const char *se_usermode_action[] = {
+	"ignored",
+	"warn",
+	"fixup",
+	"fixup+warn",
+	"signal",
+	"signal+warn"
+};
+
+static int
+proc_alignment_read(char *page, char **start, off_t off, int count, int *eof,
+		    void *data)
+{
+	char *p = page;
+	int len;
+
+	p += sprintf(p, "User:\t\t%lu\n", se_user);
+	p += sprintf(p, "System:\t\t%lu\n", se_sys);
+	p += sprintf(p, "Half:\t\t%lu\n", se_half);
+	p += sprintf(p, "Word:\t\t%lu\n", se_word);
+	p += sprintf(p, "DWord:\t\t%lu\n", se_dword);
+	p += sprintf(p, "Multi:\t\t%lu\n", se_multi);
+	p += sprintf(p, "User faults:\t%i (%s)\n", se_usermode,
+			se_usermode_action[se_usermode]);
+	p += sprintf(p, "Kernel faults:\t%i (fixup%s)\n", se_kernmode_warn,
+			se_kernmode_warn ? "+warn" : "");
+
+	len = (p - page) - off;
+	if (len < 0)
+		len = 0;
+
+	*eof = (len <= count) ? 1 : 0;
+	*start = page + off;
+
+	return len;
+}
+
+static int proc_alignment_write(struct file *file, const char __user *buffer,
+				unsigned long count, void *data)
+{
+	char mode;
+
+	if (count > 0) {
+		if (get_user(mode, buffer))
+			return -EFAULT;
+		if (mode >= '0' && mode <= '5')
+			se_usermode = mode - '0';
+	}
+	return count;
+}
+
+static int proc_alignment_kern_write(struct file *file, const char __user *buffer,
+				     unsigned long count, void *data)
+{
+	char mode;
+
+	if (count > 0) {
+		if (get_user(mode, buffer))
+			return -EFAULT;
+		if (mode >= '0' && mode <= '1')
+			se_kernmode_warn = mode - '0';
+	}
+	return count;
+}
 #endif
 
 static void dump_mem(const char *str, unsigned long bottom, unsigned long top)
@@ -87,13 +160,12 @@ void die(const char * str, struct pt_regs * regs, long err)
 
 	oops_enter();
 
-	console_verbose();
 	spin_lock_irq(&die_lock);
+	console_verbose();
 	bust_spinlocks(1);
 
 	printk("%s: %04lx [#%d]\n", str, err & 0xffff, ++die_counter);
-
-	CHK_REMOTE_DEBUG(regs);
+	sysfs_printk_last_file();
 	print_modules();
 	show_regs(regs);
 
@@ -104,9 +176,12 @@ void die(const char * str, struct pt_regs * regs, long err)
 		dump_mem("Stack: ", regs->regs[15], THREAD_SIZE +
 			 (unsigned long)task_stack_page(current));
 
+	notify_die(DIE_OOPS, str, regs, err, 255, SIGSEGV);
+
 	bust_spinlocks(0);
 	add_taint(TAINT_DIE);
 	spin_unlock_irq(&die_lock);
+	oops_exit();
 
 	if (kexec_should_crash(current))
 		crash_kexec(regs);
@@ -117,7 +192,6 @@ void die(const char * str, struct pt_regs * regs, long err)
 	if (panic_on_oops)
 		panic("Fatal exception");
 
-	oops_exit();
 	do_exit(SIGSEGV);
 }
 
@@ -133,20 +207,19 @@ static inline void die_if_kernel(const char *str, struct pt_regs *regs,
  * - userspace errors just cause EFAULT to be returned, resulting in SEGV
  * - kernel/userspace interfaces cause a jump to an appropriate handler
  * - other kernel errors are bad
- * - return 0 if fixed-up, -EFAULT if non-fatal (to the kernel) fault
  */
-static int die_if_no_fixup(const char * str, struct pt_regs * regs, long err)
+static void die_if_no_fixup(const char * str, struct pt_regs * regs, long err)
 {
 	if (!user_mode(regs)) {
 		const struct exception_table_entry *fixup;
 		fixup = search_exception_tables(regs->pc);
 		if (fixup) {
 			regs->pc = fixup->fixup;
-			return 0;
+			return;
 		}
+
 		die(str, regs, err);
 	}
-	return -EFAULT;
 }
 
 static inline void sign_extend(unsigned int count, unsigned char *dst)
@@ -186,12 +259,13 @@ static struct mem_access user_mem_access = {
  *   (if that instruction is in a branch delay slot)
  * - return 0 if emulation okay, -EFAULT on existential error
  */
-static int handle_unaligned_ins(opcode_t instruction, struct pt_regs *regs,
+static int handle_unaligned_ins(insn_size_t instruction, struct pt_regs *regs,
 				struct mem_access *ma)
 {
 	int ret, index, count;
 	unsigned long *rm, *rn;
 	unsigned char *src, *dst;
+	unsigned char __user *srcu, *dstu;
 
 	index = (instruction>>8)&15;	/* 0x0F00 */
 	rn = &regs->regs[index];
@@ -201,33 +275,40 @@ static int handle_unaligned_ins(opcode_t instruction, struct pt_regs *regs,
 
 	count = 1<<(instruction&3);
 
+	switch (count) {
+	case 1: se_half  += 1; break;
+	case 2: se_word  += 1; break;
+	case 4: se_dword += 1; break;
+	case 8: se_multi += 1; break; /* ??? */
+	}
+
 	ret = -EFAULT;
 	switch (instruction>>12) {
 	case 0: /* mov.[bwl] to/from memory via r0+rn */
 		if (instruction & 8) {
 			/* from memory */
-			src = (unsigned char*) *rm;
-			src += regs->regs[0];
-			dst = (unsigned char*) rn;
-			*(unsigned long*)dst = 0;
+			srcu = (unsigned char __user *)*rm;
+			srcu += regs->regs[0];
+			dst = (unsigned char *)rn;
+			*(unsigned long *)dst = 0;
 
 #if !defined(__LITTLE_ENDIAN__)
 			dst += 4-count;
 #endif
-			if (ma->from(dst, src, count))
+			if (ma->from(dst, srcu, count))
 				goto fetch_fault;
 
 			sign_extend(count, dst);
 		} else {
 			/* to memory */
-			src = (unsigned char*) rm;
+			src = (unsigned char *)rm;
 #if !defined(__LITTLE_ENDIAN__)
 			src += 4-count;
 #endif
-			dst = (unsigned char*) *rn;
-			dst += regs->regs[0];
+			dstu = (unsigned char __user *)*rn;
+			dstu += regs->regs[0];
 
-			if (ma->to(dst, src, count))
+			if (ma->to(dstu, src, count))
 				goto fetch_fault;
 		}
 		ret = 0;
@@ -235,10 +316,10 @@ static int handle_unaligned_ins(opcode_t instruction, struct pt_regs *regs,
 
 	case 1: /* mov.l Rm,@(disp,Rn) */
 		src = (unsigned char*) rm;
-		dst = (unsigned char*) *rn;
-		dst += (instruction&0x000F)<<2;
+		dstu = (unsigned char __user *)*rn;
+		dstu += (instruction&0x000F)<<2;
 
-		if (ma->to(dst, src, 4))
+		if (ma->to(dstu, src, 4))
 			goto fetch_fault;
 		ret = 0;
 		break;
@@ -247,28 +328,28 @@ static int handle_unaligned_ins(opcode_t instruction, struct pt_regs *regs,
 		if (instruction & 4)
 			*rn -= count;
 		src = (unsigned char*) rm;
-		dst = (unsigned char*) *rn;
+		dstu = (unsigned char __user *)*rn;
 #if !defined(__LITTLE_ENDIAN__)
 		src += 4-count;
 #endif
-		if (ma->to(dst, src, count))
+		if (ma->to(dstu, src, count))
 			goto fetch_fault;
 		ret = 0;
 		break;
 
 	case 5: /* mov.l @(disp,Rm),Rn */
-		src = (unsigned char*) *rm;
-		src += (instruction&0x000F)<<2;
-		dst = (unsigned char*) rn;
-		*(unsigned long*)dst = 0;
+		srcu = (unsigned char __user *)*rm;
+		srcu += (instruction & 0x000F) << 2;
+		dst = (unsigned char *)rn;
+		*(unsigned long *)dst = 0;
 
-		if (ma->from(dst, src, 4))
+		if (ma->from(dst, srcu, 4))
 			goto fetch_fault;
 		ret = 0;
 		break;
 
 	case 6:	/* mov.[bwl] from memory, possibly with post-increment */
-		src = (unsigned char*) *rm;
+		srcu = (unsigned char __user *)*rm;
 		if (instruction & 4)
 			*rm += count;
 		dst = (unsigned char*) rn;
@@ -277,7 +358,7 @@ static int handle_unaligned_ins(opcode_t instruction, struct pt_regs *regs,
 #if !defined(__LITTLE_ENDIAN__)
 		dst += 4-count;
 #endif
-		if (ma->from(dst, src, count))
+		if (ma->from(dst, srcu, count))
 			goto fetch_fault;
 		sign_extend(count, dst);
 		ret = 0;
@@ -286,28 +367,28 @@ static int handle_unaligned_ins(opcode_t instruction, struct pt_regs *regs,
 	case 8:
 		switch ((instruction&0xFF00)>>8) {
 		case 0x81: /* mov.w R0,@(disp,Rn) */
-			src = (unsigned char*) &regs->regs[0];
+			src = (unsigned char *) &regs->regs[0];
 #if !defined(__LITTLE_ENDIAN__)
 			src += 2;
 #endif
-			dst = (unsigned char*) *rm; /* called Rn in the spec */
-			dst += (instruction&0x000F)<<1;
+			dstu = (unsigned char __user *)*rm; /* called Rn in the spec */
+			dstu += (instruction & 0x000F) << 1;
 
-			if (ma->to(dst, src, 2))
+			if (ma->to(dstu, src, 2))
 				goto fetch_fault;
 			ret = 0;
 			break;
 
 		case 0x85: /* mov.w @(disp,Rm),R0 */
-			src = (unsigned char*) *rm;
-			src += (instruction&0x000F)<<1;
-			dst = (unsigned char*) &regs->regs[0];
-			*(unsigned long*)dst = 0;
+			srcu = (unsigned char __user *)*rm;
+			srcu += (instruction & 0x000F) << 1;
+			dst = (unsigned char *) &regs->regs[0];
+			*(unsigned long *)dst = 0;
 
 #if !defined(__LITTLE_ENDIAN__)
 			dst += 2;
 #endif
-			if (ma->from(dst, src, 2))
+			if (ma->from(dst, srcu, 2))
 				goto fetch_fault;
 			sign_extend(2, dst);
 			ret = 0;
@@ -321,7 +402,8 @@ static int handle_unaligned_ins(opcode_t instruction, struct pt_regs *regs,
 	/* Argh. Address not only misaligned but also non-existent.
 	 * Raise an EFAULT and see if it's trapped
 	 */
-	return die_if_no_fixup("Fault in unaligned fixup", regs, 0);
+	die_if_no_fixup("Fault in unaligned fixup", regs, 0);
+	return -EFAULT;
 }
 
 /*
@@ -329,11 +411,12 @@ static int handle_unaligned_ins(opcode_t instruction, struct pt_regs *regs,
  * - fetches the instruction from PC+2
  */
 static inline int handle_delayslot(struct pt_regs *regs,
-				   opcode_t old_instruction,
+				   insn_size_t old_instruction,
 				   struct mem_access *ma)
 {
-	opcode_t instruction;
-	void *addr = (void *)(regs->pc + instruction_size(old_instruction));
+	insn_size_t instruction;
+	void __user *addr = (void __user *)(regs->pc +
+		instruction_size(old_instruction));
 
 	if (copy_from_user(&instruction, addr, sizeof(instruction))) {
 		/* the instruction-fetch faulted */
@@ -364,31 +447,28 @@ static inline int handle_delayslot(struct pt_regs *regs,
 #define SH_PC_8BIT_OFFSET(instr) ((((signed char)(instr))*2) + 4)
 #define SH_PC_12BIT_OFFSET(instr) ((((signed short)(instr<<4))>>3) + 4)
 
-/*
- * XXX: SH-2A needs this too, but it needs an overhaul thanks to mixed 32-bit
- * opcodes..
- */
-
-static int handle_unaligned_notify_count = 10;
-
-int handle_unaligned_access(opcode_t instruction, struct pt_regs *regs,
-			    struct mem_access *ma)
+int handle_unaligned_access(insn_size_t instruction, struct pt_regs *regs,
+			    struct mem_access *ma, int expected)
 {
 	u_int rm;
 	int ret, index;
 
+	/*
+	 * XXX: We can't handle mixed 16/32-bit instructions yet
+	 */
+	if (instruction_size(instruction) != 2)
+		return -EINVAL;
+
 	index = (instruction>>8)&15;	/* 0x0F00 */
 	rm = regs->regs[index];
 
-	/* shout about the first ten userspace fixups */
-	if (user_mode(regs) && handle_unaligned_notify_count>0) {
-		handle_unaligned_notify_count--;
-
-		printk(KERN_NOTICE "Fixing up unaligned userspace access "
+	/* shout about fixups */
+	if (!expected && printk_ratelimit())
+		printk(KERN_NOTICE "Fixing up unaligned %s access "
 		       "in \"%s\" pid=%d pc=0x%p ins=0x%04hx\n",
+		       user_mode(regs) ? "userspace" : "kernel",
 		       current->comm, task_pid_nr(current),
 		       (void *)regs->pc, instruction);
-	}
 
 	ret = -EFAULT;
 	switch (instruction&0xF000) {
@@ -511,14 +591,6 @@ int handle_unaligned_access(opcode_t instruction, struct pt_regs *regs,
 	return ret;
 }
 
-#ifdef CONFIG_CPU_HAS_SR_RB
-#define lookup_exception_vector(x)	\
-	__asm__ __volatile__ ("stc r2_bank, %0\n\t" : "=r" ((x)))
-#else
-#define lookup_exception_vector(x)	\
-	__asm__ __volatile__ ("mov r4, %0\n\t" : "=r" ((x)))
-#endif
-
 /*
  * Handle various address error exceptions:
  *  - instruction address error:
@@ -537,12 +609,12 @@ asmlinkage void do_address_error(struct pt_regs *regs,
 	unsigned long error_code = 0;
 	mm_segment_t oldfs;
 	siginfo_t info;
-	opcode_t instruction;
+	insn_size_t instruction;
 	int tmp;
 
 	/* Intentional ifdef */
 #ifdef CONFIG_CPU_HAS_SR_RB
-	lookup_exception_vector(error_code);
+	error_code = lookup_exception_vector();
 #endif
 
 	oldfs = get_fs();
@@ -552,6 +624,35 @@ asmlinkage void do_address_error(struct pt_regs *regs,
 
 		local_irq_enable();
 
+		se_user += 1;
+
+		set_fs(USER_DS);
+		if (copy_from_user(&instruction, (insn_size_t *)(regs->pc & ~1),
+				   sizeof(instruction))) {
+			set_fs(oldfs);
+			goto uspace_segv;
+		}
+		set_fs(oldfs);
+
+		/* shout about userspace fixups */
+		if (se_usermode & 1)
+			printk(KERN_NOTICE "Unaligned userspace access "
+			       "in \"%s\" pid=%d pc=0x%p ins=0x%04hx\n",
+			       current->comm, current->pid, (void *)regs->pc,
+			       instruction);
+
+		if (se_usermode & 2)
+			goto fixup;
+
+		if (se_usermode & 4)
+			goto uspace_segv;
+		else {
+			/* ignore */
+			regs->pc += instruction_size(instruction);
+			return;
+		}
+
+fixup:
 		/* bad PC is not something we can fix */
 		if (regs->pc & 1) {
 			si_code = BUS_ADRALN;
@@ -559,17 +660,8 @@ asmlinkage void do_address_error(struct pt_regs *regs,
 		}
 
 		set_fs(USER_DS);
-		if (copy_from_user(&instruction, (void *)(regs->pc),
-				   sizeof(instruction))) {
-			/* Argh. Fault on the instruction itself.
-			   This should never happen non-SMP
-			*/
-			set_fs(oldfs);
-			goto uspace_segv;
-		}
-
 		tmp = handle_unaligned_access(instruction, regs,
-					      &user_mem_access);
+					      &user_mem_access, 0);
 		set_fs(oldfs);
 
 		if (tmp==0)
@@ -585,11 +677,13 @@ uspace_segv:
 		info.si_addr = (void __user *)address;
 		force_sig_info(SIGBUS, &info, current);
 	} else {
+		se_sys += 1;
+
 		if (regs->pc & 1)
 			die("unaligned program counter", regs, error_code);
 
 		set_fs(KERNEL_DS);
-		if (copy_from_user(&instruction, (void *)(regs->pc),
+		if (copy_from_user(&instruction, (void __user *)(regs->pc),
 				   sizeof(instruction))) {
 			/* Argh. Fault on the instruction itself.
 			   This should never happen non-SMP
@@ -598,7 +692,14 @@ uspace_segv:
 			die("insn faulting in do_address_error", regs, 0);
 		}
 
-		handle_unaligned_access(instruction, regs, &user_mem_access);
+		if (se_kernmode_warn)
+			printk(KERN_NOTICE "Unaligned kernel access "
+			       "on behalf of \"%s\" pid=%d pc=0x%p ins=0x%04hx\n",
+			       current->comm, current->pid, (void *)regs->pc,
+			       instruction);
+
+		handle_unaligned_access(instruction, regs,
+					&user_mem_access, 0);
 		set_fs(oldfs);
 	}
 }
@@ -679,20 +780,21 @@ asmlinkage void do_reserved_inst(unsigned long r4, unsigned long r5,
 	if (is_dsp_inst(regs)) {
 		/* Enable DSP mode, and restart instruction. */
 		regs->sr |= SR_DSP;
+		/* Save DSP mode */
+		tsk->thread.dsp_status.status |= SR_DSP;
 		return;
 	}
 #endif
 
-	lookup_exception_vector(error_code);
+	error_code = lookup_exception_vector();
 
 	local_irq_enable();
-	CHK_REMOTE_DEBUG(regs);
 	force_sig(SIGILL, tsk);
 	die_if_no_fixup("reserved instruction", regs, error_code);
 }
 
 #ifdef CONFIG_SH_FPU_EMU
-static int emulate_branch(unsigned short inst, struct pt_regs* regs)
+static int emulate_branch(unsigned short inst, struct pt_regs *regs)
 {
 	/*
 	 * bfs: 8fxx: PC+=d*2+4;
@@ -705,27 +807,32 @@ static int emulate_branch(unsigned short inst, struct pt_regs* regs)
 	 * jsr: 4x0b: PC=Rn      after PR=PC+4;
 	 * rts: 000b: PC=PR;
 	 */
-	if ((inst & 0xfd00) == 0x8d00) {
+	if (((inst & 0xf000) == 0xb000)  ||	/* bsr */
+	    ((inst & 0xf0ff) == 0x0003)  ||	/* bsrf */
+	    ((inst & 0xf0ff) == 0x400b))	/* jsr */
+		regs->pr = regs->pc + 4;
+
+	if ((inst & 0xfd00) == 0x8d00) {	/* bfs, bts */
 		regs->pc += SH_PC_8BIT_OFFSET(inst);
 		return 0;
 	}
 
-	if ((inst & 0xe000) == 0xa000) {
+	if ((inst & 0xe000) == 0xa000) {	/* bra, bsr */
 		regs->pc += SH_PC_12BIT_OFFSET(inst);
 		return 0;
 	}
 
-	if ((inst & 0xf0df) == 0x0003) {
+	if ((inst & 0xf0df) == 0x0003) {	/* braf, bsrf */
 		regs->pc += regs->regs[(inst & 0x0f00) >> 8] + 4;
 		return 0;
 	}
 
-	if ((inst & 0xf0df) == 0x400b) {
+	if ((inst & 0xf0df) == 0x400b) {	/* jmp, jsr */
 		regs->pc = regs->regs[(inst & 0x0f00) >> 8];
 		return 0;
 	}
 
-	if ((inst & 0xffff) == 0x000b) {
+	if ((inst & 0xffff) == 0x000b) {	/* rts */
 		regs->pc = regs->pr;
 		return 0;
 	}
@@ -739,11 +846,13 @@ asmlinkage void do_illegal_slot_inst(unsigned long r4, unsigned long r5,
 				struct pt_regs __regs)
 {
 	struct pt_regs *regs = RELOC_HIDE(&__regs, 0);
-	unsigned long error_code;
+	unsigned long inst;
 	struct task_struct *tsk = current;
-#ifdef CONFIG_SH_FPU_EMU
-	unsigned short inst = 0;
 
+	if (kprobe_handle_illslot(regs->pc) == 0)
+		return;
+
+#ifdef CONFIG_SH_FPU_EMU
 	get_user(inst, (unsigned short *)regs->pc + 1);
 	if (!do_fpu_inst(inst, regs)) {
 		get_user(inst, (unsigned short *)regs->pc);
@@ -754,12 +863,11 @@ asmlinkage void do_illegal_slot_inst(unsigned long r4, unsigned long r5,
 	/* not a FPU inst. */
 #endif
 
-	lookup_exception_vector(error_code);
+	inst = lookup_exception_vector();
 
 	local_irq_enable();
-	CHK_REMOTE_DEBUG(regs);
 	force_sig(SIGILL, tsk);
-	die_if_no_fixup("illegal slot instruction", regs, error_code);
+	die_if_no_fixup("illegal slot instruction", regs, inst);
 }
 
 asmlinkage void do_exception_error(unsigned long r4, unsigned long r5,
@@ -769,7 +877,7 @@ asmlinkage void do_exception_error(unsigned long r4, unsigned long r5,
 	struct pt_regs *regs = RELOC_HIDE(&__regs, 0);
 	long ex;
 
-	lookup_exception_vector(ex);
+	ex = lookup_exception_vector();
 	die_if_kernel("exception", regs, ex);
 }
 
@@ -857,35 +965,12 @@ void __init trap_init(void)
 #endif
 #endif
 
-	/* Setup VBR for boot cpu */
-	per_cpu_trap_init();
-}
-
-void show_trace(struct task_struct *tsk, unsigned long *sp,
-		struct pt_regs *regs)
-{
-	unsigned long addr;
-
-	if (regs && user_mode(regs))
-		return;
-
-	printk("\nCall trace: ");
-#ifdef CONFIG_KALLSYMS
-	printk("\n");
+#ifdef TRAP_UBC
+	set_exception_table_vec(TRAP_UBC, break_point_trap);
 #endif
 
-	while (!kstack_end(sp)) {
-		addr = *sp++;
-		if (kernel_text_address(addr))
-			print_ip_sym(addr);
-	}
-
-	printk("\n");
-
-	if (!tsk)
-		tsk = current;
-
-	debug_show_held_locks(tsk);
+	/* Setup VBR for boot cpu */
+	per_cpu_trap_init();
 }
 
 void show_stack(struct task_struct *tsk, unsigned long *sp)
@@ -910,3 +995,38 @@ void dump_stack(void)
 	show_stack(NULL, NULL);
 }
 EXPORT_SYMBOL(dump_stack);
+
+#ifdef CONFIG_PROC_FS
+/*
+ * This needs to be done after sysctl_init, otherwise sys/ will be
+ * overwritten.  Actually, this shouldn't be in sys/ at all since
+ * it isn't a sysctl, and it doesn't contain sysctl information.
+ * We now locate it in /proc/cpu/alignment instead.
+ */
+static int __init alignment_init(void)
+{
+	struct proc_dir_entry *dir, *res;
+
+	dir = proc_mkdir("cpu", NULL);
+	if (!dir)
+		return -ENOMEM;
+
+	res = create_proc_entry("alignment", S_IWUSR | S_IRUGO, dir);
+	if (!res)
+		return -ENOMEM;
+
+	res->read_proc = proc_alignment_read;
+	res->write_proc = proc_alignment_write;
+
+        res = create_proc_entry("kernel_alignment", S_IWUSR | S_IRUGO, dir);
+        if (!res)
+                return -ENOMEM;
+
+        res->read_proc = proc_alignment_read;
+        res->write_proc = proc_alignment_kern_write;
+
+	return 0;
+}
+
+fs_initcall(alignment_init);
+#endif

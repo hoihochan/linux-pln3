@@ -59,8 +59,6 @@ struct mkiss {
 	unsigned char		*xhead;	/* pointer to next byte to XMIT */
 	int			xleft;	/* bytes left in XMIT queue     */
 
-	struct net_device_stats	stats;
-
 	/* Detailed SLIP statistics. */
 	int		mtu;		/* Our mtu (to spot changes!)   */
 	int		buffsize;	/* Max buffers sizes            */
@@ -246,22 +244,21 @@ static int kiss_esc_crc(unsigned char *s, unsigned char *d, unsigned short crc,
 /* Send one completely decapsulated AX.25 packet to the AX.25 layer. */
 static void ax_bump(struct mkiss *ax)
 {
-	unsigned long flags;
 	struct sk_buff *skb;
 	int count;
 
-	spin_lock_irqsave(&ax->buflock, flags);
+	spin_lock_bh(&ax->buflock);
 	if (ax->rbuff[0] > 0x0f) {
 		if (ax->rbuff[0] & 0x80) {
 			if (check_crc_16(ax->rbuff, ax->rcount) < 0) {
-				ax->stats.rx_errors++;
-				spin_unlock_irqrestore(&ax->buflock, flags);
+				ax->dev->stats.rx_errors++;
+				spin_unlock_bh(&ax->buflock);
 
 				return;
 			}
 			if (ax->crcmode != CRC_MODE_SMACK && ax->crcauto) {
 				printk(KERN_INFO
-				       "mkiss: %s: Switchting to crc-smack\n",
+				       "mkiss: %s: Switching to crc-smack\n",
 				       ax->dev->name);
 				ax->crcmode = CRC_MODE_SMACK;
 			}
@@ -269,13 +266,13 @@ static void ax_bump(struct mkiss *ax)
 			*ax->rbuff &= ~0x80;
 		} else if (ax->rbuff[0] & 0x20)  {
 			if (check_crc_flex(ax->rbuff, ax->rcount) < 0) {
-				ax->stats.rx_errors++;
-				spin_unlock_irqrestore(&ax->buflock, flags);
+				ax->dev->stats.rx_errors++;
+				spin_unlock_bh(&ax->buflock);
 				return;
 			}
 			if (ax->crcmode != CRC_MODE_FLEX && ax->crcauto) {
 				printk(KERN_INFO
-				       "mkiss: %s: Switchting to crc-flexnet\n",
+				       "mkiss: %s: Switching to crc-flexnet\n",
 				       ax->dev->name);
 				ax->crcmode = CRC_MODE_FLEX;
 			}
@@ -296,24 +293,21 @@ static void ax_bump(struct mkiss *ax)
 	if ((skb = dev_alloc_skb(count)) == NULL) {
 		printk(KERN_ERR "mkiss: %s: memory squeeze, dropping packet.\n",
 		       ax->dev->name);
-		ax->stats.rx_dropped++;
-		spin_unlock_irqrestore(&ax->buflock, flags);
+		ax->dev->stats.rx_dropped++;
+		spin_unlock_bh(&ax->buflock);
 		return;
 	}
 
 	memcpy(skb_put(skb,count), ax->rbuff, count);
 	skb->protocol = ax25_type_trans(skb, ax->dev);
 	netif_rx(skb);
-	ax->dev->last_rx = jiffies;
-	ax->stats.rx_packets++;
-	ax->stats.rx_bytes += count;
-	spin_unlock_irqrestore(&ax->buflock, flags);
+	ax->dev->stats.rx_packets++;
+	ax->dev->stats.rx_bytes += count;
+	spin_unlock_bh(&ax->buflock);
 }
 
 static void kiss_unesc(struct mkiss *ax, unsigned char s)
 {
-	unsigned long flags;
-
 	switch (s) {
 	case END:
 		/* drop keeptest bit = VSV */
@@ -340,18 +334,18 @@ static void kiss_unesc(struct mkiss *ax, unsigned char s)
 		break;
 	}
 
-	spin_lock_irqsave(&ax->buflock, flags);
+	spin_lock_bh(&ax->buflock);
 	if (!test_bit(AXF_ERROR, &ax->flags)) {
 		if (ax->rcount < ax->buffsize) {
 			ax->rbuff[ax->rcount++] = s;
-			spin_unlock_irqrestore(&ax->buflock, flags);
+			spin_unlock_bh(&ax->buflock);
 			return;
 		}
 
-		ax->stats.rx_over_errors++;
+		ax->dev->stats.rx_over_errors++;
 		set_bit(AXF_ERROR, &ax->flags);
 	}
-	spin_unlock_irqrestore(&ax->buflock, flags);
+	spin_unlock_bh(&ax->buflock);
 }
 
 static int ax_set_mac_address(struct net_device *dev, void *addr)
@@ -373,7 +367,6 @@ static void ax_changedmtu(struct mkiss *ax)
 {
 	struct net_device *dev = ax->dev;
 	unsigned char *xbuff, *rbuff, *oxbuff, *orbuff;
-	unsigned long flags;
 	int len;
 
 	len = dev->mtu * 2;
@@ -399,7 +392,7 @@ static void ax_changedmtu(struct mkiss *ax)
 		return;
 	}
 
-	spin_lock_irqsave(&ax->buflock, flags);
+	spin_lock_bh(&ax->buflock);
 
 	oxbuff    = ax->xbuff;
 	ax->xbuff = xbuff;
@@ -411,7 +404,7 @@ static void ax_changedmtu(struct mkiss *ax)
 			memcpy(ax->xbuff, ax->xhead, ax->xleft);
 		} else  {
 			ax->xleft = 0;
-			ax->stats.tx_dropped++;
+			dev->stats.tx_dropped++;
 		}
 	}
 
@@ -422,7 +415,7 @@ static void ax_changedmtu(struct mkiss *ax)
 			memcpy(ax->rbuff, orbuff, ax->rcount);
 		} else  {
 			ax->rcount = 0;
-			ax->stats.rx_over_errors++;
+			dev->stats.rx_over_errors++;
 			set_bit(AXF_ERROR, &ax->flags);
 		}
 	}
@@ -430,7 +423,7 @@ static void ax_changedmtu(struct mkiss *ax)
 	ax->mtu      = dev->mtu + 73;
 	ax->buffsize = len;
 
-	spin_unlock_irqrestore(&ax->buflock, flags);
+	spin_unlock_bh(&ax->buflock);
 
 	kfree(oxbuff);
 	kfree(orbuff);
@@ -440,7 +433,6 @@ static void ax_changedmtu(struct mkiss *ax)
 static void ax_encaps(struct net_device *dev, unsigned char *icp, int len)
 {
 	struct mkiss *ax = netdev_priv(dev);
-	unsigned long flags;
 	unsigned char *p;
 	int actual, count;
 
@@ -450,14 +442,14 @@ static void ax_encaps(struct net_device *dev, unsigned char *icp, int len)
 	if (len > ax->mtu) {		/* Sigh, shouldn't occur BUT ... */
 		len = ax->mtu;
 		printk(KERN_ERR "mkiss: %s: truncating oversized transmit packet!\n", ax->dev->name);
-		ax->stats.tx_dropped++;
+		dev->stats.tx_dropped++;
 		netif_start_queue(dev);
 		return;
 	}
 
 	p = icp;
 
-	spin_lock_irqsave(&ax->buflock, flags);
+	spin_lock_bh(&ax->buflock);
 	if ((*p & 0x0f) != 0) {
 		/* Configuration Command (kissparms(1).
 		 * Protocol spec says: never append CRC.
@@ -487,7 +479,7 @@ static void ax_encaps(struct net_device *dev, unsigned char *icp, int len)
 				ax->crcauto = (cmd ? 0 : 1);
 				printk(KERN_INFO "mkiss: %s: crc mode %s %d\n", ax->dev->name, (len) ? "set to" : "is", cmd);
 			}
-			spin_unlock_irqrestore(&ax->buflock, flags);
+			spin_unlock_bh(&ax->buflock);
 			netif_start_queue(dev);
 
 			return;
@@ -520,12 +512,12 @@ static void ax_encaps(struct net_device *dev, unsigned char *icp, int len)
 			count = kiss_esc(p, (unsigned char *)ax->xbuff, len);
 		}
   	}
-	spin_unlock_irqrestore(&ax->buflock, flags);
+	spin_unlock_bh(&ax->buflock);
 
 	set_bit(TTY_DO_WRITE_WAKEUP, &ax->tty->flags);
 	actual = ax->tty->ops->write(ax->tty, ax->xbuff, count);
-	ax->stats.tx_packets++;
-	ax->stats.tx_bytes += actual;
+	dev->stats.tx_packets++;
+	dev->stats.tx_bytes += actual;
 
 	ax->dev->trans_start = jiffies;
 	ax->xleft = count - actual;
@@ -533,13 +525,13 @@ static void ax_encaps(struct net_device *dev, unsigned char *icp, int len)
 }
 
 /* Encapsulate an AX.25 packet and kick it into a TTY queue. */
-static int ax_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t ax_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct mkiss *ax = netdev_priv(dev);
 
 	if (!netif_running(dev))  {
 		printk(KERN_ERR "mkiss: %s: xmit call when iface is down\n", dev->name);
-		return 1;
+		return NETDEV_TX_BUSY;
 	}
 
 	if (netif_queue_stopped(dev)) {
@@ -549,7 +541,7 @@ static int ax_xmit(struct sk_buff *skb, struct net_device *dev)
 		 */
 		if (time_before(jiffies, dev->trans_start + 20 * HZ)) {
 			/* 20 sec timeout not reached */
-			return 1;
+			return NETDEV_TX_BUSY;
 		}
 
 		printk(KERN_ERR "mkiss: %s: transmit timed out, %s?\n", dev->name,
@@ -568,7 +560,7 @@ static int ax_xmit(struct sk_buff *skb, struct net_device *dev)
 		kfree_skb(skb);
 	}
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 static int ax_open_dev(struct net_device *dev)
@@ -670,32 +662,28 @@ static int ax_close(struct net_device *dev)
 	return 0;
 }
 
-static struct net_device_stats *ax_get_stats(struct net_device *dev)
-{
-	struct mkiss *ax = netdev_priv(dev);
-
-	return &ax->stats;
-}
-
 static const struct header_ops ax_header_ops = {
 	.create    = ax_header,
 	.rebuild   = ax_rebuild_header,
+};
+
+static const struct net_device_ops ax_netdev_ops = {
+	.ndo_open            = ax_open_dev,
+	.ndo_stop            = ax_close,
+	.ndo_start_xmit	     = ax_xmit,
+	.ndo_set_mac_address = ax_set_mac_address,
 };
 
 static void ax_setup(struct net_device *dev)
 {
 	/* Finish setting up the DEVICE info. */
 	dev->mtu             = AX_MTU;
-	dev->hard_start_xmit = ax_xmit;
-	dev->open            = ax_open_dev;
-	dev->stop            = ax_close;
-	dev->get_stats	     = ax_get_stats;
-	dev->set_mac_address = ax_set_mac_address;
 	dev->hard_header_len = 0;
 	dev->addr_len        = 0;
 	dev->type            = ARPHRD_AX25;
 	dev->tx_queue_len    = 10;
 	dev->header_ops      = &ax_header_ops;
+	dev->netdev_ops	     = &ax_netdev_ops;
 
 
 	memcpy(dev->broadcast, &ax25_bcast, AX25_ADDR_LEN);
@@ -716,14 +704,13 @@ static DEFINE_RWLOCK(disc_data_lock);
 
 static struct mkiss *mkiss_get(struct tty_struct *tty)
 {
-	unsigned long flags;
 	struct mkiss *ax;
 
-	read_lock_irqsave(&disc_data_lock, flags);
+	read_lock(&disc_data_lock);
 	ax = tty->disc_data;
 	if (ax)
 		atomic_inc(&ax->refcnt);
-	read_unlock_irqrestore(&disc_data_lock, flags);
+	read_unlock(&disc_data_lock);
 
 	return ax;
 }
@@ -822,13 +809,12 @@ out:
 
 static void mkiss_close(struct tty_struct *tty)
 {
-	unsigned long flags;
 	struct mkiss *ax;
 
-	write_lock_irqsave(&disc_data_lock, flags);
+	write_lock(&disc_data_lock);
 	ax = tty->disc_data;
 	tty->disc_data = NULL;
-	write_unlock_irqrestore(&disc_data_lock, flags);
+	write_unlock(&disc_data_lock);
 
 	if (!ax)
 		return;
@@ -854,12 +840,13 @@ static int mkiss_ioctl(struct tty_struct *tty, struct file *file,
 	unsigned int cmd, unsigned long arg)
 {
 	struct mkiss *ax = mkiss_get(tty);
-	struct net_device *dev = ax->dev;
+	struct net_device *dev;
 	unsigned int tmp, err;
 
 	/* First make sure we're connected. */
 	if (ax == NULL)
 		return -ENXIO;
+	dev = ax->dev;
 
 	switch (cmd) {
  	case SIOCGIFNAME:
@@ -936,7 +923,7 @@ static void mkiss_receive_buf(struct tty_struct *tty, const unsigned char *cp,
 	while (count--) {
 		if (fp != NULL && *fp++) {
 			if (!test_and_set_bit(AXF_ERROR, &ax->flags))
-				ax->stats.rx_errors++;
+				ax->dev->stats.rx_errors++;
 			cp++;
 			continue;
 		}
@@ -989,9 +976,9 @@ static struct tty_ldisc_ops ax_ldisc = {
 	.write_wakeup	= mkiss_write_wakeup
 };
 
-static char banner[] __initdata = KERN_INFO \
+static const char banner[] __initdata = KERN_INFO \
 	"mkiss: AX.25 Multikiss, Hans Albas PE1AYX\n";
-static char msg_regfail[] __initdata = KERN_ERR \
+static const char msg_regfail[] __initdata = KERN_ERR \
 	"mkiss: can't register line discipline (err = %d)\n";
 
 static int __init mkiss_init_driver(void)
@@ -1000,8 +987,9 @@ static int __init mkiss_init_driver(void)
 
 	printk(banner);
 
-	if ((status = tty_register_ldisc(N_AX25, &ax_ldisc)) != 0)
-		printk(msg_regfail);
+	status = tty_register_ldisc(N_AX25, &ax_ldisc);
+	if (status != 0)
+		printk(msg_regfail, status);
 
 	return status;
 }

@@ -16,11 +16,23 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/time.h>
-#include <linux/msdos_fs.h>
-#include <linux/smp_lock.h>
 #include <linux/buffer_head.h>
 #include <linux/compat.h>
 #include <asm/uaccess.h>
+#include "fat.h"
+
+/*
+ * Maximum buffer size of short name.
+ * [(MSDOS_NAME + '.') * max one char + nul]
+ * For msdos style, ['.' (hidden) + MSDOS_NAME + '.' + nul]
+ */
+#define FAT_MAX_SHORT_SIZE	((MSDOS_NAME + 1) * NLS_MAX_CHARSET_SIZE + 1)
+/*
+ * Maximum buffer size of unicode chars from slots.
+ * [(max longname slots * 13 (size in a slot) + nul) * sizeof(wchar_t)]
+ */
+#define FAT_MAX_UNI_CHARS	((MSDOS_SLOTS - 1) * 13 + 1)
+#define FAT_MAX_UNI_SIZE	(FAT_MAX_UNI_CHARS * sizeof(wchar_t))
 
 static inline loff_t fat_make_i_pos(struct super_block *sb,
 				    struct buffer_head *bh,
@@ -77,7 +89,7 @@ next:
 
 	*bh = NULL;
 	iblock = *pos >> sb->s_blocksize_bits;
-	err = fat_bmap(dir, iblock, &phys, &mapped_blocks);
+	err = fat_bmap(dir, iblock, &phys, &mapped_blocks, 0);
 	if (err || !phys)
 		return -1;	/* beyond EOF or error */
 
@@ -86,7 +98,7 @@ next:
 	*bh = sb_bread(sb, phys);
 	if (*bh == NULL) {
 		printk(KERN_ERR "FAT: Directory bread(block %llu) failed\n",
-		       (unsigned long long)phys);
+		       (llu)phys);
 		/* skip this block */
 		*pos = (iblock + 1) << sb->s_blocksize_bits;
 		goto next;
@@ -171,7 +183,8 @@ static inline int fat_uni_to_x8(struct msdos_sb_info *sbi, const wchar_t *uni,
 				unsigned char *buf, int size)
 {
 	if (sbi->options.utf8)
-		return utf8_wcstombs(buf, uni, size);
+		return utf16s_to_utf8s(uni, FAT_MAX_UNI_CHARS,
+				UTF16_HOST_ENDIAN, buf, size);
 	else
 		return uni16_to_x8(buf, uni, size, sbi->options.unicode_xlate,
 				   sbi->nls_io);
@@ -325,19 +338,6 @@ parse_long:
 }
 
 /*
- * Maximum buffer size of short name.
- * [(MSDOS_NAME + '.') * max one char + nul]
- * For msdos style, ['.' (hidden) + MSDOS_NAME + '.' + nul]
- */
-#define FAT_MAX_SHORT_SIZE	((MSDOS_NAME + 1) * NLS_MAX_CHARSET_SIZE + 1)
-/*
- * Maximum buffer size of unicode chars from slots.
- * [(max longname slots * 13 (size in a slot) + nul) * sizeof(wchar_t)]
- */
-#define FAT_MAX_UNI_CHARS	((MSDOS_SLOTS - 1) * 13 + 1)
-#define FAT_MAX_UNI_SIZE	(FAT_MAX_UNI_CHARS * sizeof(wchar_t))
-
-/*
  * Return values: negative -> error, 0 -> not found, positive -> found,
  * value is the total amount of slots, including the shortname entry.
  */
@@ -373,9 +373,10 @@ parse_record:
 		if (de->attr == ATTR_EXT) {
 			int status = fat_parse_long(inode, &cpos, &bh, &de,
 						    &unicode, &nr_slots);
-			if (status < 0)
-				return status;
-			else if (status == PARSE_INVALID)
+			if (status < 0) {
+				err = status;
+				goto end_of_dir;
+			} else if (status == PARSE_INVALID)
 				continue;
 			else if (status == PARSE_NOT_LONGNAME)
 				goto parse_record;
@@ -832,13 +833,14 @@ static long fat_compat_dir_ioctl(struct file *filp, unsigned cmd,
 #endif /* CONFIG_COMPAT */
 
 const struct file_operations fat_dir_operations = {
+	.llseek		= generic_file_llseek,
 	.read		= generic_read_dir,
 	.readdir	= fat_readdir,
 	.ioctl		= fat_dir_ioctl,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl	= fat_compat_dir_ioctl,
 #endif
-	.fsync		= file_fsync,
+	.fsync		= fat_file_fsync,
 };
 
 static int fat_get_short_entry(struct inode *dir, loff_t *pos,
@@ -965,7 +967,7 @@ static int __fat_remove_entries(struct inode *dir, loff_t pos, int nr_slots)
 			de++;
 			nr_slots--;
 		}
-		mark_buffer_dirty(bh);
+		mark_buffer_dirty_inode(bh, dir);
 		if (IS_DIRSYNC(dir))
 			err = sync_dirty_buffer(bh);
 		brelse(bh);
@@ -999,7 +1001,7 @@ int fat_remove_entries(struct inode *dir, struct fat_slot_info *sinfo)
 		de--;
 		nr_slots--;
 	}
-	mark_buffer_dirty(bh);
+	mark_buffer_dirty_inode(bh, dir);
 	if (IS_DIRSYNC(dir))
 		err = sync_dirty_buffer(bh);
 	brelse(bh);
@@ -1049,7 +1051,7 @@ static int fat_zeroed_cluster(struct inode *dir, sector_t blknr, int nr_used,
 		}
 		memset(bhs[n]->b_data, 0, sb->s_blocksize);
 		set_buffer_uptodate(bhs[n]);
-		mark_buffer_dirty(bhs[n]);
+		mark_buffer_dirty_inode(bhs[n], dir);
 
 		n++;
 		blknr++;
@@ -1088,6 +1090,7 @@ int fat_alloc_new_dir(struct inode *dir, struct timespec *ts)
 	struct msdos_dir_entry *de;
 	sector_t blknr;
 	__le16 date, time;
+	u8 time_cs;
 	int err, cluster;
 
 	err = fat_alloc_clusters(dir, &cluster, 1);
@@ -1101,7 +1104,7 @@ int fat_alloc_new_dir(struct inode *dir, struct timespec *ts)
 		goto error_free;
 	}
 
-	fat_date_unix2dos(ts->tv_sec, &time, &date, sbi->options.tz_utc);
+	fat_time_unix2fat(sbi, ts, &time, &date, &time_cs);
 
 	de = (struct msdos_dir_entry *)bhs[0]->b_data;
 	/* filling the new directory slots ("." and ".." entries) */
@@ -1111,13 +1114,14 @@ int fat_alloc_new_dir(struct inode *dir, struct timespec *ts)
 	de[0].lcase = de[1].lcase = 0;
 	de[0].time = de[1].time = time;
 	de[0].date = de[1].date = date;
-	de[0].ctime_cs = de[1].ctime_cs = 0;
 	if (sbi->options.isvfat) {
 		/* extra timestamps */
 		de[0].ctime = de[1].ctime = time;
+		de[0].ctime_cs = de[1].ctime_cs = time_cs;
 		de[0].adate = de[0].cdate = de[1].adate = de[1].cdate = date;
 	} else {
 		de[0].ctime = de[1].ctime = 0;
+		de[0].ctime_cs = de[1].ctime_cs = 0;
 		de[0].adate = de[0].cdate = de[1].adate = de[1].cdate = 0;
 	}
 	de[0].start = cpu_to_le16(cluster);
@@ -1127,7 +1131,7 @@ int fat_alloc_new_dir(struct inode *dir, struct timespec *ts)
 	de[0].size = de[1].size = 0;
 	memset(de + 2, 0, sb->s_blocksize - 2 * sizeof(*de));
 	set_buffer_uptodate(bhs[0]);
-	mark_buffer_dirty(bhs[0]);
+	mark_buffer_dirty_inode(bhs[0], dir);
 
 	err = fat_zeroed_cluster(dir, blknr, 1, bhs, MAX_BUF_PER_PAGE);
 	if (err)
@@ -1189,7 +1193,7 @@ static int fat_add_new_entries(struct inode *dir, void *slots, int nr_slots,
 			slots += copy;
 			size -= copy;
 			set_buffer_uptodate(bhs[n]);
-			mark_buffer_dirty(bhs[n]);
+			mark_buffer_dirty_inode(bhs[n], dir);
 			if (!size)
 				break;
 			n++;
@@ -1289,7 +1293,7 @@ found:
 		for (i = 0; i < long_bhs; i++) {
 			int copy = min_t(int, sb->s_blocksize - offset, size);
 			memcpy(bhs[i]->b_data + offset, slots, copy);
-			mark_buffer_dirty(bhs[i]);
+			mark_buffer_dirty_inode(bhs[i], dir);
 			offset = 0;
 			slots += copy;
 			size -= copy;
@@ -1300,7 +1304,7 @@ found:
 			/* Fill the short name slot. */
 			int copy = min_t(int, sb->s_blocksize - offset, size);
 			memcpy(bhs[i]->b_data + offset, slots, copy);
-			mark_buffer_dirty(bhs[i]);
+			mark_buffer_dirty_inode(bhs[i], dir);
 			if (IS_DIRSYNC(dir))
 				err = sync_dirty_buffer(bhs[i]);
 		}
@@ -1330,7 +1334,7 @@ found:
 			goto error_remove;
 		}
 		if (dir->i_size & (sbi->cluster_size - 1)) {
-			fat_fs_panic(sb, "Odd directory size");
+			fat_fs_error(sb, "Odd directory size");
 			dir->i_size = (dir->i_size + sbi->cluster_size - 1)
 				& ~((loff_t)sbi->cluster_size - 1);
 		}

@@ -12,6 +12,7 @@
 */
 
 #include <linux/rtc.h>
+#include <linux/sched.h>
 #include <linux/log2.h>
 
 int rtc_read_time(struct rtc_device *rtc, struct rtc_time *tm)
@@ -50,10 +51,15 @@ int rtc_set_time(struct rtc_device *rtc, struct rtc_time *tm)
 
 	if (!rtc->ops)
 		err = -ENODEV;
-	else if (!rtc->ops->set_time)
-		err = -EINVAL;
-	else
+	else if (rtc->ops->set_time)
 		err = rtc->ops->set_time(rtc->dev.parent, tm);
+	else if (rtc->ops->set_mmss) {
+		unsigned long secs;
+		err = rtc_tm_to_time(tm, &secs);
+		if (err == 0)
+			err = rtc->ops->set_mmss(rtc->dev.parent, secs);
+	} else
+		err = -EINVAL;
 
 	mutex_unlock(&rtc->ops_lock);
 	return err;
@@ -271,7 +277,7 @@ int rtc_read_alarm(struct rtc_device *rtc, struct rtc_wkalrm *alarm)
 		dev_dbg(&rtc->dev, "alarm rollover: %s\n", "year");
 		do {
 			alarm->time.tm_year++;
-		} while (!rtc_valid_tm(&alarm->time));
+		} while (rtc_valid_tm(&alarm->time) != 0);
 		break;
 
 	default:
@@ -307,24 +313,80 @@ int rtc_set_alarm(struct rtc_device *rtc, struct rtc_wkalrm *alarm)
 }
 EXPORT_SYMBOL_GPL(rtc_set_alarm);
 
+int rtc_alarm_irq_enable(struct rtc_device *rtc, unsigned int enabled)
+{
+	int err = mutex_lock_interruptible(&rtc->ops_lock);
+	if (err)
+		return err;
+
+	if (!rtc->ops)
+		err = -ENODEV;
+	else if (!rtc->ops->alarm_irq_enable)
+		err = -EINVAL;
+	else
+		err = rtc->ops->alarm_irq_enable(rtc->dev.parent, enabled);
+
+	mutex_unlock(&rtc->ops_lock);
+	return err;
+}
+EXPORT_SYMBOL_GPL(rtc_alarm_irq_enable);
+
+int rtc_update_irq_enable(struct rtc_device *rtc, unsigned int enabled)
+{
+	int err = mutex_lock_interruptible(&rtc->ops_lock);
+	if (err)
+		return err;
+
+#ifdef CONFIG_RTC_INTF_DEV_UIE_EMUL
+	if (enabled == 0 && rtc->uie_irq_active) {
+		mutex_unlock(&rtc->ops_lock);
+		return rtc_dev_update_irq_enable_emul(rtc, enabled);
+	}
+#endif
+
+	if (!rtc->ops)
+		err = -ENODEV;
+	else if (!rtc->ops->update_irq_enable)
+		err = -EINVAL;
+	else
+		err = rtc->ops->update_irq_enable(rtc->dev.parent, enabled);
+
+	mutex_unlock(&rtc->ops_lock);
+
+#ifdef CONFIG_RTC_INTF_DEV_UIE_EMUL
+	/*
+	 * Enable emulation if the driver did not provide
+	 * the update_irq_enable function pointer or if returned
+	 * -EINVAL to signal that it has been configured without
+	 * interrupts or that are not available at the moment.
+	 */
+	if (err == -EINVAL)
+		err = rtc_dev_update_irq_enable_emul(rtc, enabled);
+#endif
+	return err;
+}
+EXPORT_SYMBOL_GPL(rtc_update_irq_enable);
+
 /**
  * rtc_update_irq - report RTC periodic, alarm, and/or update irqs
  * @rtc: the rtc device
  * @num: how many irqs are being reported (usually one)
  * @events: mask of RTC_IRQF with one or more of RTC_PF, RTC_AF, RTC_UF
- * Context: in_interrupt(), irqs blocked
+ * Context: any
  */
 void rtc_update_irq(struct rtc_device *rtc,
 		unsigned long num, unsigned long events)
 {
-	spin_lock(&rtc->irq_lock);
-	rtc->irq_data = (rtc->irq_data + (num << 8)) | events;
-	spin_unlock(&rtc->irq_lock);
+	unsigned long flags;
 
-	spin_lock(&rtc->irq_task_lock);
+	spin_lock_irqsave(&rtc->irq_lock, flags);
+	rtc->irq_data = (rtc->irq_data + (num << 8)) | events;
+	spin_unlock_irqrestore(&rtc->irq_lock, flags);
+
+	spin_lock_irqsave(&rtc->irq_task_lock, flags);
 	if (rtc->irq_task)
 		rtc->irq_task->func(rtc->irq_task->private_data);
-	spin_unlock(&rtc->irq_task_lock);
+	spin_unlock_irqrestore(&rtc->irq_task_lock, flags);
 
 	wake_up_interruptible(&rtc->irq_queue);
 	kill_fasync(&rtc->async_queue, SIGIO, POLL_IN);
@@ -335,7 +397,7 @@ static int __rtc_match(struct device *dev, void *data)
 {
 	char *name = (char *)data;
 
-	if (strncmp(dev->bus_id, name, BUS_ID_SIZE) == 0)
+	if (strcmp(dev_name(dev), name) == 0)
 		return 1;
 	return 0;
 }
@@ -449,9 +511,6 @@ int rtc_irq_set_freq(struct rtc_device *rtc, struct rtc_task *task, int freq)
 
 	if (rtc->ops->irq_set_freq == NULL)
 		return -ENXIO;
-
-	if (!is_power_of_2(freq))
-		return -EINVAL;
 
 	spin_lock_irqsave(&rtc->irq_task_lock, flags);
 	if (rtc->irq_task != NULL && task == NULL)

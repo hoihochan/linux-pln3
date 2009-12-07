@@ -227,7 +227,6 @@ static inline void snd_bt87x_writel(struct snd_bt87x *chip, u32 reg, u32 value)
 static int snd_bt87x_create_risc(struct snd_bt87x *chip, struct snd_pcm_substream *substream,
 			       	 unsigned int periods, unsigned int period_bytes)
 {
-	struct snd_sg_buf *sgbuf = snd_pcm_substream_sgbuf(substream);
 	unsigned int i, offset;
 	u32 *risc;
 
@@ -246,6 +245,7 @@ static int snd_bt87x_create_risc(struct snd_bt87x *chip, struct snd_pcm_substrea
 		rest = period_bytes;
 		do {
 			u32 cmd, len;
+			unsigned int addr;
 
 			len = PAGE_SIZE - (offset % PAGE_SIZE);
 			if (len > rest)
@@ -260,7 +260,8 @@ static int snd_bt87x_create_risc(struct snd_bt87x *chip, struct snd_pcm_substrea
 			if (len == rest)
 				cmd |= RISC_EOL | RISC_IRQ;
 			*risc++ = cpu_to_le32(cmd);
-			*risc++ = cpu_to_le32((u32)snd_pcm_sgbuf_get_addr(sgbuf, offset));
+			addr = snd_pcm_sgbuf_get_addr(substream, offset);
+			*risc++ = cpu_to_le32(addr);
 			offset += len;
 			rest -= len;
 		} while (rest > 0);
@@ -348,7 +349,8 @@ static struct snd_pcm_hardware snd_bt87x_digital_hw = {
 	.info = SNDRV_PCM_INFO_MMAP |
 		SNDRV_PCM_INFO_INTERLEAVED |
 		SNDRV_PCM_INFO_BLOCK_TRANSFER |
-		SNDRV_PCM_INFO_MMAP_VALID,
+		SNDRV_PCM_INFO_MMAP_VALID |
+		SNDRV_PCM_INFO_BATCH,
 	.formats = SNDRV_PCM_FMTBIT_S16_LE,
 	.rates = 0, /* set at runtime */
 	.channels_min = 2,
@@ -364,7 +366,8 @@ static struct snd_pcm_hardware snd_bt87x_analog_hw = {
 	.info = SNDRV_PCM_INFO_MMAP |
 		SNDRV_PCM_INFO_INTERLEAVED |
 		SNDRV_PCM_INFO_BLOCK_TRANSFER |
-		SNDRV_PCM_INFO_MMAP_VALID,
+		SNDRV_PCM_INFO_MMAP_VALID |
+		SNDRV_PCM_INFO_BATCH,
 	.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S8,
 	.rates = SNDRV_PCM_RATE_KNOT,
 	.rate_min = ANALOG_CLOCK / CLOCK_DIV_MAX,
@@ -748,8 +751,7 @@ static int __devinit snd_bt87x_create(struct snd_card *card,
 		pci_disable_device(pci);
 		return err;
 	}
-	chip->mmio = ioremap_nocache(pci_resource_start(pci, 0),
-				     pci_resource_len(pci, 0));
+	chip->mmio = pci_ioremap_bar(pci, 0);
 	if (!chip->mmio) {
 		snd_printk(KERN_ERR "cannot remap io memory\n");
 		err = -ENOMEM;
@@ -806,8 +808,12 @@ static struct pci_device_id snd_bt87x_ids[] = {
 	BT_DEVICE(PCI_DEVICE_ID_BROOKTREE_878, 0x1002, 0x0001, GENERIC),
 	/* Leadtek Winfast tv 2000xp delux */
 	BT_DEVICE(PCI_DEVICE_ID_BROOKTREE_878, 0x107d, 0x6606, GENERIC),
+	/* Pinnacle PCTV */
+	BT_DEVICE(PCI_DEVICE_ID_BROOKTREE_878, 0x11bd, 0x0012, GENERIC),
 	/* Voodoo TV 200 */
 	BT_DEVICE(PCI_DEVICE_ID_BROOKTREE_878, 0x121a, 0x3000, GENERIC),
+	/* Askey Computer Corp. MagicTView'99 */
+	BT_DEVICE(PCI_DEVICE_ID_BROOKTREE_878, 0x144f, 0x3000, GENERIC),
 	/* AVerMedia Studio No. 103, 203, ...? */
 	BT_DEVICE(PCI_DEVICE_ID_BROOKTREE_878, 0x1461, 0x0003, AVPHONE98),
 	/* Prolink PixelView PV-M4900 */
@@ -888,9 +894,9 @@ static int __devinit snd_bt87x_probe(struct pci_dev *pci,
 		return -ENOENT;
 	}
 
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE, 0);
-	if (!card)
-		return -ENOMEM;
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE, 0, &card);
+	if (err < 0)
+		return err;
 
 	err = snd_bt87x_create(card, pci, &chip);
 	if (err < 0)

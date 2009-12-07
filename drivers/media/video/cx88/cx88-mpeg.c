@@ -3,7 +3,7 @@
  *  Support for the mpeg transport stream transfers
  *  PCI function #2 of the cx2388x.
  *
- *    (c) 2004 Jelle Foks <jelle@foks.8m.com>
+ *    (c) 2004 Jelle Foks <jelle@foks.us>
  *    (c) 2004 Chris Pascoe <c.pascoe@itee.uq.edu.au>
  *    (c) 2004 Gerd Knorr <kraxel@bytesex.org>
  *
@@ -34,7 +34,7 @@
 /* ------------------------------------------------------------------ */
 
 MODULE_DESCRIPTION("mpeg driver for cx2388x based TV cards");
-MODULE_AUTHOR("Jelle Foks <jelle@foks.8m.com>");
+MODULE_AUTHOR("Jelle Foks <jelle@foks.us>");
 MODULE_AUTHOR("Chris Pascoe <c.pascoe@itee.uq.edu.au>");
 MODULE_AUTHOR("Gerd Knorr <kraxel@bytesex.org> [SuSE Labs]");
 MODULE_LICENSE("GPL");
@@ -116,6 +116,10 @@ static int cx8802_start_dma(struct cx8802_dev    *dev,
 			udelay(100);
 			break;
 		case CX88_BOARD_HAUPPAUGE_HVR1300:
+			/* Enable MPEG parallel IO and video signal pins */
+			cx_write(MO_PINMUX_IO, 0x88);
+			cx_write(TS_SOP_STAT, 0);
+			cx_write(TS_VALERR_CNTRL, 0);
 			break;
 		case CX88_BOARD_PINNACLE_PCTV_HD_800i:
 			/* Enable MPEG parallel IO and video signal pins */
@@ -455,7 +459,7 @@ static int cx8802_init_common(struct cx8802_dev *dev)
 	if (pci_enable_device(dev->pci))
 		return -EIO;
 	pci_set_master(dev->pci);
-	if (!pci_dma_supported(dev->pci,DMA_32BIT_MASK)) {
+	if (!pci_dma_supported(dev->pci,DMA_BIT_MASK(32))) {
 		printk("%s/2: Oops: no 32bit PCI DMA ???\n",dev->core->name);
 		return -EIO;
 	}
@@ -578,9 +582,8 @@ static int cx8802_resume_common(struct pci_dev *pci_dev)
 
 #if defined(CONFIG_VIDEO_CX88_BLACKBIRD) || \
     defined(CONFIG_VIDEO_CX88_BLACKBIRD_MODULE)
-struct cx8802_dev * cx8802_get_device(struct inode *inode)
+struct cx8802_dev *cx8802_get_device(int minor)
 {
-	int minor = iminor(inode);
 	struct cx8802_dev *dev;
 
 	list_for_each_entry(dev, &cx8802_devlist, devlist)
@@ -788,15 +791,15 @@ static int __devinit cx8802_probe(struct pci_dev *pci_dev,
 	dev->pci = pci_dev;
 	dev->core = core;
 
+	/* Maintain a reference so cx88-video can query the 8802 device. */
+	core->dvbdev = dev;
+
 	err = cx8802_init_common(dev);
 	if (err != 0)
 		goto fail_free;
 
 	INIT_LIST_HEAD(&dev->drvlist);
 	list_add_tail(&dev->devlist,&cx8802_devlist);
-
-	/* Maintain a reference so cx88-video can query the 8802 device. */
-	core->dvbdev = dev;
 
 	/* now autoload cx88-dvb or cx88-blackbird */
 	request_modules(dev);
@@ -805,6 +808,7 @@ static int __devinit cx8802_probe(struct pci_dev *pci_dev,
  fail_free:
 	kfree(dev);
  fail_core:
+	core->dvbdev = NULL;
 	cx88_core_put(core,pci_dev);
 	return err;
 }
@@ -866,7 +870,7 @@ static struct pci_driver cx8802_pci_driver = {
 	.remove   = __devexit_p(cx8802_remove),
 };
 
-static int cx8802_init(void)
+static int __init cx8802_init(void)
 {
 	printk(KERN_INFO "cx88/2: cx2388x MPEG-TS Driver Manager version %d.%d.%d loaded\n",
 	       (CX88_VERSION_CODE >> 16) & 0xff,
@@ -879,7 +883,7 @@ static int cx8802_init(void)
 	return pci_register_driver(&cx8802_pci_driver);
 }
 
-static void cx8802_fini(void)
+static void __exit cx8802_fini(void)
 {
 	pci_unregister_driver(&cx8802_pci_driver);
 }

@@ -18,6 +18,7 @@
 #include <linux/hwmon.h>
 #include <linux/gfp.h>
 #include <linux/spinlock.h>
+#include <linux/pci.h>
 
 #define HWMON_ID_PREFIX "hwmon"
 #define HWMON_ID_FORMAT HWMON_ID_PREFIX "%d"
@@ -55,8 +56,8 @@ again:
 		return ERR_PTR(err);
 
 	id = id & MAX_ID_MASK;
-	hwdev = device_create_drvdata(hwmon_class, dev, MKDEV(0, 0), NULL,
-				      HWMON_ID_FORMAT, id);
+	hwdev = device_create(hwmon_class, dev, MKDEV(0, 0), NULL,
+			      HWMON_ID_FORMAT, id);
 
 	if (IS_ERR(hwdev)) {
 		spin_lock(&idr_lock);
@@ -76,7 +77,7 @@ void hwmon_device_unregister(struct device *dev)
 {
 	int id;
 
-	if (likely(sscanf(dev->bus_id, HWMON_ID_FORMAT, &id) == 1)) {
+	if (likely(sscanf(dev_name(dev), HWMON_ID_FORMAT, &id) == 1)) {
 		device_unregister(dev);
 		spin_lock(&idr_lock);
 		idr_remove(&hwmon_idr, id);
@@ -86,8 +87,36 @@ void hwmon_device_unregister(struct device *dev)
 			"hwmon_device_unregister() failed: bad class ID!\n");
 }
 
+static void __init hwmon_pci_quirks(void)
+{
+#if defined CONFIG_X86 && defined CONFIG_PCI
+	struct pci_dev *sb;
+	u16 base;
+	u8 enable;
+
+	/* Open access to 0x295-0x296 on MSI MS-7031 */
+	sb = pci_get_device(PCI_VENDOR_ID_ATI, 0x436c, NULL);
+	if (sb &&
+	    (sb->subsystem_vendor == 0x1462 &&	/* MSI */
+	     sb->subsystem_device == 0x0031)) {	/* MS-7031 */
+
+		pci_read_config_byte(sb, 0x48, &enable);
+		pci_read_config_word(sb, 0x64, &base);
+
+		if (base == 0 && !(enable & BIT(2))) {
+			dev_info(&sb->dev,
+				 "Opening wide generic port at 0x295\n");
+			pci_write_config_word(sb, 0x64, 0x295);
+			pci_write_config_byte(sb, 0x48, enable | BIT(2));
+		}
+	}
+#endif
+}
+
 static int __init hwmon_init(void)
 {
+	hwmon_pci_quirks();
+
 	hwmon_class = class_create(THIS_MODULE, "hwmon");
 	if (IS_ERR(hwmon_class)) {
 		printk(KERN_ERR "hwmon.c: couldn't create sysfs class\n");

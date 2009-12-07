@@ -1,8 +1,8 @@
 /*
  *	Watchdog driver for the SA11x0/PXA2xx
  *
- *      (c) Copyright 2000 Oleg Drokin <green@crimea.edu>
- *          Based on SoftDog driver by Alan Cox <alan@redhat.com>
+ *	(c) Copyright 2000 Oleg Drokin <green@crimea.edu>
+ *	    Based on SoftDog driver by Alan Cox <alan@lxorguk.ukuu.org.uk>
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -15,7 +15,7 @@
  *
  *	(c) Copyright 2000           Oleg Drokin <green@crimea.edu>
  *
- *      27/11/2000 Initial release
+ *	27/11/2000 Initial release
  */
 #include <linux/module.h>
 #include <linux/moduleparam.h>
@@ -27,18 +27,18 @@
 #include <linux/init.h>
 #include <linux/bitops.h>
 #include <linux/uaccess.h>
+#include <linux/timex.h>
 
 #ifdef CONFIG_ARCH_PXA
-#include <mach/pxa-regs.h>
+#include <mach/regs-ost.h>
 #endif
 
 #include <mach/reset.h>
 #include <mach/hardware.h>
 
-#define OSCR_FREQ		CLOCK_TICK_RATE
-
+static unsigned long oscr_freq;
 static unsigned long sa1100wdt_users;
-static int pre_margin;
+static unsigned int pre_margin;
 static int boot_status;
 
 /*
@@ -84,6 +84,7 @@ static const struct watchdog_info ident = {
 	.options	= WDIOF_CARDRESET | WDIOF_SETTIMEOUT
 				| WDIOF_KEEPALIVEPING,
 	.identity	= "SA1100/PXA255 Watchdog",
+	.firmware_version	= 1,
 };
 
 static long sa1100dog_ioctl(struct file *file, unsigned int cmd,
@@ -118,17 +119,17 @@ static long sa1100dog_ioctl(struct file *file, unsigned int cmd,
 		if (ret)
 			break;
 
-		if (time <= 0 || time > 255) {
+		if (time <= 0 || (oscr_freq * (long long)time >= 0xffffffff)) {
 			ret = -EINVAL;
 			break;
 		}
 
-		pre_margin = OSCR_FREQ * time;
+		pre_margin = oscr_freq * time;
 		OSMR3 = OSCR + pre_margin;
 		/*fall through*/
 
 	case WDIOC_GETTIMEOUT:
-		ret = put_user(pre_margin / OSCR_FREQ, p);
+		ret = put_user(pre_margin / oscr_freq, p);
 		break;
 	}
 	return ret;
@@ -155,6 +156,8 @@ static int __init sa1100dog_init(void)
 {
 	int ret;
 
+	oscr_freq = get_clock_tick_rate();
+
 	/*
 	 * Read the reset status, and save it for later.  If
 	 * we suspend, RCSR will be cleared, and the watchdog
@@ -162,7 +165,7 @@ static int __init sa1100dog_init(void)
 	 */
 	boot_status = (reset_status & RESET_STATUS_WATCHDOG) ?
 				WDIOF_CARDRESET : 0;
-	pre_margin = OSCR_FREQ * margin;
+	pre_margin = oscr_freq * margin;
 
 	ret = misc_register(&sa1100dog_miscdev);
 	if (ret == 0)

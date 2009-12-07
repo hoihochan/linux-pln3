@@ -30,7 +30,6 @@
 #include <linux/nfs_idmap.h>
 #include <linux/vfs.h>
 #include <linux/namei.h>
-#include <linux/mnt_namespace.h>
 #include <linux/security.h>
 
 #include <asm/system.h>
@@ -107,11 +106,10 @@ struct dentry *nfs_get_root(struct super_block *sb, struct nfs_fh *mntfh)
 	 * if the dentry tree reaches them; however if the dentry already
 	 * exists, we'll pick it up at this point and use it as the root
 	 */
-	mntroot = d_alloc_anon(inode);
-	if (!mntroot) {
-		iput(inode);
+	mntroot = d_obtain_alias(inode);
+	if (IS_ERR(mntroot)) {
 		dprintk("nfs_get_root: get root dentry failed\n");
-		return ERR_PTR(-ENOMEM);
+		return mntroot;
 	}
 
 	security_d_instantiate(mntroot, inode);
@@ -157,7 +155,7 @@ int nfs4_path_walk(struct nfs_server *server,
 		return ret;
 	}
 
-	if (fattr.type != NFDIR) {
+	if (!S_ISDIR(fattr.mode)) {
 		printk(KERN_ERR "nfs4_get_root:"
 		       " getroot encountered non-directory\n");
 		return -ENOTDIR;
@@ -214,7 +212,7 @@ eat_dot_dir:
 		return ret;
 	}
 
-	if (fattr.type != NFDIR) {
+	if (!S_ISDIR(fattr.mode)) {
 		printk(KERN_ERR "nfs4_get_root:"
 		       " lookupfh encountered non-directory\n");
 		return -ENOTDIR;
@@ -277,11 +275,10 @@ struct dentry *nfs4_get_root(struct super_block *sb, struct nfs_fh *mntfh)
 	 * if the dentry tree reaches them; however if the dentry already
 	 * exists, we'll pick it up at this point and use it as the root
 	 */
-	mntroot = d_alloc_anon(inode);
-	if (!mntroot) {
-		iput(inode);
+	mntroot = d_obtain_alias(inode);
+	if (IS_ERR(mntroot)) {
 		dprintk("nfs_get_root: get root dentry failed\n");
-		return ERR_PTR(-ENOMEM);
+		return mntroot;
 	}
 
 	security_d_instantiate(mntroot, inode);

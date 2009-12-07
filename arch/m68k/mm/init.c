@@ -28,6 +28,7 @@
 #ifdef CONFIG_ATARI
 #include <asm/atari_stram.h>
 #endif
+#include <asm/sections.h>
 #include <asm/tlb.h>
 
 DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
@@ -72,9 +73,6 @@ EXPORT_SYMBOL(empty_zero_page);
 extern void init_pointer_table(unsigned long ptable);
 
 /* References to section boundaries */
-
-extern char _text[], _etext[];
-extern char __init_begin[], __init_end[];
 
 extern pmd_t *zero_pgtable;
 
@@ -128,7 +126,7 @@ void __init mem_init(void)
 #endif
 
 	printk("Memory: %luk/%luk available (%dk kernel code, %dk data, %dk init)\n",
-	       (unsigned long)nr_free_pages() << (PAGE_SHIFT-10),
+	       nr_free_pages() << (PAGE_SHIFT-10),
 	       totalram_pages << (PAGE_SHIFT-10),
 	       codepages << (PAGE_SHIFT-10),
 	       datapages << (PAGE_SHIFT-10),

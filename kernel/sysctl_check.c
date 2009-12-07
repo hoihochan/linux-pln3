@@ -219,6 +219,7 @@ static const struct trans_ctl_table trans_net_ipv4_conf_vars_table[] = {
 	{ NET_IPV4_CONF_ARP_IGNORE,		"arp_ignore" },
 	{ NET_IPV4_CONF_PROMOTE_SECONDARIES,	"promote_secondaries" },
 	{ NET_IPV4_CONF_ARP_ACCEPT,		"arp_accept" },
+	{ NET_IPV4_CONF_ARP_NOTIFY,		"arp_notify" },
 	{}
 };
 
@@ -730,7 +731,6 @@ static const struct trans_ctl_table trans_fs_quota_table[] = {
 };
 
 static const struct trans_ctl_table trans_fs_xfs_table[] = {
-	{ XFS_RESTRICT_CHOWN,	"restrict_chown" },
 	{ XFS_SGID_INHERIT,	"irix_sgid_inherit" },
 	{ XFS_SYMLINK_MODE,	"irix_symlink_mode" },
 	{ XFS_PANIC_MASK,	"panic_mask" },
@@ -1521,7 +1521,7 @@ int sysctl_check_table(struct nsproxy *namespaces, struct ctl_table *table)
 			if (!table->ctl_name && table->strategy)
 				set_fail(&fail, table, "Strategy without ctl_name");
 #endif
-#ifdef CONFIG_PROC_FS
+#ifdef CONFIG_PROC_SYSCTL
 			if (table->procname && !table->proc_handler)
 				set_fail(&fail, table, "No proc_handler");
 #endif

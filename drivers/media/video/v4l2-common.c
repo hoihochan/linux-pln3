@@ -28,7 +28,7 @@
  *		as published by the Free Software Foundation; either version
  *		2 of the License, or (at your option) any later version.
  *
- * Author:	Alan Cox, <alan@redhat.com>
+ * Author:	Alan Cox, <alan@lxorguk.ukuu.org.uk>
  *
  * Fixes:
  */
@@ -58,11 +58,8 @@
 #include <asm/div64.h>
 #define __OLD_VIDIOC_ /* To allow fixing old calls*/
 #include <media/v4l2-common.h>
+#include <media/v4l2-device.h>
 #include <media/v4l2-chip-ident.h>
-
-#ifdef CONFIG_KMOD
-#include <linux/kmod.h>
-#endif
 
 #include <linux/videodev2.h>
 
@@ -159,6 +156,8 @@ int v4l2_ctrl_check(struct v4l2_ext_control *ctrl, struct v4l2_queryctrl *qctrl,
 		return -EINVAL;
 	if (qctrl->flags & V4L2_CTRL_FLAG_GRABBED)
 		return -EBUSY;
+	if (qctrl->type == V4L2_CTRL_TYPE_STRING)
+		return 0;
 	if (qctrl->type == V4L2_CTRL_TYPE_BUTTON ||
 	    qctrl->type == V4L2_CTRL_TYPE_INTEGER64 ||
 	    qctrl->type == V4L2_CTRL_TYPE_CTRL_CLASS)
@@ -187,9 +186,11 @@ const char **v4l2_ctrl_get_menu(u32 id)
 		NULL
 	};
 	static const char *mpeg_audio_encoding[] = {
-		"Layer I",
-		"Layer II",
-		"Layer III",
+		"MPEG-1/2 Layer I",
+		"MPEG-1/2 Layer II",
+		"MPEG-1/2 Layer III",
+		"MPEG-2/4 AAC",
+		"AC-3",
 		NULL
 	};
 	static const char *mpeg_audio_l1_bitrate[] = {
@@ -243,6 +244,28 @@ const char **v4l2_ctrl_get_menu(u32 id)
 		"320 kbps",
 		NULL
 	};
+	static const char *mpeg_audio_ac3_bitrate[] = {
+		"32 kbps",
+		"40 kbps",
+		"48 kbps",
+		"56 kbps",
+		"64 kbps",
+		"80 kbps",
+		"96 kbps",
+		"112 kbps",
+		"128 kbps",
+		"160 kbps",
+		"192 kbps",
+		"224 kbps",
+		"256 kbps",
+		"320 kbps",
+		"384 kbps",
+		"448 kbps",
+		"512 kbps",
+		"576 kbps",
+		"640 kbps",
+		NULL
+	};
 	static const char *mpeg_audio_mode[] = {
 		"Stereo",
 		"Joint Stereo",
@@ -271,6 +294,7 @@ const char **v4l2_ctrl_get_menu(u32 id)
 	static const char *mpeg_video_encoding[] = {
 		"MPEG-1",
 		"MPEG-2",
+		"MPEG-4 AVC",
 		NULL
 	};
 	static const char *mpeg_video_aspect[] = {
@@ -299,6 +323,31 @@ const char **v4l2_ctrl_get_menu(u32 id)
 		"Private packet, IVTV format",
 		NULL
 	};
+	static const char *camera_power_line_frequency[] = {
+		"Disabled",
+		"50 Hz",
+		"60 Hz",
+		NULL
+	};
+	static const char *camera_exposure_auto[] = {
+		"Auto Mode",
+		"Manual Mode",
+		"Shutter Priority Mode",
+		"Aperture Priority Mode",
+		NULL
+	};
+	static const char *colorfx[] = {
+		"None",
+		"Black & White",
+		"Sepia",
+		NULL
+	};
+	static const char *tune_preemphasis[] = {
+		"No preemphasis",
+		"50 useconds",
+		"75 useconds",
+		NULL,
+	};
 
 	switch (id) {
 		case V4L2_CID_MPEG_AUDIO_SAMPLING_FREQ:
@@ -311,6 +360,8 @@ const char **v4l2_ctrl_get_menu(u32 id)
 			return mpeg_audio_l2_bitrate;
 		case V4L2_CID_MPEG_AUDIO_L3_BITRATE:
 			return mpeg_audio_l3_bitrate;
+		case V4L2_CID_MPEG_AUDIO_AC3_BITRATE:
+			return mpeg_audio_ac3_bitrate;
 		case V4L2_CID_MPEG_AUDIO_MODE:
 			return mpeg_audio_mode;
 		case V4L2_CID_MPEG_AUDIO_MODE_EXTENSION:
@@ -329,84 +380,186 @@ const char **v4l2_ctrl_get_menu(u32 id)
 			return mpeg_stream_type;
 		case V4L2_CID_MPEG_STREAM_VBI_FMT:
 			return mpeg_stream_vbi_fmt;
+		case V4L2_CID_POWER_LINE_FREQUENCY:
+			return camera_power_line_frequency;
+		case V4L2_CID_EXPOSURE_AUTO:
+			return camera_exposure_auto;
+		case V4L2_CID_COLORFX:
+			return colorfx;
+		case V4L2_CID_TUNE_PREEMPHASIS:
+			return tune_preemphasis;
 		default:
 			return NULL;
 	}
 }
 EXPORT_SYMBOL(v4l2_ctrl_get_menu);
 
+/* Return the control name. */
+const char *v4l2_ctrl_get_name(u32 id)
+{
+	switch (id) {
+	/* USER controls */
+	case V4L2_CID_USER_CLASS: 		return "User Controls";
+	case V4L2_CID_BRIGHTNESS: 		return "Brightness";
+	case V4L2_CID_CONTRAST: 		return "Contrast";
+	case V4L2_CID_SATURATION: 		return "Saturation";
+	case V4L2_CID_HUE: 			return "Hue";
+	case V4L2_CID_AUDIO_VOLUME: 		return "Volume";
+	case V4L2_CID_AUDIO_BALANCE: 		return "Balance";
+	case V4L2_CID_AUDIO_BASS: 		return "Bass";
+	case V4L2_CID_AUDIO_TREBLE: 		return "Treble";
+	case V4L2_CID_AUDIO_MUTE: 		return "Mute";
+	case V4L2_CID_AUDIO_LOUDNESS: 		return "Loudness";
+	case V4L2_CID_BLACK_LEVEL:		return "Black Level";
+	case V4L2_CID_AUTO_WHITE_BALANCE:	return "White Balance, Automatic";
+	case V4L2_CID_DO_WHITE_BALANCE:		return "Do White Balance";
+	case V4L2_CID_RED_BALANCE:		return "Red Balance";
+	case V4L2_CID_BLUE_BALANCE:		return "Blue Balance";
+	case V4L2_CID_GAMMA:			return "Gamma";
+	case V4L2_CID_EXPOSURE:			return "Exposure";
+	case V4L2_CID_AUTOGAIN:			return "Gain, Automatic";
+	case V4L2_CID_GAIN:			return "Gain";
+	case V4L2_CID_HFLIP:			return "Horizontal Flip";
+	case V4L2_CID_VFLIP:			return "Vertical Flip";
+	case V4L2_CID_HCENTER:			return "Horizontal Center";
+	case V4L2_CID_VCENTER:			return "Vertical Center";
+	case V4L2_CID_POWER_LINE_FREQUENCY:	return "Power Line Frequency";
+	case V4L2_CID_HUE_AUTO:			return "Hue, Automatic";
+	case V4L2_CID_WHITE_BALANCE_TEMPERATURE: return "White Balance Temperature";
+	case V4L2_CID_SHARPNESS:		return "Sharpness";
+	case V4L2_CID_BACKLIGHT_COMPENSATION:	return "Backlight Compensation";
+	case V4L2_CID_CHROMA_AGC:		return "Chroma AGC";
+	case V4L2_CID_COLOR_KILLER:		return "Color Killer";
+	case V4L2_CID_COLORFX:			return "Color Effects";
+
+	/* MPEG controls */
+	case V4L2_CID_MPEG_CLASS: 		return "MPEG Encoder Controls";
+	case V4L2_CID_MPEG_AUDIO_SAMPLING_FREQ: return "Audio Sampling Frequency";
+	case V4L2_CID_MPEG_AUDIO_ENCODING: 	return "Audio Encoding";
+	case V4L2_CID_MPEG_AUDIO_L1_BITRATE: 	return "Audio Layer I Bitrate";
+	case V4L2_CID_MPEG_AUDIO_L2_BITRATE: 	return "Audio Layer II Bitrate";
+	case V4L2_CID_MPEG_AUDIO_L3_BITRATE: 	return "Audio Layer III Bitrate";
+	case V4L2_CID_MPEG_AUDIO_AAC_BITRATE: 	return "Audio AAC Bitrate";
+	case V4L2_CID_MPEG_AUDIO_AC3_BITRATE: 	return "Audio AC-3 Bitrate";
+	case V4L2_CID_MPEG_AUDIO_MODE: 		return "Audio Stereo Mode";
+	case V4L2_CID_MPEG_AUDIO_MODE_EXTENSION: return "Audio Stereo Mode Extension";
+	case V4L2_CID_MPEG_AUDIO_EMPHASIS: 	return "Audio Emphasis";
+	case V4L2_CID_MPEG_AUDIO_CRC: 		return "Audio CRC";
+	case V4L2_CID_MPEG_AUDIO_MUTE: 		return "Audio Mute";
+	case V4L2_CID_MPEG_VIDEO_ENCODING: 	return "Video Encoding";
+	case V4L2_CID_MPEG_VIDEO_ASPECT: 	return "Video Aspect";
+	case V4L2_CID_MPEG_VIDEO_B_FRAMES: 	return "Video B Frames";
+	case V4L2_CID_MPEG_VIDEO_GOP_SIZE: 	return "Video GOP Size";
+	case V4L2_CID_MPEG_VIDEO_GOP_CLOSURE: 	return "Video GOP Closure";
+	case V4L2_CID_MPEG_VIDEO_PULLDOWN: 	return "Video Pulldown";
+	case V4L2_CID_MPEG_VIDEO_BITRATE_MODE: 	return "Video Bitrate Mode";
+	case V4L2_CID_MPEG_VIDEO_BITRATE: 	return "Video Bitrate";
+	case V4L2_CID_MPEG_VIDEO_BITRATE_PEAK: 	return "Video Peak Bitrate";
+	case V4L2_CID_MPEG_VIDEO_TEMPORAL_DECIMATION: return "Video Temporal Decimation";
+	case V4L2_CID_MPEG_VIDEO_MUTE: 		return "Video Mute";
+	case V4L2_CID_MPEG_VIDEO_MUTE_YUV:	return "Video Mute YUV";
+	case V4L2_CID_MPEG_STREAM_TYPE: 	return "Stream Type";
+	case V4L2_CID_MPEG_STREAM_PID_PMT: 	return "Stream PMT Program ID";
+	case V4L2_CID_MPEG_STREAM_PID_AUDIO: 	return "Stream Audio Program ID";
+	case V4L2_CID_MPEG_STREAM_PID_VIDEO: 	return "Stream Video Program ID";
+	case V4L2_CID_MPEG_STREAM_PID_PCR: 	return "Stream PCR Program ID";
+	case V4L2_CID_MPEG_STREAM_PES_ID_AUDIO: return "Stream PES Audio ID";
+	case V4L2_CID_MPEG_STREAM_PES_ID_VIDEO: return "Stream PES Video ID";
+	case V4L2_CID_MPEG_STREAM_VBI_FMT:	return "Stream VBI Format";
+
+	/* CAMERA controls */
+	case V4L2_CID_CAMERA_CLASS:		return "Camera Controls";
+	case V4L2_CID_EXPOSURE_AUTO:		return "Auto Exposure";
+	case V4L2_CID_EXPOSURE_ABSOLUTE:	return "Exposure Time, Absolute";
+	case V4L2_CID_EXPOSURE_AUTO_PRIORITY:	return "Exposure, Dynamic Framerate";
+	case V4L2_CID_PAN_RELATIVE:		return "Pan, Relative";
+	case V4L2_CID_TILT_RELATIVE:		return "Tilt, Relative";
+	case V4L2_CID_PAN_RESET:		return "Pan, Reset";
+	case V4L2_CID_TILT_RESET:		return "Tilt, Reset";
+	case V4L2_CID_PAN_ABSOLUTE:		return "Pan, Absolute";
+	case V4L2_CID_TILT_ABSOLUTE:		return "Tilt, Absolute";
+	case V4L2_CID_FOCUS_ABSOLUTE:		return "Focus, Absolute";
+	case V4L2_CID_FOCUS_RELATIVE:		return "Focus, Relative";
+	case V4L2_CID_FOCUS_AUTO:		return "Focus, Automatic";
+	case V4L2_CID_ZOOM_ABSOLUTE:		return "Zoom, Absolute";
+	case V4L2_CID_ZOOM_RELATIVE:		return "Zoom, Relative";
+	case V4L2_CID_ZOOM_CONTINUOUS:		return "Zoom, Continuous";
+	case V4L2_CID_PRIVACY:			return "Privacy";
+
+	/* FM Radio Modulator control */
+	case V4L2_CID_FM_TX_CLASS:		return "FM Radio Modulator Controls";
+	case V4L2_CID_RDS_TX_DEVIATION:		return "RDS Signal Deviation";
+	case V4L2_CID_RDS_TX_PI:		return "RDS Program ID";
+	case V4L2_CID_RDS_TX_PTY:		return "RDS Program Type";
+	case V4L2_CID_RDS_TX_PS_NAME:		return "RDS PS Name";
+	case V4L2_CID_RDS_TX_RADIO_TEXT:	return "RDS Radio Text";
+	case V4L2_CID_AUDIO_LIMITER_ENABLED:	return "Audio Limiter Feature Enabled";
+	case V4L2_CID_AUDIO_LIMITER_RELEASE_TIME: return "Audio Limiter Release Time";
+	case V4L2_CID_AUDIO_LIMITER_DEVIATION:	return "Audio Limiter Deviation";
+	case V4L2_CID_AUDIO_COMPRESSION_ENABLED: return "Audio Compression Feature Enabled";
+	case V4L2_CID_AUDIO_COMPRESSION_GAIN:	return "Audio Compression Gain";
+	case V4L2_CID_AUDIO_COMPRESSION_THRESHOLD: return "Audio Compression Threshold";
+	case V4L2_CID_AUDIO_COMPRESSION_ATTACK_TIME: return "Audio Compression Attack Time";
+	case V4L2_CID_AUDIO_COMPRESSION_RELEASE_TIME: return "Audio Compression Release Time";
+	case V4L2_CID_PILOT_TONE_ENABLED:	return "Pilot Tone Feature Enabled";
+	case V4L2_CID_PILOT_TONE_DEVIATION:	return "Pilot Tone Deviation";
+	case V4L2_CID_PILOT_TONE_FREQUENCY:	return "Pilot Tone Frequency";
+	case V4L2_CID_TUNE_PREEMPHASIS:	return "Pre-emphasis settings";
+	case V4L2_CID_TUNE_POWER_LEVEL:		return "Tune Power Level";
+	case V4L2_CID_TUNE_ANTENNA_CAPACITOR:	return "Tune Antenna Capacitor";
+
+	default:
+		return NULL;
+	}
+}
+EXPORT_SYMBOL(v4l2_ctrl_get_name);
+
 /* Fill in a struct v4l2_queryctrl */
 int v4l2_ctrl_query_fill(struct v4l2_queryctrl *qctrl, s32 min, s32 max, s32 step, s32 def)
 {
-	const char *name;
+	const char *name = v4l2_ctrl_get_name(qctrl->id);
 
 	qctrl->flags = 0;
-	switch (qctrl->id) {
-	/* USER controls */
-	case V4L2_CID_USER_CLASS: 	name = "User Controls"; break;
-	case V4L2_CID_AUDIO_VOLUME: 	name = "Volume"; break;
-	case V4L2_CID_AUDIO_MUTE: 	name = "Mute"; break;
-	case V4L2_CID_AUDIO_BALANCE: 	name = "Balance"; break;
-	case V4L2_CID_AUDIO_BASS: 	name = "Bass"; break;
-	case V4L2_CID_AUDIO_TREBLE: 	name = "Treble"; break;
-	case V4L2_CID_AUDIO_LOUDNESS: 	name = "Loudness"; break;
-	case V4L2_CID_BRIGHTNESS: 	name = "Brightness"; break;
-	case V4L2_CID_CONTRAST: 	name = "Contrast"; break;
-	case V4L2_CID_SATURATION: 	name = "Saturation"; break;
-	case V4L2_CID_HUE: 		name = "Hue"; break;
-
-	/* MPEG controls */
-	case V4L2_CID_MPEG_CLASS: 		name = "MPEG Encoder Controls"; break;
-	case V4L2_CID_MPEG_AUDIO_SAMPLING_FREQ: name = "Audio Sampling Frequency"; break;
-	case V4L2_CID_MPEG_AUDIO_ENCODING: 	name = "Audio Encoding Layer"; break;
-	case V4L2_CID_MPEG_AUDIO_L1_BITRATE: 	name = "Audio Layer I Bitrate"; break;
-	case V4L2_CID_MPEG_AUDIO_L2_BITRATE: 	name = "Audio Layer II Bitrate"; break;
-	case V4L2_CID_MPEG_AUDIO_L3_BITRATE: 	name = "Audio Layer III Bitrate"; break;
-	case V4L2_CID_MPEG_AUDIO_MODE: 		name = "Audio Stereo Mode"; break;
-	case V4L2_CID_MPEG_AUDIO_MODE_EXTENSION: name = "Audio Stereo Mode Extension"; break;
-	case V4L2_CID_MPEG_AUDIO_EMPHASIS: 	name = "Audio Emphasis"; break;
-	case V4L2_CID_MPEG_AUDIO_CRC: 		name = "Audio CRC"; break;
-	case V4L2_CID_MPEG_AUDIO_MUTE: 		name = "Audio Mute"; break;
-	case V4L2_CID_MPEG_VIDEO_ENCODING: 	name = "Video Encoding"; break;
-	case V4L2_CID_MPEG_VIDEO_ASPECT: 	name = "Video Aspect"; break;
-	case V4L2_CID_MPEG_VIDEO_B_FRAMES: 	name = "Video B Frames"; break;
-	case V4L2_CID_MPEG_VIDEO_GOP_SIZE: 	name = "Video GOP Size"; break;
-	case V4L2_CID_MPEG_VIDEO_GOP_CLOSURE: 	name = "Video GOP Closure"; break;
-	case V4L2_CID_MPEG_VIDEO_PULLDOWN: 	name = "Video Pulldown"; break;
-	case V4L2_CID_MPEG_VIDEO_BITRATE_MODE: 	name = "Video Bitrate Mode"; break;
-	case V4L2_CID_MPEG_VIDEO_BITRATE: 	name = "Video Bitrate"; break;
-	case V4L2_CID_MPEG_VIDEO_BITRATE_PEAK: 	name = "Video Peak Bitrate"; break;
-	case V4L2_CID_MPEG_VIDEO_TEMPORAL_DECIMATION: name = "Video Temporal Decimation"; break;
-	case V4L2_CID_MPEG_VIDEO_MUTE: 		name = "Video Mute"; break;
-	case V4L2_CID_MPEG_VIDEO_MUTE_YUV:	name = "Video Mute YUV"; break;
-	case V4L2_CID_MPEG_STREAM_TYPE: 	name = "Stream Type"; break;
-	case V4L2_CID_MPEG_STREAM_PID_PMT: 	name = "Stream PMT Program ID"; break;
-	case V4L2_CID_MPEG_STREAM_PID_AUDIO: 	name = "Stream Audio Program ID"; break;
-	case V4L2_CID_MPEG_STREAM_PID_VIDEO: 	name = "Stream Video Program ID"; break;
-	case V4L2_CID_MPEG_STREAM_PID_PCR: 	name = "Stream PCR Program ID"; break;
-	case V4L2_CID_MPEG_STREAM_PES_ID_AUDIO: name = "Stream PES Audio ID"; break;
-	case V4L2_CID_MPEG_STREAM_PES_ID_VIDEO: name = "Stream PES Video ID"; break;
-	case V4L2_CID_MPEG_STREAM_VBI_FMT:	name = "Stream VBI Format"; break;
-
-	default:
+	if (name == NULL)
 		return -EINVAL;
-	}
+
 	switch (qctrl->id) {
 	case V4L2_CID_AUDIO_MUTE:
 	case V4L2_CID_AUDIO_LOUDNESS:
+	case V4L2_CID_AUTO_WHITE_BALANCE:
+	case V4L2_CID_AUTOGAIN:
+	case V4L2_CID_HFLIP:
+	case V4L2_CID_VFLIP:
+	case V4L2_CID_HUE_AUTO:
+	case V4L2_CID_CHROMA_AGC:
+	case V4L2_CID_COLOR_KILLER:
 	case V4L2_CID_MPEG_AUDIO_MUTE:
 	case V4L2_CID_MPEG_VIDEO_MUTE:
 	case V4L2_CID_MPEG_VIDEO_GOP_CLOSURE:
 	case V4L2_CID_MPEG_VIDEO_PULLDOWN:
+	case V4L2_CID_EXPOSURE_AUTO_PRIORITY:
+	case V4L2_CID_FOCUS_AUTO:
+	case V4L2_CID_PRIVACY:
+	case V4L2_CID_AUDIO_LIMITER_ENABLED:
+	case V4L2_CID_AUDIO_COMPRESSION_ENABLED:
+	case V4L2_CID_PILOT_TONE_ENABLED:
 		qctrl->type = V4L2_CTRL_TYPE_BOOLEAN;
 		min = 0;
 		max = step = 1;
 		break;
+	case V4L2_CID_PAN_RESET:
+	case V4L2_CID_TILT_RESET:
+		qctrl->type = V4L2_CTRL_TYPE_BUTTON;
+		qctrl->flags |= V4L2_CTRL_FLAG_WRITE_ONLY;
+		min = max = step = def = 0;
+		break;
+	case V4L2_CID_POWER_LINE_FREQUENCY:
 	case V4L2_CID_MPEG_AUDIO_SAMPLING_FREQ:
 	case V4L2_CID_MPEG_AUDIO_ENCODING:
 	case V4L2_CID_MPEG_AUDIO_L1_BITRATE:
 	case V4L2_CID_MPEG_AUDIO_L2_BITRATE:
 	case V4L2_CID_MPEG_AUDIO_L3_BITRATE:
+	case V4L2_CID_MPEG_AUDIO_AC3_BITRATE:
 	case V4L2_CID_MPEG_AUDIO_MODE:
 	case V4L2_CID_MPEG_AUDIO_MODE_EXTENSION:
 	case V4L2_CID_MPEG_AUDIO_EMPHASIS:
@@ -416,11 +569,20 @@ int v4l2_ctrl_query_fill(struct v4l2_queryctrl *qctrl, s32 min, s32 max, s32 ste
 	case V4L2_CID_MPEG_VIDEO_BITRATE_MODE:
 	case V4L2_CID_MPEG_STREAM_TYPE:
 	case V4L2_CID_MPEG_STREAM_VBI_FMT:
+	case V4L2_CID_EXPOSURE_AUTO:
+	case V4L2_CID_COLORFX:
+	case V4L2_CID_TUNE_PREEMPHASIS:
 		qctrl->type = V4L2_CTRL_TYPE_MENU;
 		step = 1;
 		break;
+	case V4L2_CID_RDS_TX_PS_NAME:
+	case V4L2_CID_RDS_TX_RADIO_TEXT:
+		qctrl->type = V4L2_CTRL_TYPE_STRING;
+		break;
 	case V4L2_CID_USER_CLASS:
+	case V4L2_CID_CAMERA_CLASS:
 	case V4L2_CID_MPEG_CLASS:
+	case V4L2_CID_FM_TX_CLASS:
 		qctrl->type = V4L2_CTRL_TYPE_CTRL_CLASS;
 		qctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 		min = max = step = def = 0;
@@ -445,7 +607,28 @@ int v4l2_ctrl_query_fill(struct v4l2_queryctrl *qctrl, s32 min, s32 max, s32 ste
 	case V4L2_CID_CONTRAST:
 	case V4L2_CID_SATURATION:
 	case V4L2_CID_HUE:
+	case V4L2_CID_RED_BALANCE:
+	case V4L2_CID_BLUE_BALANCE:
+	case V4L2_CID_GAMMA:
+	case V4L2_CID_SHARPNESS:
+	case V4L2_CID_RDS_TX_DEVIATION:
+	case V4L2_CID_AUDIO_LIMITER_RELEASE_TIME:
+	case V4L2_CID_AUDIO_LIMITER_DEVIATION:
+	case V4L2_CID_AUDIO_COMPRESSION_GAIN:
+	case V4L2_CID_AUDIO_COMPRESSION_THRESHOLD:
+	case V4L2_CID_AUDIO_COMPRESSION_ATTACK_TIME:
+	case V4L2_CID_AUDIO_COMPRESSION_RELEASE_TIME:
+	case V4L2_CID_PILOT_TONE_DEVIATION:
+	case V4L2_CID_PILOT_TONE_FREQUENCY:
+	case V4L2_CID_TUNE_POWER_LEVEL:
+	case V4L2_CID_TUNE_ANTENNA_CAPACITOR:
 		qctrl->flags |= V4L2_CTRL_FLAG_SLIDER;
+		break;
+	case V4L2_CID_PAN_RELATIVE:
+	case V4L2_CID_TILT_RELATIVE:
+	case V4L2_CID_FOCUS_RELATIVE:
+	case V4L2_CID_ZOOM_RELATIVE:
+		qctrl->flags |= V4L2_CTRL_FLAG_WRITE_ONLY;
 		break;
 	}
 	qctrl->minimum = min;
@@ -453,169 +636,59 @@ int v4l2_ctrl_query_fill(struct v4l2_queryctrl *qctrl, s32 min, s32 max, s32 ste
 	qctrl->step = step;
 	qctrl->default_value = def;
 	qctrl->reserved[0] = qctrl->reserved[1] = 0;
-	snprintf(qctrl->name, sizeof(qctrl->name), name);
+	strlcpy(qctrl->name, name, sizeof(qctrl->name));
 	return 0;
 }
 EXPORT_SYMBOL(v4l2_ctrl_query_fill);
 
-/* Fill in a struct v4l2_queryctrl with standard values based on
-   the control ID. */
-int v4l2_ctrl_query_fill_std(struct v4l2_queryctrl *qctrl)
-{
-	switch (qctrl->id) {
-	/* USER controls */
-	case V4L2_CID_USER_CLASS:
-	case V4L2_CID_MPEG_CLASS:
-		return v4l2_ctrl_query_fill(qctrl, 0, 0, 0, 0);
-	case V4L2_CID_AUDIO_VOLUME:
-		return v4l2_ctrl_query_fill(qctrl, 0, 65535, 65535 / 100, 58880);
-	case V4L2_CID_AUDIO_MUTE:
-	case V4L2_CID_AUDIO_LOUDNESS:
-		return v4l2_ctrl_query_fill(qctrl, 0, 1, 1, 0);
-	case V4L2_CID_AUDIO_BALANCE:
-	case V4L2_CID_AUDIO_BASS:
-	case V4L2_CID_AUDIO_TREBLE:
-		return v4l2_ctrl_query_fill(qctrl, 0, 65535, 65535 / 100, 32768);
-	case V4L2_CID_BRIGHTNESS:
-		return v4l2_ctrl_query_fill(qctrl, 0, 255, 1, 128);
-	case V4L2_CID_CONTRAST:
-	case V4L2_CID_SATURATION:
-		return v4l2_ctrl_query_fill(qctrl, 0, 127, 1, 64);
-	case V4L2_CID_HUE:
-		return v4l2_ctrl_query_fill(qctrl, -128, 127, 1, 0);
-
-	/* MPEG controls */
-	case V4L2_CID_MPEG_AUDIO_SAMPLING_FREQ:
-		return v4l2_ctrl_query_fill(qctrl,
-				V4L2_MPEG_AUDIO_SAMPLING_FREQ_44100,
-				V4L2_MPEG_AUDIO_SAMPLING_FREQ_32000, 1,
-				V4L2_MPEG_AUDIO_SAMPLING_FREQ_48000);
-	case V4L2_CID_MPEG_AUDIO_ENCODING:
-		return v4l2_ctrl_query_fill(qctrl,
-				V4L2_MPEG_AUDIO_ENCODING_LAYER_1,
-				V4L2_MPEG_AUDIO_ENCODING_LAYER_3, 1,
-				V4L2_MPEG_AUDIO_ENCODING_LAYER_2);
-	case V4L2_CID_MPEG_AUDIO_L1_BITRATE:
-		return v4l2_ctrl_query_fill(qctrl,
-				V4L2_MPEG_AUDIO_L1_BITRATE_32K,
-				V4L2_MPEG_AUDIO_L1_BITRATE_448K, 1,
-				V4L2_MPEG_AUDIO_L1_BITRATE_256K);
-	case V4L2_CID_MPEG_AUDIO_L2_BITRATE:
-		return v4l2_ctrl_query_fill(qctrl,
-				V4L2_MPEG_AUDIO_L2_BITRATE_32K,
-				V4L2_MPEG_AUDIO_L2_BITRATE_384K, 1,
-				V4L2_MPEG_AUDIO_L2_BITRATE_224K);
-	case V4L2_CID_MPEG_AUDIO_L3_BITRATE:
-		return v4l2_ctrl_query_fill(qctrl,
-				V4L2_MPEG_AUDIO_L3_BITRATE_32K,
-				V4L2_MPEG_AUDIO_L3_BITRATE_320K, 1,
-				V4L2_MPEG_AUDIO_L3_BITRATE_192K);
-	case V4L2_CID_MPEG_AUDIO_MODE:
-		return v4l2_ctrl_query_fill(qctrl,
-				V4L2_MPEG_AUDIO_MODE_STEREO,
-				V4L2_MPEG_AUDIO_MODE_MONO, 1,
-				V4L2_MPEG_AUDIO_MODE_STEREO);
-	case V4L2_CID_MPEG_AUDIO_MODE_EXTENSION:
-		return v4l2_ctrl_query_fill(qctrl,
-				V4L2_MPEG_AUDIO_MODE_EXTENSION_BOUND_4,
-				V4L2_MPEG_AUDIO_MODE_EXTENSION_BOUND_16, 1,
-				V4L2_MPEG_AUDIO_MODE_EXTENSION_BOUND_4);
-	case V4L2_CID_MPEG_AUDIO_EMPHASIS:
-		return v4l2_ctrl_query_fill(qctrl,
-				V4L2_MPEG_AUDIO_EMPHASIS_NONE,
-				V4L2_MPEG_AUDIO_EMPHASIS_CCITT_J17, 1,
-				V4L2_MPEG_AUDIO_EMPHASIS_NONE);
-	case V4L2_CID_MPEG_AUDIO_CRC:
-		return v4l2_ctrl_query_fill(qctrl,
-				V4L2_MPEG_AUDIO_CRC_NONE,
-				V4L2_MPEG_AUDIO_CRC_CRC16, 1,
-				V4L2_MPEG_AUDIO_CRC_NONE);
-	case V4L2_CID_MPEG_AUDIO_MUTE:
-		return v4l2_ctrl_query_fill(qctrl, 0, 1, 1, 0);
-	case V4L2_CID_MPEG_VIDEO_ENCODING:
-		return v4l2_ctrl_query_fill(qctrl,
-				V4L2_MPEG_VIDEO_ENCODING_MPEG_1,
-				V4L2_MPEG_VIDEO_ENCODING_MPEG_2, 1,
-				V4L2_MPEG_VIDEO_ENCODING_MPEG_2);
-	case V4L2_CID_MPEG_VIDEO_ASPECT:
-		return v4l2_ctrl_query_fill(qctrl,
-				V4L2_MPEG_VIDEO_ASPECT_1x1,
-				V4L2_MPEG_VIDEO_ASPECT_221x100, 1,
-				V4L2_MPEG_VIDEO_ASPECT_4x3);
-	case V4L2_CID_MPEG_VIDEO_B_FRAMES:
-		return v4l2_ctrl_query_fill(qctrl, 0, 33, 1, 2);
-	case V4L2_CID_MPEG_VIDEO_GOP_SIZE:
-		return v4l2_ctrl_query_fill(qctrl, 1, 34, 1, 12);
-	case V4L2_CID_MPEG_VIDEO_GOP_CLOSURE:
-		return v4l2_ctrl_query_fill(qctrl, 0, 1, 1, 1);
-	case V4L2_CID_MPEG_VIDEO_PULLDOWN:
-		return v4l2_ctrl_query_fill(qctrl, 0, 1, 1, 0);
-	case V4L2_CID_MPEG_VIDEO_BITRATE_MODE:
-		return v4l2_ctrl_query_fill(qctrl,
-				V4L2_MPEG_VIDEO_BITRATE_MODE_VBR,
-				V4L2_MPEG_VIDEO_BITRATE_MODE_CBR, 1,
-				V4L2_MPEG_VIDEO_BITRATE_MODE_VBR);
-	case V4L2_CID_MPEG_VIDEO_BITRATE:
-		return v4l2_ctrl_query_fill(qctrl, 0, 27000000, 1, 6000000);
-	case V4L2_CID_MPEG_VIDEO_BITRATE_PEAK:
-		return v4l2_ctrl_query_fill(qctrl, 0, 27000000, 1, 8000000);
-	case V4L2_CID_MPEG_VIDEO_TEMPORAL_DECIMATION:
-		return v4l2_ctrl_query_fill(qctrl, 0, 255, 1, 0);
-	case V4L2_CID_MPEG_VIDEO_MUTE:
-		return v4l2_ctrl_query_fill(qctrl, 0, 1, 1, 0);
-	case V4L2_CID_MPEG_VIDEO_MUTE_YUV:  /* Init YUV (really YCbCr) to black */
-		return v4l2_ctrl_query_fill(qctrl, 0, 0xffffff, 1, 0x008080);
-	case V4L2_CID_MPEG_STREAM_TYPE:
-		return v4l2_ctrl_query_fill(qctrl,
-				V4L2_MPEG_STREAM_TYPE_MPEG2_PS,
-				V4L2_MPEG_STREAM_TYPE_MPEG2_SVCD, 1,
-				V4L2_MPEG_STREAM_TYPE_MPEG2_PS);
-	case V4L2_CID_MPEG_STREAM_PID_PMT:
-		return v4l2_ctrl_query_fill(qctrl, 0, (1 << 14) - 1, 1, 16);
-	case V4L2_CID_MPEG_STREAM_PID_AUDIO:
-		return v4l2_ctrl_query_fill(qctrl, 0, (1 << 14) - 1, 1, 260);
-	case V4L2_CID_MPEG_STREAM_PID_VIDEO:
-		return v4l2_ctrl_query_fill(qctrl, 0, (1 << 14) - 1, 1, 256);
-	case V4L2_CID_MPEG_STREAM_PID_PCR:
-		return v4l2_ctrl_query_fill(qctrl, 0, (1 << 14) - 1, 1, 259);
-	case V4L2_CID_MPEG_STREAM_PES_ID_AUDIO:
-		return v4l2_ctrl_query_fill(qctrl, 0, 255, 1, 0);
-	case V4L2_CID_MPEG_STREAM_PES_ID_VIDEO:
-		return v4l2_ctrl_query_fill(qctrl, 0, 255, 1, 0);
-	case V4L2_CID_MPEG_STREAM_VBI_FMT:
-		return v4l2_ctrl_query_fill(qctrl,
-				V4L2_MPEG_STREAM_VBI_FMT_NONE,
-				V4L2_MPEG_STREAM_VBI_FMT_IVTV, 1,
-				V4L2_MPEG_STREAM_VBI_FMT_NONE);
-	default:
-		return -EINVAL;
-	}
-}
-EXPORT_SYMBOL(v4l2_ctrl_query_fill_std);
-
 /* Fill in a struct v4l2_querymenu based on the struct v4l2_queryctrl and
-   the menu. The qctrl pointer may be NULL, in which case it is ignored. */
+   the menu. The qctrl pointer may be NULL, in which case it is ignored.
+   If menu_items is NULL, then the menu items are retrieved using
+   v4l2_ctrl_get_menu. */
 int v4l2_ctrl_query_menu(struct v4l2_querymenu *qmenu, struct v4l2_queryctrl *qctrl,
 	       const char **menu_items)
 {
 	int i;
 
+	qmenu->reserved = 0;
+	if (menu_items == NULL)
+		menu_items = v4l2_ctrl_get_menu(qmenu->id);
 	if (menu_items == NULL ||
 	    (qctrl && (qmenu->index < qctrl->minimum || qmenu->index > qctrl->maximum)))
 		return -EINVAL;
 	for (i = 0; i < qmenu->index && menu_items[i]; i++) ;
 	if (menu_items[i] == NULL || menu_items[i][0] == '\0')
 		return -EINVAL;
-	snprintf(qmenu->name, sizeof(qmenu->name), menu_items[qmenu->index]);
-	qmenu->reserved = 0;
+	strlcpy(qmenu->name, menu_items[qmenu->index], sizeof(qmenu->name));
 	return 0;
 }
 EXPORT_SYMBOL(v4l2_ctrl_query_menu);
 
+/* Fill in a struct v4l2_querymenu based on the specified array of valid
+   menu items (terminated by V4L2_CTRL_MENU_IDS_END).
+   Use this if there are 'holes' in the list of valid menu items. */
+int v4l2_ctrl_query_menu_valid_items(struct v4l2_querymenu *qmenu, const u32 *ids)
+{
+	const char **menu_items = v4l2_ctrl_get_menu(qmenu->id);
+
+	qmenu->reserved = 0;
+	if (menu_items == NULL || ids == NULL)
+		return -EINVAL;
+	while (*ids != V4L2_CTRL_MENU_IDS_END) {
+		if (*ids++ == qmenu->index) {
+			strlcpy(qmenu->name, menu_items[qmenu->index],
+					sizeof(qmenu->name));
+			return 0;
+		}
+	}
+	return -EINVAL;
+}
+EXPORT_SYMBOL(v4l2_ctrl_query_menu_valid_items);
+
 /* ctrl_classes points to an array of u32 pointers, the last element is
    a NULL pointer. Each u32 array is a 0-terminated array of control IDs.
    Each array must be sorted low to high and belong to the same control
-   class. The array of u32 pointer must also be sorted, from low class IDs
+   class. The array of u32 pointers must also be sorted, from low class IDs
    to high class IDs.
 
    This function returns the first ID that follows after the given ID.
@@ -663,11 +736,11 @@ u32 v4l2_ctrl_next(const u32 * const * ctrl_classes, u32 id)
 }
 EXPORT_SYMBOL(v4l2_ctrl_next);
 
-int v4l2_chip_match_host(u32 match_type, u32 match_chip)
+int v4l2_chip_match_host(const struct v4l2_dbg_match *match)
 {
-	switch (match_type) {
+	switch (match->type) {
 	case V4L2_CHIP_MATCH_HOST:
-		return match_chip == 0;
+		return match->addr == 0;
 	default:
 		return 0;
 	}
@@ -675,23 +748,34 @@ int v4l2_chip_match_host(u32 match_type, u32 match_chip)
 EXPORT_SYMBOL(v4l2_chip_match_host);
 
 #if defined(CONFIG_I2C) || (defined(CONFIG_I2C_MODULE) && defined(MODULE))
-int v4l2_chip_match_i2c_client(struct i2c_client *c, u32 match_type, u32 match_chip)
+int v4l2_chip_match_i2c_client(struct i2c_client *c, const struct v4l2_dbg_match *match)
 {
-	switch (match_type) {
+	int len;
+
+	if (c == NULL || match == NULL)
+		return 0;
+
+	switch (match->type) {
 	case V4L2_CHIP_MATCH_I2C_DRIVER:
-		return (c != NULL && c->driver != NULL && c->driver->id == match_chip);
+		if (c->driver == NULL || c->driver->driver.name == NULL)
+			return 0;
+		len = strlen(c->driver->driver.name);
+		/* legacy drivers have a ' suffix, don't try to match that */
+		if (len && c->driver->driver.name[len - 1] == '\'')
+			len--;
+		return len && !strncmp(c->driver->driver.name, match->name, len);
 	case V4L2_CHIP_MATCH_I2C_ADDR:
-		return (c != NULL && c->addr == match_chip);
+		return c->addr == match->addr;
 	default:
 		return 0;
 	}
 }
 EXPORT_SYMBOL(v4l2_chip_match_i2c_client);
 
-int v4l2_chip_ident_i2c_client(struct i2c_client *c, struct v4l2_chip_ident *chip,
+int v4l2_chip_ident_i2c_client(struct i2c_client *c, struct v4l2_dbg_chip_ident *chip,
 		u32 ident, u32 revision)
 {
-	if (!v4l2_chip_match_i2c_client(c, chip->match_type, chip->match_chip))
+	if (!v4l2_chip_match_i2c_client(c, &chip->match))
 		return 0;
 	if (chip->ident == V4L2_IDENT_NONE) {
 		chip->ident = ident;
@@ -707,31 +791,227 @@ EXPORT_SYMBOL(v4l2_chip_ident_i2c_client);
 
 /* ----------------------------------------------------------------- */
 
-/* Helper function for I2C legacy drivers */
+/* I2C Helper functions */
 
-int v4l2_i2c_attach(struct i2c_adapter *adapter, int address, struct i2c_driver *driver,
-		const char *name,
-		int (*probe)(struct i2c_client *, const struct i2c_device_id *))
+
+void v4l2_i2c_subdev_init(struct v4l2_subdev *sd, struct i2c_client *client,
+		const struct v4l2_subdev_ops *ops)
 {
-	struct i2c_client *client;
-	int err;
-
-	client = kzalloc(sizeof(struct i2c_client), GFP_KERNEL);
-	if (!client)
-		return -ENOMEM;
-
-	client->addr = address;
-	client->adapter = adapter;
-	client->driver = driver;
-	strlcpy(client->name, name, sizeof(client->name));
-
-	err = probe(client, NULL);
-	if (err == 0) {
-		i2c_attach_client(client);
-	} else {
-		kfree(client);
-	}
-	return err != -ENOMEM ? 0 : err;
+	v4l2_subdev_init(sd, ops);
+	sd->flags |= V4L2_SUBDEV_FL_IS_I2C;
+	/* the owner is the same as the i2c_client's driver owner */
+	sd->owner = client->driver->driver.owner;
+	/* i2c_client and v4l2_subdev point to one another */
+	v4l2_set_subdevdata(sd, client);
+	i2c_set_clientdata(client, sd);
+	/* initialize name */
+	snprintf(sd->name, sizeof(sd->name), "%s %d-%04x",
+		client->driver->driver.name, i2c_adapter_id(client->adapter),
+		client->addr);
 }
-EXPORT_SYMBOL(v4l2_i2c_attach);
+EXPORT_SYMBOL_GPL(v4l2_i2c_subdev_init);
+
+
+
+/* Load an i2c sub-device. */
+struct v4l2_subdev *v4l2_i2c_new_subdev_board(struct v4l2_device *v4l2_dev,
+		struct i2c_adapter *adapter, const char *module_name,
+		struct i2c_board_info *info, const unsigned short *probe_addrs)
+{
+	struct v4l2_subdev *sd = NULL;
+	struct i2c_client *client;
+
+	BUG_ON(!v4l2_dev);
+
+	if (module_name)
+		request_module(module_name);
+
+	/* Create the i2c client */
+	if (info->addr == 0 && probe_addrs)
+		client = i2c_new_probed_device(adapter, info, probe_addrs);
+	else
+		client = i2c_new_device(adapter, info);
+
+	/* Note: by loading the module first we are certain that c->driver
+	   will be set if the driver was found. If the module was not loaded
+	   first, then the i2c core tries to delay-load the module for us,
+	   and then c->driver is still NULL until the module is finally
+	   loaded. This delay-load mechanism doesn't work if other drivers
+	   want to use the i2c device, so explicitly loading the module
+	   is the best alternative. */
+	if (client == NULL || client->driver == NULL)
+		goto error;
+
+	/* Lock the module so we can safely get the v4l2_subdev pointer */
+	if (!try_module_get(client->driver->driver.owner))
+		goto error;
+	sd = i2c_get_clientdata(client);
+
+	/* Register with the v4l2_device which increases the module's
+	   use count as well. */
+	if (v4l2_device_register_subdev(v4l2_dev, sd))
+		sd = NULL;
+	/* Decrease the module use count to match the first try_module_get. */
+	module_put(client->driver->driver.owner);
+
+	if (sd) {
+		/* We return errors from v4l2_subdev_call only if we have the
+		   callback as the .s_config is not mandatory */
+		int err = v4l2_subdev_call(sd, core, s_config,
+				info->irq, info->platform_data);
+
+		if (err && err != -ENOIOCTLCMD) {
+			v4l2_device_unregister_subdev(sd);
+			sd = NULL;
+		}
+	}
+
+error:
+	/* If we have a client but no subdev, then something went wrong and
+	   we must unregister the client. */
+	if (client && sd == NULL)
+		i2c_unregister_device(client);
+	return sd;
+}
+EXPORT_SYMBOL_GPL(v4l2_i2c_new_subdev_board);
+
+struct v4l2_subdev *v4l2_i2c_new_subdev_cfg(struct v4l2_device *v4l2_dev,
+		struct i2c_adapter *adapter,
+		const char *module_name, const char *client_type,
+		int irq, void *platform_data,
+		u8 addr, const unsigned short *probe_addrs)
+{
+	struct i2c_board_info info;
+
+	/* Setup the i2c board info with the device type and
+	   the device address. */
+	memset(&info, 0, sizeof(info));
+	strlcpy(info.type, client_type, sizeof(info.type));
+	info.addr = addr;
+	info.irq = irq;
+	info.platform_data = platform_data;
+
+	return v4l2_i2c_new_subdev_board(v4l2_dev, adapter, module_name,
+			&info, probe_addrs);
+}
+EXPORT_SYMBOL_GPL(v4l2_i2c_new_subdev_cfg);
+
+/* Return i2c client address of v4l2_subdev. */
+unsigned short v4l2_i2c_subdev_addr(struct v4l2_subdev *sd)
+{
+	struct i2c_client *client = v4l2_get_subdevdata(sd);
+
+	return client ? client->addr : I2C_CLIENT_END;
+}
+EXPORT_SYMBOL_GPL(v4l2_i2c_subdev_addr);
+
+/* Return a list of I2C tuner addresses to probe. Use only if the tuner
+   addresses are unknown. */
+const unsigned short *v4l2_i2c_tuner_addrs(enum v4l2_i2c_tuner_type type)
+{
+	static const unsigned short radio_addrs[] = {
+#if defined(CONFIG_MEDIA_TUNER_TEA5761) || defined(CONFIG_MEDIA_TUNER_TEA5761_MODULE)
+		0x10,
 #endif
+		0x60,
+		I2C_CLIENT_END
+	};
+	static const unsigned short demod_addrs[] = {
+		0x42, 0x43, 0x4a, 0x4b,
+		I2C_CLIENT_END
+	};
+	static const unsigned short tv_addrs[] = {
+		0x42, 0x43, 0x4a, 0x4b,		/* tda8290 */
+		0x60, 0x61, 0x62, 0x63, 0x64,
+		I2C_CLIENT_END
+	};
+
+	switch (type) {
+	case ADDRS_RADIO:
+		return radio_addrs;
+	case ADDRS_DEMOD:
+		return demod_addrs;
+	case ADDRS_TV:
+		return tv_addrs;
+	case ADDRS_TV_WITH_DEMOD:
+		return tv_addrs + 4;
+	}
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(v4l2_i2c_tuner_addrs);
+
+#endif /* defined(CONFIG_I2C) */
+
+/* Clamp x to be between min and max, aligned to a multiple of 2^align.  min
+ * and max don't have to be aligned, but there must be at least one valid
+ * value.  E.g., min=17,max=31,align=4 is not allowed as there are no multiples
+ * of 16 between 17 and 31.  */
+static unsigned int clamp_align(unsigned int x, unsigned int min,
+				unsigned int max, unsigned int align)
+{
+	/* Bits that must be zero to be aligned */
+	unsigned int mask = ~((1 << align) - 1);
+
+	/* Round to nearest aligned value */
+	if (align)
+		x = (x + (1 << (align - 1))) & mask;
+
+	/* Clamp to aligned value of min and max */
+	if (x < min)
+		x = (min + ~mask) & mask;
+	else if (x > max)
+		x = max & mask;
+
+	return x;
+}
+
+/* Bound an image to have a width between wmin and wmax, and height between
+ * hmin and hmax, inclusive.  Additionally, the width will be a multiple of
+ * 2^walign, the height will be a multiple of 2^halign, and the overall size
+ * (width*height) will be a multiple of 2^salign.  The image may be shrunk
+ * or enlarged to fit the alignment constraints.
+ *
+ * The width or height maximum must not be smaller than the corresponding
+ * minimum.  The alignments must not be so high there are no possible image
+ * sizes within the allowed bounds.  wmin and hmin must be at least 1
+ * (don't use 0).  If you don't care about a certain alignment, specify 0,
+ * as 2^0 is 1 and one byte alignment is equivalent to no alignment.  If
+ * you only want to adjust downward, specify a maximum that's the same as
+ * the initial value.
+ */
+void v4l_bound_align_image(u32 *w, unsigned int wmin, unsigned int wmax,
+			   unsigned int walign,
+			   u32 *h, unsigned int hmin, unsigned int hmax,
+			   unsigned int halign, unsigned int salign)
+{
+	*w = clamp_align(*w, wmin, wmax, walign);
+	*h = clamp_align(*h, hmin, hmax, halign);
+
+	/* Usually we don't need to align the size and are done now. */
+	if (!salign)
+		return;
+
+	/* How much alignment do we have? */
+	walign = __ffs(*w);
+	halign = __ffs(*h);
+	/* Enough to satisfy the image alignment? */
+	if (walign + halign < salign) {
+		/* Max walign where there is still a valid width */
+		unsigned int wmaxa = __fls(wmax ^ (wmin - 1));
+		/* Max halign where there is still a valid height */
+		unsigned int hmaxa = __fls(hmax ^ (hmin - 1));
+
+		/* up the smaller alignment until we have enough */
+		do {
+			if (halign >= hmaxa ||
+			    (walign <= halign && walign < wmaxa)) {
+				*w = clamp_align(*w, wmin, wmax, walign + 1);
+				walign = __ffs(*w);
+			} else {
+				*h = clamp_align(*h, hmin, hmax, halign + 1);
+				halign = __ffs(*h);
+			}
+		} while (halign + walign < salign);
+	}
+}
+EXPORT_SYMBOL_GPL(v4l_bound_align_image);

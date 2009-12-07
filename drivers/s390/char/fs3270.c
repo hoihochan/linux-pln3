@@ -1,11 +1,10 @@
 /*
- *  drivers/s390/char/fs3270.c
- *    IBM/3270 Driver - fullscreen driver.
+ * IBM/3270 Driver - fullscreen driver.
  *
- *  Author(s):
- *    Original 3270 Code for 2.4 written by Richard Hitt (UTS Global)
- *    Rewritten for 2.5/2.6 by Martin Schwidefsky <schwidefsky@de.ibm.com>
- *	-- Copyright (C) 2003 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ * Author(s):
+ *   Original 3270 Code for 2.4 written by Richard Hitt (UTS Global)
+ *   Rewritten for 2.5/2.6 by Martin Schwidefsky <schwidefsky@de.ibm.com>
+ *     Copyright IBM Corp. 2003, 2009
  */
 
 #include <linux/bootmem.h>
@@ -399,6 +398,11 @@ fs3270_free_view(struct raw3270_view *view)
 static void
 fs3270_release(struct raw3270_view *view)
 {
+	struct fs3270 *fp;
+
+	fp = (struct fs3270 *) view;
+	if (fp->fs_pid)
+		kill_pid(fp->fs_pid, SIGHUP, 1);
 }
 
 /* View to a 3270 device. Can be console, tty or fullscreen. */
@@ -418,25 +422,22 @@ fs3270_open(struct inode *inode, struct file *filp)
 {
 	struct fs3270 *fp;
 	struct idal_buffer *ib;
-	int minor, rc;
+	int minor, rc = 0;
 
 	if (imajor(filp->f_path.dentry->d_inode) != IBM_FS3270_MAJOR)
 		return -ENODEV;
-	lock_kernel();
 	minor = iminor(filp->f_path.dentry->d_inode);
 	/* Check for minor 0 multiplexer. */
 	if (minor == 0) {
-		struct tty_struct *tty;
-		mutex_lock(&tty_mutex);
-		tty = get_current_tty();
+		struct tty_struct *tty = get_current_tty();
 		if (!tty || tty->driver->major != IBM_TTY3270_MAJOR) {
-			mutex_unlock(&tty_mutex);
-			rc = -ENODEV;
-			goto out;
+			tty_kref_put(tty);
+			return -ENODEV;
 		}
 		minor = tty->index + RAW3270_FIRSTMINOR;
-		mutex_unlock(&tty_mutex);
+		tty_kref_put(tty);
 	}
+	lock_kernel();
 	/* Check if some other program is already using fullscreen mode. */
 	fp = (struct fs3270 *) raw3270_find_view(&fs3270_fn, minor);
 	if (!IS_ERR(fp)) {
@@ -478,7 +479,7 @@ fs3270_open(struct inode *inode, struct file *filp)
 	filp->private_data = fp;
 out:
 	unlock_kernel();
-	return 0;
+	return rc;
 }
 
 /*

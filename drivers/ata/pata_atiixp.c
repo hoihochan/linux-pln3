@@ -1,7 +1,7 @@
 /*
  * pata_atiixp.c 	- ATI PATA for new ATA layer
  *			  (C) 2005 Red Hat Inc
- *			  Alan Cox <alan@redhat.com>
+ *			  (C) 2009 Bartlomiej Zolnierkiewicz
  *
  * Based on
  *
@@ -33,21 +33,6 @@ enum {
 	ATIIXP_IDE_UDMA_MODE 	= 0x56
 };
 
-static int atiixp_pre_reset(struct ata_link *link, unsigned long deadline)
-{
-	struct ata_port *ap = link->ap;
-	static const struct pci_bits atiixp_enable_bits[] = {
-		{ 0x48, 1, 0x01, 0x00 },
-		{ 0x48, 1, 0x08, 0x00 }
-	};
-	struct pci_dev *pdev = to_pci_dev(ap->host->dev);
-
-	if (!pci_test_config_bits(pdev, &atiixp_enable_bits[ap->port_no]))
-		return -ENOENT;
-
-	return ata_sff_prereset(link, deadline);
-}
-
 static int atiixp_cable_detect(struct ata_port *ap)
 {
 	struct pci_dev *pdev = to_pci_dev(ap->host->dev);
@@ -77,20 +62,19 @@ static void atiixp_set_pio_timing(struct ata_port *ap, struct ata_device *adev, 
 
 	struct pci_dev *pdev = to_pci_dev(ap->host->dev);
 	int dn = 2 * ap->port_no + adev->devno;
-
-	/* Check this is correct - the order is odd in both drivers */
 	int timing_shift = (16 * ap->port_no) + 8 * (adev->devno ^ 1);
-	u16 pio_mode_data, pio_timing_data;
+	u32 pio_timing_data;
+	u16 pio_mode_data;
 
 	pci_read_config_word(pdev, ATIIXP_IDE_PIO_MODE, &pio_mode_data);
 	pio_mode_data &= ~(0x7 << (4 * dn));
 	pio_mode_data |= pio << (4 * dn);
 	pci_write_config_word(pdev, ATIIXP_IDE_PIO_MODE, pio_mode_data);
 
-	pci_read_config_word(pdev, ATIIXP_IDE_PIO_TIMING, &pio_timing_data);
+	pci_read_config_dword(pdev, ATIIXP_IDE_PIO_TIMING, &pio_timing_data);
 	pio_timing_data &= ~(0xFF << timing_shift);
 	pio_timing_data |= (pio_timings[pio] << timing_shift);
-	pci_write_config_word(pdev, ATIIXP_IDE_PIO_TIMING, pio_timing_data);
+	pci_write_config_dword(pdev, ATIIXP_IDE_PIO_TIMING, pio_timing_data);
 }
 
 /**
@@ -135,16 +119,17 @@ static void atiixp_set_dmamode(struct ata_port *ap, struct ata_device *adev)
 		udma_mode_data |= dma << (4 * dn);
 		pci_write_config_word(pdev, ATIIXP_IDE_UDMA_MODE, udma_mode_data);
 	} else {
-		u16 mwdma_timing_data;
-		/* Check this is correct - the order is odd in both drivers */
 		int timing_shift = (16 * ap->port_no) + 8 * (adev->devno ^ 1);
+		u32 mwdma_timing_data;
 
 		dma -= XFER_MW_DMA_0;
 
-		pci_read_config_word(pdev, ATIIXP_IDE_MWDMA_TIMING, &mwdma_timing_data);
+		pci_read_config_dword(pdev, ATIIXP_IDE_MWDMA_TIMING,
+				      &mwdma_timing_data);
 		mwdma_timing_data &= ~(0xFF << timing_shift);
 		mwdma_timing_data |= (mwdma_timings[dma] << timing_shift);
-		pci_write_config_word(pdev, ATIIXP_IDE_MWDMA_TIMING, mwdma_timing_data);
+		pci_write_config_dword(pdev, ATIIXP_IDE_MWDMA_TIMING,
+				       mwdma_timing_data);
 	}
 	/*
 	 *	We must now look at the PIO mode situation. We may need to
@@ -230,20 +215,29 @@ static struct ata_port_operations atiixp_port_ops = {
 	.cable_detect	= atiixp_cable_detect,
 	.set_piomode	= atiixp_set_piomode,
 	.set_dmamode	= atiixp_set_dmamode,
-	.prereset	= atiixp_pre_reset,
 };
 
-static int atiixp_init_one(struct pci_dev *dev, const struct pci_device_id *id)
+static int atiixp_init_one(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	static const struct ata_port_info info = {
 		.flags = ATA_FLAG_SLAVE_POSS,
-		.pio_mask = 0x1f,
-		.mwdma_mask = 0x06,	/* No MWDMA0 support */
-		.udma_mask = 0x3F,
+		.pio_mask = ATA_PIO4,
+		.mwdma_mask = ATA_MWDMA12_ONLY,
+		.udma_mask = ATA_UDMA5,
 		.port_ops = &atiixp_port_ops
 	};
-	const struct ata_port_info *ppi[] = { &info, NULL };
-	return ata_pci_sff_init_one(dev, ppi, &atiixp_sht, NULL);
+	static const struct pci_bits atiixp_enable_bits[] = {
+		{ 0x48, 1, 0x01, 0x00 },
+		{ 0x48, 1, 0x08, 0x00 }
+	};
+	const struct ata_port_info *ppi[] = { &info, &info };
+	int i;
+
+	for (i = 0; i < 2; i++)
+		if (!pci_test_config_bits(pdev, &atiixp_enable_bits[i]))
+			ppi[i] = &ata_dummy_port_info;
+
+	return ata_pci_sff_init_one(pdev, ppi, &atiixp_sht, NULL);
 }
 
 static const struct pci_device_id atiixp[] = {
@@ -252,6 +246,7 @@ static const struct pci_device_id atiixp[] = {
 	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_IXP400_IDE), },
 	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_IXP600_IDE), },
 	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_IXP700_IDE), },
+	{ PCI_VDEVICE(AMD, PCI_DEVICE_ID_AMD_HUDSON2_IDE), },
 
 	{ },
 };

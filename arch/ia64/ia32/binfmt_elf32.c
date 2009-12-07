@@ -41,7 +41,7 @@ randomize_stack_top(unsigned long stack_top);
 #define elf_map				elf32_map
 
 #undef SET_PERSONALITY
-#define SET_PERSONALITY(ex, ibcs2)	elf32_set_personality()
+#define SET_PERSONALITY(ex)	elf32_set_personality()
 
 #define elf_read_implies_exec(ex, have_pt_gnu_stack)	(!(have_pt_gnu_stack))
 
@@ -69,11 +69,11 @@ ia32_install_gate_page (struct vm_area_struct *vma, struct vm_fault *vmf)
 }
 
 
-static struct vm_operations_struct ia32_shared_page_vm_ops = {
+static const struct vm_operations_struct ia32_shared_page_vm_ops = {
 	.fault = ia32_install_shared_page
 };
 
-static struct vm_operations_struct ia32_gate_page_vm_ops = {
+static const struct vm_operations_struct ia32_gate_page_vm_ops = {
 	.fault = ia32_install_gate_page
 };
 

@@ -53,6 +53,7 @@ struct musb_qh {
 
 	struct list_head	ring;		/* of musb_qh */
 	/* struct musb_qh		*next; */	/* for periodic tree */
+	u8			mux;		/* qh multiplexed to hw_ep */
 
 	unsigned		offset;		/* in urb->transfer_buffer */
 	unsigned		segsize;	/* current xfer fragment */
@@ -66,6 +67,7 @@ struct musb_qh {
 	u8			is_ready;	/* safe to modify hw_ep */
 	u8			type;		/* XFERTYPE_* */
 	u8			epnum;
+	u8			hb_mult;	/* high bandwidth pkts per uf */
 	u16			maxpacket;
 	u16			frame;		/* for periodic schedule */
 	unsigned		iso_idx;	/* in urb->iso_frame_desc[] */

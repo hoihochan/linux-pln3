@@ -13,7 +13,7 @@
 #include <linux/linkage.h>
 #include <linux/init.h>
 #include <asm/assembler.h>
-#include <asm/elf.h>
+#include <asm/hwcap.h>
 #include <asm/pgtable-hwdef.h>
 #include <asm/pgtable.h>
 #include <asm/ptrace.h>
@@ -377,7 +377,7 @@ __arm946_setup:
 	.type	arm946_processor_functions, #object
 ENTRY(arm946_processor_functions)
 	.word	nommu_early_abort
-	.word	pabort_noifar
+	.word	legacy_pabort
 	.word	cpu_arm946_proc_init
 	.word	cpu_arm946_proc_fin
 	.word	cpu_arm946_reset

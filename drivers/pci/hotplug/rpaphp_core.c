@@ -37,7 +37,7 @@
 				/* and pci_do_scan_bus */
 #include "rpaphp.h"
 
-int debug;
+int rpaphp_debug;
 LIST_HEAD(rpaphp_slot_head);
 
 #define DRIVER_VERSION	"0.1"
@@ -50,7 +50,7 @@ MODULE_AUTHOR(DRIVER_AUTHOR);
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
 
-module_param(debug, bool, 0644);
+module_param_named(debug, rpaphp_debug, bool, 0644);
 
 /**
  * set_attention_status - set attention LED
@@ -423,7 +423,6 @@ static int disable_slot(struct hotplug_slot *hotplug_slot)
 }
 
 struct hotplug_slot_ops rpaphp_hotplug_slot_ops = {
-	.owner = THIS_MODULE,
 	.enable_slot = enable_slot,
 	.disable_slot = disable_slot,
 	.set_attention_status = set_attention_status,

@@ -8,8 +8,7 @@
  * is licensed "as is" without any warranty of any kind, whether express
  * or implied.
  */
-#include <asm/memory.h>
-#include <mach/io.h>
+#include <mach/hardware.h>
 
 /* Allow vmalloc range until the IO virtual range minus a 2M "hole" */
 #define VMALLOC_END	  (IO_VIRT - (2<<20))

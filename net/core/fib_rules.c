@@ -299,7 +299,7 @@ static int fib_nl_newrule(struct sk_buff *skb, struct nlmsghdr* nlh, void *arg)
 	} else if (rule->action == FR_ACT_GOTO)
 		goto errout_free;
 
-	err = ops->configure(rule, skb, nlh, frh, tb);
+	err = ops->configure(rule, skb, frh, tb);
 	if (err < 0)
 		goto errout_free;
 
@@ -500,7 +500,7 @@ static int fib_nl_fill_rule(struct sk_buff *skb, struct fib_rule *rule,
 	if (rule->target)
 		NLA_PUT_U32(skb, FRA_GOTO, rule->target);
 
-	if (ops->fill(rule, skb, nlh, frh) < 0)
+	if (ops->fill(rule, skb, frh) < 0)
 		goto nla_put_failure;
 
 	return nlmsg_end(skb, nlh);
@@ -588,7 +588,8 @@ static void notify_rule_change(int event, struct fib_rule *rule,
 		goto errout;
 	}
 
-	err = rtnl_notify(skb, net, pid, ops->nlgroup, nlh, GFP_KERNEL);
+	rtnl_notify(skb, net, pid, ops->nlgroup, nlh, GFP_KERNEL);
+	return;
 errout:
 	if (err < 0)
 		rtnl_set_sk_err(net, ops->nlgroup, err);
@@ -664,17 +665,18 @@ static int __init fib_rules_init(void)
 	rtnl_register(PF_UNSPEC, RTM_DELRULE, fib_nl_delrule, NULL);
 	rtnl_register(PF_UNSPEC, RTM_GETRULE, NULL, fib_nl_dumprule);
 
-	err = register_netdevice_notifier(&fib_rules_notifier);
+	err = register_pernet_subsys(&fib_rules_net_ops);
 	if (err < 0)
 		goto fail;
 
-	err = register_pernet_subsys(&fib_rules_net_ops);
+	err = register_netdevice_notifier(&fib_rules_notifier);
 	if (err < 0)
 		goto fail_unregister;
+
 	return 0;
 
 fail_unregister:
-	unregister_netdevice_notifier(&fib_rules_notifier);
+	unregister_pernet_subsys(&fib_rules_net_ops);
 fail:
 	rtnl_unregister(PF_UNSPEC, RTM_NEWRULE);
 	rtnl_unregister(PF_UNSPEC, RTM_DELRULE);

@@ -201,13 +201,13 @@ module_param_array(drive3, int, NULL, 0);
 #define ATAPI_READ_10		0x28
 #define ATAPI_WRITE_10		0x2a
 
-static int pf_open(struct inode *inode, struct file *file);
+static int pf_open(struct block_device *bdev, fmode_t mode);
 static void do_pf_request(struct request_queue * q);
-static int pf_ioctl(struct inode *inode, struct file *file,
+static int pf_ioctl(struct block_device *bdev, fmode_t mode,
 		    unsigned int cmd, unsigned long arg);
 static int pf_getgeo(struct block_device *bdev, struct hd_geometry *geo);
 
-static int pf_release(struct inode *inode, struct file *file);
+static int pf_release(struct gendisk *disk, fmode_t mode);
 
 static int pf_detect(void);
 static void do_pf_read(void);
@@ -262,11 +262,11 @@ static char *pf_buf;		/* buffer for request in progress */
 
 /* kernel glue structures */
 
-static struct block_device_operations pf_fops = {
+static const struct block_device_operations pf_fops = {
 	.owner		= THIS_MODULE,
 	.open		= pf_open,
 	.release	= pf_release,
-	.ioctl		= pf_ioctl,
+	.locked_ioctl	= pf_ioctl,
 	.getgeo		= pf_getgeo,
 	.media_changed	= pf_check_media,
 };
@@ -296,16 +296,16 @@ static void __init pf_init_units(void)
 	}
 }
 
-static int pf_open(struct inode *inode, struct file *file)
+static int pf_open(struct block_device *bdev, fmode_t mode)
 {
-	struct pf_unit *pf = inode->i_bdev->bd_disk->private_data;
+	struct pf_unit *pf = bdev->bd_disk->private_data;
 
 	pf_identify(pf);
 
 	if (pf->media_status == PF_NM)
 		return -ENODEV;
 
-	if ((pf->media_status == PF_RO) && (file->f_mode & 2))
+	if ((pf->media_status == PF_RO) && (mode & FMODE_WRITE))
 		return -EROFS;
 
 	pf->access++;
@@ -333,9 +333,9 @@ static int pf_getgeo(struct block_device *bdev, struct hd_geometry *geo)
 	return 0;
 }
 
-static int pf_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg)
+static int pf_ioctl(struct block_device *bdev, fmode_t mode, unsigned int cmd, unsigned long arg)
 {
-	struct pf_unit *pf = inode->i_bdev->bd_disk->private_data;
+	struct pf_unit *pf = bdev->bd_disk->private_data;
 
 	if (cmd != CDROMEJECT)
 		return -EINVAL;
@@ -346,9 +346,9 @@ static int pf_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 	return 0;
 }
 
-static int pf_release(struct inode *inode, struct file *file)
+static int pf_release(struct gendisk *disk, fmode_t mode)
 {
-	struct pf_unit *pf = inode->i_bdev->bd_disk->private_data;
+	struct pf_unit *pf = disk->private_data;
 
 	if (pf->access <= 0)
 		return -EINVAL;
@@ -750,12 +750,10 @@ static int pf_ready(void)
 
 static struct request_queue *pf_queue;
 
-static void pf_end_request(int uptodate)
+static void pf_end_request(int err)
 {
-	if (pf_req) {
-		end_request(pf_req, uptodate);
+	if (pf_req && !__blk_end_request_cur(pf_req, err))
 		pf_req = NULL;
-	}
 }
 
 static void do_pf_request(struct request_queue * q)
@@ -763,17 +761,19 @@ static void do_pf_request(struct request_queue * q)
 	if (pf_busy)
 		return;
 repeat:
-	pf_req = elv_next_request(q);
-	if (!pf_req)
-		return;
+	if (!pf_req) {
+		pf_req = blk_fetch_request(q);
+		if (!pf_req)
+			return;
+	}
 
 	pf_current = pf_req->rq_disk->private_data;
-	pf_block = pf_req->sector;
-	pf_run = pf_req->nr_sectors;
-	pf_count = pf_req->current_nr_sectors;
+	pf_block = blk_rq_pos(pf_req);
+	pf_run = blk_rq_sectors(pf_req);
+	pf_count = blk_rq_cur_sectors(pf_req);
 
 	if (pf_block + pf_count > get_capacity(pf_req->rq_disk)) {
-		pf_end_request(0);
+		pf_end_request(-EIO);
 		goto repeat;
 	}
 
@@ -788,7 +788,7 @@ repeat:
 		pi_do_claimed(pf_current->pi, do_pf_write);
 	else {
 		pf_busy = 0;
-		pf_end_request(0);
+		pf_end_request(-EIO);
 		goto repeat;
 	}
 }
@@ -805,23 +805,22 @@ static int pf_next_buf(void)
 		return 1;
 	if (!pf_count) {
 		spin_lock_irqsave(&pf_spin_lock, saved_flags);
-		pf_end_request(1);
-		pf_req = elv_next_request(pf_queue);
+		pf_end_request(0);
 		spin_unlock_irqrestore(&pf_spin_lock, saved_flags);
 		if (!pf_req)
 			return 1;
-		pf_count = pf_req->current_nr_sectors;
+		pf_count = blk_rq_cur_sectors(pf_req);
 		pf_buf = pf_req->buffer;
 	}
 	return 0;
 }
 
-static inline void next_request(int success)
+static inline void next_request(int err)
 {
 	unsigned long saved_flags;
 
 	spin_lock_irqsave(&pf_spin_lock, saved_flags);
-	pf_end_request(success);
+	pf_end_request(err);
 	pf_busy = 0;
 	do_pf_request(pf_queue);
 	spin_unlock_irqrestore(&pf_spin_lock, saved_flags);
@@ -844,7 +843,7 @@ static void do_pf_read_start(void)
 			pi_do_claimed(pf_current->pi, do_pf_read_start);
 			return;
 		}
-		next_request(0);
+		next_request(-EIO);
 		return;
 	}
 	pf_mask = STAT_DRQ;
@@ -863,7 +862,7 @@ static void do_pf_read_drq(void)
 				pi_do_claimed(pf_current->pi, do_pf_read_start);
 				return;
 			}
-			next_request(0);
+			next_request(-EIO);
 			return;
 		}
 		pi_read_block(pf_current->pi, pf_buf, 512);
@@ -871,7 +870,7 @@ static void do_pf_read_drq(void)
 			break;
 	}
 	pi_disconnect(pf_current->pi);
-	next_request(1);
+	next_request(0);
 }
 
 static void do_pf_write(void)
@@ -890,7 +889,7 @@ static void do_pf_write_start(void)
 			pi_do_claimed(pf_current->pi, do_pf_write_start);
 			return;
 		}
-		next_request(0);
+		next_request(-EIO);
 		return;
 	}
 
@@ -903,7 +902,7 @@ static void do_pf_write_start(void)
 				pi_do_claimed(pf_current->pi, do_pf_write_start);
 				return;
 			}
-			next_request(0);
+			next_request(-EIO);
 			return;
 		}
 		pi_write_block(pf_current->pi, pf_buf, 512);
@@ -923,11 +922,11 @@ static void do_pf_write_done(void)
 			pi_do_claimed(pf_current->pi, do_pf_write_start);
 			return;
 		}
-		next_request(0);
+		next_request(-EIO);
 		return;
 	}
 	pi_disconnect(pf_current->pi);
-	next_request(1);
+	next_request(0);
 }
 
 static int __init pf_init(void)

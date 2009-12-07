@@ -17,17 +17,17 @@
 #include <linux/kernel.h>
 #include <linux/types.h>
 
-#include <linux/delay.h>
 #include <linux/gpio_keys.h>
 #include <linux/init.h>
+#include <linux/gpio.h>
 #include <linux/input.h>
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
 #include <linux/serial_core.h>
 #include <linux/timer.h>
+#include <linux/io.h>
 
 #include <mach/hardware.h>
-#include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/mach-types.h>
 
@@ -40,14 +40,14 @@
 #include <asm/mach/irq.h>
 #include <asm/mach/map.h>
 
-#include <asm/plat-s3c/iic.h>
-#include <asm/plat-s3c/regs-serial.h>
+#include <plat/iic.h>
+#include <plat/regs-serial.h>
 
-#include <asm/plat-s3c24xx/clock.h>
-#include <asm/plat-s3c24xx/cpu.h>
-#include <asm/plat-s3c24xx/devs.h>
-#include <asm/plat-s3c24xx/s3c2410.h>
-#include <asm/plat-s3c24xx/udc.h>
+#include <plat/clock.h>
+#include <plat/cpu.h>
+#include <plat/devs.h>
+#include <plat/s3c2410.h>
+#include <plat/udc.h>
 
 static struct map_desc n30_iodesc[] __initdata = {
 	/* nothing here yet */
@@ -86,10 +86,10 @@ static void n30_udc_pullup(enum s3c2410_udc_cmd_e cmd)
 {
 	switch (cmd) {
 	case S3C2410_UDC_P_ENABLE :
-		s3c2410_gpio_setpin(S3C2410_GPB3, 1);
+		s3c2410_gpio_setpin(S3C2410_GPB(3), 1);
 		break;
 	case S3C2410_UDC_P_DISABLE :
-		s3c2410_gpio_setpin(S3C2410_GPB3, 0);
+		s3c2410_gpio_setpin(S3C2410_GPB(3), 0);
 		break;
 	case S3C2410_UDC_P_RESET :
 		break;
@@ -100,55 +100,55 @@ static void n30_udc_pullup(enum s3c2410_udc_cmd_e cmd)
 
 static struct s3c2410_udc_mach_info n30_udc_cfg __initdata = {
 	.udc_command		= n30_udc_pullup,
-	.vbus_pin		= S3C2410_GPG1,
+	.vbus_pin		= S3C2410_GPG(1),
 	.vbus_pin_inverted	= 0,
 };
 
 static struct gpio_keys_button n30_buttons[] = {
 	{
-		.gpio		= S3C2410_GPF0,
+		.gpio		= S3C2410_GPF(0),
 		.code		= KEY_POWER,
 		.desc		= "Power",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPG9,
+		.gpio		= S3C2410_GPG(9),
 		.code		= KEY_UP,
 		.desc		= "Thumbwheel Up",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPG8,
+		.gpio		= S3C2410_GPG(8),
 		.code		= KEY_DOWN,
 		.desc		= "Thumbwheel Down",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPG7,
+		.gpio		= S3C2410_GPG(7),
 		.code		= KEY_ENTER,
 		.desc		= "Thumbwheel Press",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPF7,
+		.gpio		= S3C2410_GPF(7),
 		.code		= KEY_HOMEPAGE,
 		.desc		= "Home",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPF6,
+		.gpio		= S3C2410_GPF(6),
 		.code		= KEY_CALENDAR,
 		.desc		= "Calendar",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPF5,
+		.gpio		= S3C2410_GPF(5),
 		.code		= KEY_ADDRESSBOOK,
 		.desc		= "Contacts",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPF4,
+		.gpio		= S3C2410_GPF(4),
 		.code		= KEY_MAIL,
 		.desc		= "Mail",
 		.active_low	= 0,
@@ -170,73 +170,73 @@ static struct platform_device n30_button_device = {
 
 static struct gpio_keys_button n35_buttons[] = {
 	{
-		.gpio		= S3C2410_GPF0,
+		.gpio		= S3C2410_GPF(0),
 		.code		= KEY_POWER,
 		.desc		= "Power",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPG9,
+		.gpio		= S3C2410_GPG(9),
 		.code		= KEY_UP,
 		.desc		= "Joystick Up",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPG8,
+		.gpio		= S3C2410_GPG(8),
 		.code		= KEY_DOWN,
 		.desc		= "Joystick Down",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPG6,
+		.gpio		= S3C2410_GPG(6),
 		.code		= KEY_DOWN,
 		.desc		= "Joystick Left",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPG5,
+		.gpio		= S3C2410_GPG(5),
 		.code		= KEY_DOWN,
 		.desc		= "Joystick Right",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPG7,
+		.gpio		= S3C2410_GPG(7),
 		.code		= KEY_ENTER,
 		.desc		= "Joystick Press",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPF7,
+		.gpio		= S3C2410_GPF(7),
 		.code		= KEY_HOMEPAGE,
 		.desc		= "Home",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPF6,
+		.gpio		= S3C2410_GPF(6),
 		.code		= KEY_CALENDAR,
 		.desc		= "Calendar",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPF5,
+		.gpio		= S3C2410_GPF(5),
 		.code		= KEY_ADDRESSBOOK,
 		.desc		= "Contacts",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPF4,
+		.gpio		= S3C2410_GPF(4),
 		.code		= KEY_MAIL,
 		.desc		= "Mail",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPF3,
+		.gpio		= S3C2410_GPF(3),
 		.code		= SW_RADIO,
 		.desc		= "GPS Antenna",
 		.active_low	= 0,
 	},
 	{
-		.gpio		= S3C2410_GPG2,
+		.gpio		= S3C2410_GPG(2),
 		.code		= SW_HEADPHONE_INSERT,
 		.desc		= "Headphone",
 		.active_low	= 0,
@@ -260,7 +260,7 @@ static struct platform_device n35_button_device = {
 /* This is the bluetooth LED on the device. */
 static struct s3c24xx_led_platdata n30_blue_led_pdata = {
 	.name		= "blue_led",
-	.gpio		= S3C2410_GPG6,
+	.gpio		= S3C2410_GPG(6),
 	.def_trigger	= "",
 };
 
@@ -271,7 +271,7 @@ static struct s3c24xx_led_platdata n30_blue_led_pdata = {
 static struct s3c24xx_led_platdata n30_warning_led_pdata = {
 	.name		= "warning_led",
 	.flags          = S3C24XX_LEDF_ACTLOW,
-	.gpio		= S3C2410_GPD9,
+	.gpio		= S3C2410_GPD(9),
 	.def_trigger	= "",
 };
 
@@ -320,7 +320,7 @@ static struct s3c2410fb_mach_info n30_fb_info __initdata = {
 static struct platform_device *n30_devices[] __initdata = {
 	&s3c_device_lcd,
 	&s3c_device_wdt,
-	&s3c_device_i2c,
+	&s3c_device_i2c0,
 	&s3c_device_iis,
 	&s3c_device_usb,
 	&s3c_device_usbgadget,
@@ -332,7 +332,7 @@ static struct platform_device *n30_devices[] __initdata = {
 static struct platform_device *n35_devices[] __initdata = {
 	&s3c_device_lcd,
 	&s3c_device_wdt,
-	&s3c_device_i2c,
+	&s3c_device_i2c0,
 	&s3c_device_iis,
 	&s3c_device_usbgadget,
 	&n35_button_device,
@@ -341,8 +341,7 @@ static struct platform_device *n35_devices[] __initdata = {
 static struct s3c2410_platform_i2c n30_i2ccfg = {
 	.flags		= 0,
 	.slave_addr	= 0x10,
-	.bus_freq	= 10*1000,
-	.max_freq	= 10*1000,
+	.frequency	= 10*1000,
 };
 
 /* Lots of hardcoded stuff, but it sets up the hardware in a useful
@@ -501,7 +500,7 @@ static void __init n30_init_irq(void)
 static void __init n30_init(void)
 {
 	s3c24xx_fb_set_platdata(&n30_fb_info);
-	s3c_device_i2c.dev.platform_data = &n30_i2ccfg;
+	s3c_device_i2c0.dev.platform_data = &n30_i2ccfg;
 	s3c24xx_udc_set_platdata(&n30_udc_cfg);
 
 	/* Turn off suspend on both USB ports, and switch the

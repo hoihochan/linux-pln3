@@ -31,9 +31,9 @@ static int dac_volume_info(struct snd_kcontrol *ctl,
 	struct oxygen *chip = ctl->private_data;
 
 	info->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
-	info->count = chip->model->dac_channels;
-	info->value.integer.min = chip->model->dac_volume_min;
-	info->value.integer.max = chip->model->dac_volume_max;
+	info->count = chip->model.dac_channels;
+	info->value.integer.min = chip->model.dac_volume_min;
+	info->value.integer.max = chip->model.dac_volume_max;
 	return 0;
 }
 
@@ -44,7 +44,7 @@ static int dac_volume_get(struct snd_kcontrol *ctl,
 	unsigned int i;
 
 	mutex_lock(&chip->mutex);
-	for (i = 0; i < chip->model->dac_channels; ++i)
+	for (i = 0; i < chip->model.dac_channels; ++i)
 		value->value.integer.value[i] = chip->dac_volume[i];
 	mutex_unlock(&chip->mutex);
 	return 0;
@@ -59,13 +59,13 @@ static int dac_volume_put(struct snd_kcontrol *ctl,
 
 	changed = 0;
 	mutex_lock(&chip->mutex);
-	for (i = 0; i < chip->model->dac_channels; ++i)
+	for (i = 0; i < chip->model.dac_channels; ++i)
 		if (value->value.integer.value[i] != chip->dac_volume[i]) {
 			chip->dac_volume[i] = value->value.integer.value[i];
 			changed = 1;
 		}
 	if (changed)
-		chip->model->update_dac_volume(chip);
+		chip->model.update_dac_volume(chip);
 	mutex_unlock(&chip->mutex);
 	return changed;
 }
@@ -91,7 +91,7 @@ static int dac_mute_put(struct snd_kcontrol *ctl,
 	changed = !value->value.integer.value[0] != chip->dac_mute;
 	if (changed) {
 		chip->dac_mute = !value->value.integer.value[0];
-		chip->model->update_dac_mute(chip);
+		chip->model.update_dac_mute(chip);
 	}
 	mutex_unlock(&chip->mutex);
 	return changed;
@@ -103,7 +103,7 @@ static int upmix_info(struct snd_kcontrol *ctl, struct snd_ctl_elem_info *info)
 		"Front", "Front+Surround", "Front+Surround+Back"
 	};
 	struct oxygen *chip = ctl->private_data;
-	unsigned int count = 2 + (chip->model->dac_channels == 8);
+	unsigned int count = 2 + (chip->model.dac_channels == 8);
 
 	info->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
 	info->count = 1;
@@ -172,7 +172,7 @@ void oxygen_update_dac_routing(struct oxygen *chip)
 static int upmix_put(struct snd_kcontrol *ctl, struct snd_ctl_elem_value *value)
 {
 	struct oxygen *chip = ctl->private_data;
-	unsigned int count = 2 + (chip->model->dac_channels == 8);
+	unsigned int count = 2 + (chip->model.dac_channels == 8);
 	int changed;
 
 	mutex_lock(&chip->mutex);
@@ -211,13 +211,13 @@ static unsigned int oxygen_spdif_rate(unsigned int oxygen_rate)
 	case OXYGEN_RATE_64000:
 		return 0xb << OXYGEN_SPDIF_CS_RATE_SHIFT;
 	case OXYGEN_RATE_88200:
-		return 0x8 << OXYGEN_SPDIF_CS_RATE_SHIFT;
+		return IEC958_AES3_CON_FS_88200 << OXYGEN_SPDIF_CS_RATE_SHIFT;
 	case OXYGEN_RATE_96000:
-		return 0xa << OXYGEN_SPDIF_CS_RATE_SHIFT;
+		return IEC958_AES3_CON_FS_96000 << OXYGEN_SPDIF_CS_RATE_SHIFT;
 	case OXYGEN_RATE_176400:
-		return 0xc << OXYGEN_SPDIF_CS_RATE_SHIFT;
+		return IEC958_AES3_CON_FS_176400 << OXYGEN_SPDIF_CS_RATE_SHIFT;
 	case OXYGEN_RATE_192000:
-		return 0xe << OXYGEN_SPDIF_CS_RATE_SHIFT;
+		return IEC958_AES3_CON_FS_192000 << OXYGEN_SPDIF_CS_RATE_SHIFT;
 	}
 }
 
@@ -521,8 +521,8 @@ static void mute_ac97_ctl(struct oxygen *chip, unsigned int control)
 	value = oxygen_read_ac97(chip, 0, priv_idx);
 	if (!(value & 0x8000)) {
 		oxygen_write_ac97(chip, 0, priv_idx, value | 0x8000);
-		if (chip->model->ac97_switch)
-			chip->model->ac97_switch(chip, priv_idx, 0x8000);
+		if (chip->model.ac97_switch)
+			chip->model.ac97_switch(chip, priv_idx, 0x8000);
 		snd_ctl_notify(chip->card, SNDRV_CTL_EVENT_MASK_VALUE,
 			       &chip->controls[control]->id);
 	}
@@ -549,8 +549,8 @@ static int ac97_switch_put(struct snd_kcontrol *ctl,
 	change = newreg != oldreg;
 	if (change) {
 		oxygen_write_ac97(chip, codec, index, newreg);
-		if (codec == 0 && chip->model->ac97_switch)
-			chip->model->ac97_switch(chip, index, newreg & 0x8000);
+		if (codec == 0 && chip->model.ac97_switch)
+			chip->model.ac97_switch(chip, index, newreg & 0x8000);
 		if (index == AC97_LINE) {
 			oxygen_write_ac97_masked(chip, 0, CM9780_GPIO_STATUS,
 						 newreg & 0x8000 ?
@@ -575,8 +575,10 @@ static int ac97_switch_put(struct snd_kcontrol *ctl,
 static int ac97_volume_info(struct snd_kcontrol *ctl,
 			    struct snd_ctl_elem_info *info)
 {
+	int stereo = (ctl->private_value >> 16) & 1;
+
 	info->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
-	info->count = 2;
+	info->count = stereo ? 2 : 1;
 	info->value.integer.min = 0;
 	info->value.integer.max = 0x1f;
 	return 0;
@@ -587,6 +589,7 @@ static int ac97_volume_get(struct snd_kcontrol *ctl,
 {
 	struct oxygen *chip = ctl->private_data;
 	unsigned int codec = (ctl->private_value >> 24) & 1;
+	int stereo = (ctl->private_value >> 16) & 1;
 	unsigned int index = ctl->private_value & 0xff;
 	u16 reg;
 
@@ -594,7 +597,8 @@ static int ac97_volume_get(struct snd_kcontrol *ctl,
 	reg = oxygen_read_ac97(chip, codec, index);
 	mutex_unlock(&chip->mutex);
 	value->value.integer.value[0] = 31 - (reg & 0x1f);
-	value->value.integer.value[1] = 31 - ((reg >> 8) & 0x1f);
+	if (stereo)
+		value->value.integer.value[1] = 31 - ((reg >> 8) & 0x1f);
 	return 0;
 }
 
@@ -603,6 +607,7 @@ static int ac97_volume_put(struct snd_kcontrol *ctl,
 {
 	struct oxygen *chip = ctl->private_data;
 	unsigned int codec = (ctl->private_value >> 24) & 1;
+	int stereo = (ctl->private_value >> 16) & 1;
 	unsigned int index = ctl->private_value & 0xff;
 	u16 oldreg, newreg;
 	int change;
@@ -612,8 +617,11 @@ static int ac97_volume_put(struct snd_kcontrol *ctl,
 	newreg = oldreg;
 	newreg = (newreg & ~0x1f) |
 		(31 - (value->value.integer.value[0] & 0x1f));
-	newreg = (newreg & ~0x1f00) |
-		((31 - (value->value.integer.value[0] & 0x1f)) << 8);
+	if (stereo)
+		newreg = (newreg & ~0x1f00) |
+			((31 - (value->value.integer.value[1] & 0x1f)) << 8);
+	else
+		newreg = (newreg & ~0x1f00) | ((newreg & 0x1f) << 8);
 	change = newreg != oldreg;
 	if (change)
 		oxygen_write_ac97(chip, codec, index, newreg);
@@ -673,7 +681,7 @@ static int ac97_fp_rec_volume_put(struct snd_kcontrol *ctl,
 		.private_value = ((codec) << 24) | ((invert) << 16) | \
 				 ((bitnr) << 8) | (index), \
 	}
-#define AC97_VOLUME(xname, codec, index) { \
+#define AC97_VOLUME(xname, codec, index, stereo) { \
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER, \
 		.name = xname, \
 		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE | \
@@ -682,7 +690,7 @@ static int ac97_fp_rec_volume_put(struct snd_kcontrol *ctl,
 		.get = ac97_volume_get, \
 		.put = ac97_volume_put, \
 		.tlv = { .p = ac97_db_scale, }, \
-		.private_value = ((codec) << 24) | (index), \
+		.private_value = ((codec) << 24) | ((stereo) << 16) | (index), \
 	}
 
 static DECLARE_TLV_DB_SCALE(monitor_db_scale, -1000, 1000, 0);
@@ -882,18 +890,18 @@ static const struct {
 };
 
 static const struct snd_kcontrol_new ac97_controls[] = {
-	AC97_VOLUME("Mic Capture Volume", 0, AC97_MIC),
+	AC97_VOLUME("Mic Capture Volume", 0, AC97_MIC, 0),
 	AC97_SWITCH("Mic Capture Switch", 0, AC97_MIC, 15, 1),
 	AC97_SWITCH("Mic Boost (+20dB)", 0, AC97_MIC, 6, 0),
 	AC97_SWITCH("Line Capture Switch", 0, AC97_LINE, 15, 1),
-	AC97_VOLUME("CD Capture Volume", 0, AC97_CD),
+	AC97_VOLUME("CD Capture Volume", 0, AC97_CD, 1),
 	AC97_SWITCH("CD Capture Switch", 0, AC97_CD, 15, 1),
-	AC97_VOLUME("Aux Capture Volume", 0, AC97_AUX),
+	AC97_VOLUME("Aux Capture Volume", 0, AC97_AUX, 1),
 	AC97_SWITCH("Aux Capture Switch", 0, AC97_AUX, 15, 1),
 };
 
 static const struct snd_kcontrol_new ac97_fp_controls[] = {
-	AC97_VOLUME("Front Panel Playback Volume", 1, AC97_HEADPHONE),
+	AC97_VOLUME("Front Panel Playback Volume", 1, AC97_HEADPHONE, 1),
 	AC97_SWITCH("Front Panel Playback Switch", 1, AC97_HEADPHONE, 15, 1),
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
@@ -939,16 +947,16 @@ static int add_controls(struct oxygen *chip,
 
 	for (i = 0; i < count; ++i) {
 		template = controls[i];
-		if (chip->model->control_filter) {
-			err = chip->model->control_filter(&template);
+		if (chip->model.control_filter) {
+			err = chip->model.control_filter(&template);
 			if (err < 0)
 				return err;
 			if (err == 1)
 				continue;
 		}
 		if (!strcmp(template.name, "Master Playback Volume") &&
-		    chip->model->dac_tlv) {
-			template.tlv.p = chip->model->dac_tlv;
+		    chip->model.dac_tlv) {
+			template.tlv.p = chip->model.dac_tlv;
 			template.access |= SNDRV_CTL_ELEM_ACCESS_TLV_READ;
 		}
 		ctl = snd_ctl_new1(&template, chip);
@@ -974,14 +982,14 @@ int oxygen_mixer_init(struct oxygen *chip)
 	err = add_controls(chip, controls, ARRAY_SIZE(controls));
 	if (err < 0)
 		return err;
-	if (chip->model->pcm_dev_cfg & CAPTURE_1_FROM_SPDIF) {
+	if (chip->model.device_config & CAPTURE_1_FROM_SPDIF) {
 		err = add_controls(chip, spdif_input_controls,
 				   ARRAY_SIZE(spdif_input_controls));
 		if (err < 0)
 			return err;
 	}
 	for (i = 0; i < ARRAY_SIZE(monitor_controls); ++i) {
-		if (!(chip->model->pcm_dev_cfg & monitor_controls[i].pcm_dev))
+		if (!(chip->model.device_config & monitor_controls[i].pcm_dev))
 			continue;
 		err = add_controls(chip, monitor_controls[i].controls,
 				   ARRAY_SIZE(monitor_controls[i].controls));
@@ -1000,5 +1008,5 @@ int oxygen_mixer_init(struct oxygen *chip)
 		if (err < 0)
 			return err;
 	}
-	return chip->model->mixer_init ? chip->model->mixer_init(chip) : 0;
+	return chip->model.mixer_init ? chip->model.mixer_init(chip) : 0;
 }

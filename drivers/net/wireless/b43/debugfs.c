@@ -46,13 +46,11 @@ struct b43_debugfs_fops {
 	struct file_operations fops;
 	/* Offset of struct b43_dfs_file in struct b43_dfsentry */
 	size_t file_struct_offset;
-	/* Take wl->irq_lock before calling read/write? */
-	bool take_irqlock;
 };
 
 static inline
-struct b43_dfs_file * fops_to_dfs_file(struct b43_wldev *dev,
-				       const struct b43_debugfs_fops *dfops)
+struct b43_dfs_file *fops_to_dfs_file(struct b43_wldev *dev,
+				      const struct b43_debugfs_fops *dfops)
 {
 	void *p;
 
@@ -127,7 +125,6 @@ static int shm16write__write_file(struct b43_wldev *dev,
 	unsigned int routing, addr, mask, set;
 	u16 val;
 	int res;
-	unsigned long flags;
 
 	res = sscanf(buf, "0x%X 0x%X 0x%X 0x%X",
 		     &routing, &addr, &mask, &set);
@@ -144,15 +141,13 @@ static int shm16write__write_file(struct b43_wldev *dev,
 	if ((mask > 0xFFFF) || (set > 0xFFFF))
 		return -E2BIG;
 
-	spin_lock_irqsave(&dev->wl->shm_lock, flags);
 	if (mask == 0)
 		val = 0;
 	else
-		val = __b43_shm_read16(dev, routing, addr);
+		val = b43_shm_read16(dev, routing, addr);
 	val &= mask;
 	val |= set;
-	__b43_shm_write16(dev, routing, addr, val);
-	spin_unlock_irqrestore(&dev->wl->shm_lock, flags);
+	b43_shm_write16(dev, routing, addr, val);
 
 	return 0;
 }
@@ -206,7 +201,6 @@ static int shm32write__write_file(struct b43_wldev *dev,
 	unsigned int routing, addr, mask, set;
 	u32 val;
 	int res;
-	unsigned long flags;
 
 	res = sscanf(buf, "0x%X 0x%X 0x%X 0x%X",
 		     &routing, &addr, &mask, &set);
@@ -223,15 +217,13 @@ static int shm32write__write_file(struct b43_wldev *dev,
 	if ((mask > 0xFFFFFFFF) || (set > 0xFFFFFFFF))
 		return -E2BIG;
 
-	spin_lock_irqsave(&dev->wl->shm_lock, flags);
 	if (mask == 0)
 		val = 0;
 	else
-		val = __b43_shm_read32(dev, routing, addr);
+		val = b43_shm_read32(dev, routing, addr);
 	val &= mask;
 	val |= set;
-	__b43_shm_write32(dev, routing, addr, val);
-	spin_unlock_irqrestore(&dev->wl->shm_lock, flags);
+	b43_shm_write32(dev, routing, addr, val);
 
 	return 0;
 }
@@ -367,47 +359,17 @@ static int mmio32write__write_file(struct b43_wldev *dev,
 	return 0;
 }
 
-/* wl->irq_lock is locked */
-static ssize_t tsf_read_file(struct b43_wldev *dev,
-			     char *buf, size_t bufsize)
-{
-	ssize_t count = 0;
-	u64 tsf;
-
-	b43_tsf_read(dev, &tsf);
-	fappend("0x%08x%08x\n",
-		(unsigned int)((tsf & 0xFFFFFFFF00000000ULL) >> 32),
-		(unsigned int)(tsf & 0xFFFFFFFFULL));
-
-	return count;
-}
-
-/* wl->irq_lock is locked */
-static int tsf_write_file(struct b43_wldev *dev,
-			  const char *buf, size_t count)
-{
-	u64 tsf;
-
-	if (sscanf(buf, "%llu", (unsigned long long *)(&tsf)) != 1)
-		return -EINVAL;
-	b43_tsf_write(dev, tsf);
-
-	return 0;
-}
-
 static ssize_t txstat_read_file(struct b43_wldev *dev,
 				char *buf, size_t bufsize)
 {
 	struct b43_txstatus_log *log = &dev->dfsentry->txstatlog;
 	ssize_t count = 0;
-	unsigned long flags;
 	int i, idx;
 	struct b43_txstatus *stat;
 
-	spin_lock_irqsave(&log->lock, flags);
 	if (log->end < 0) {
 		fappend("Nothing transmitted, yet\n");
-		goto out_unlock;
+		goto out;
 	}
 	fappend("b43 TX status reports:\n\n"
 		"index | cookie | seq | phy_stat | frame_count | "
@@ -437,83 +399,11 @@ static ssize_t txstat_read_file(struct b43_wldev *dev,
 			break;
 		i++;
 	}
-out_unlock:
-	spin_unlock_irqrestore(&log->lock, flags);
-
-	return count;
-}
-
-static ssize_t txpower_g_read_file(struct b43_wldev *dev,
-				   char *buf, size_t bufsize)
-{
-	ssize_t count = 0;
-
-	if (dev->phy.type != B43_PHYTYPE_G) {
-		fappend("Device is not a G-PHY\n");
-		goto out;
-	}
-	fappend("Control:               %s\n", dev->phy.manual_txpower_control ?
-		"MANUAL" : "AUTOMATIC");
-	fappend("Baseband attenuation:  %u\n", dev->phy.bbatt.att);
-	fappend("Radio attenuation:     %u\n", dev->phy.rfatt.att);
-	fappend("TX Mixer Gain:         %s\n",
-		(dev->phy.tx_control & B43_TXCTL_TXMIX) ? "ON" : "OFF");
-	fappend("PA Gain 2dB:           %s\n",
-		(dev->phy.tx_control & B43_TXCTL_PA2DB) ? "ON" : "OFF");
-	fappend("PA Gain 3dB:           %s\n",
-		(dev->phy.tx_control & B43_TXCTL_PA3DB) ? "ON" : "OFF");
-	fappend("\n\n");
-	fappend("You can write to this file:\n");
-	fappend("Writing \"auto\" enables automatic txpower control.\n");
-	fappend
-	    ("Writing the attenuation values as \"bbatt rfatt txmix pa2db pa3db\" "
-	     "enables manual txpower control.\n");
-	fappend("Example: 5 4 0 0 1\n");
-	fappend("Enables manual control with Baseband attenuation 5, "
-		"Radio attenuation 4, No TX Mixer Gain, "
-		"No PA Gain 2dB, With PA Gain 3dB.\n");
 out:
+
 	return count;
 }
 
-static int txpower_g_write_file(struct b43_wldev *dev,
-				const char *buf, size_t count)
-{
-	if (dev->phy.type != B43_PHYTYPE_G)
-		return -ENODEV;
-	if ((count >= 4) && (memcmp(buf, "auto", 4) == 0)) {
-		/* Automatic control */
-		dev->phy.manual_txpower_control = 0;
-		b43_phy_xmitpower(dev);
-	} else {
-		int bbatt = 0, rfatt = 0, txmix = 0, pa2db = 0, pa3db = 0;
-		/* Manual control */
-		if (sscanf(buf, "%d %d %d %d %d", &bbatt, &rfatt,
-			   &txmix, &pa2db, &pa3db) != 5)
-			return -EINVAL;
-		b43_put_attenuation_into_ranges(dev, &bbatt, &rfatt);
-		dev->phy.manual_txpower_control = 1;
-		dev->phy.bbatt.att = bbatt;
-		dev->phy.rfatt.att = rfatt;
-		dev->phy.tx_control = 0;
-		if (txmix)
-			dev->phy.tx_control |= B43_TXCTL_TXMIX;
-		if (pa2db)
-			dev->phy.tx_control |= B43_TXCTL_PA2DB;
-		if (pa3db)
-			dev->phy.tx_control |= B43_TXCTL_PA3DB;
-		b43_phy_lock(dev);
-		b43_radio_lock(dev);
-		b43_set_txpower_g(dev, &dev->phy.bbatt,
-				  &dev->phy.rfatt, dev->phy.tx_control);
-		b43_radio_unlock(dev);
-		b43_phy_unlock(dev);
-	}
-
-	return 0;
-}
-
-/* wl->irq_lock is locked */
 static int restart_write_file(struct b43_wldev *dev,
 			      const char *buf, size_t count)
 {
@@ -560,7 +450,7 @@ static ssize_t loctls_read_file(struct b43_wldev *dev,
 		err = -ENODEV;
 		goto out;
 	}
-	lo = phy->lo_control;
+	lo = phy->g->lo_control;
 	fappend("-- Local Oscillator calibration data --\n\n");
 	fappend("HW-power-control enabled: %d\n",
 		dev->phy.hardware_power_control);
@@ -578,8 +468,8 @@ static ssize_t loctls_read_file(struct b43_wldev *dev,
 	list_for_each_entry(cal, &lo->calib_list, list) {
 		bool active;
 
-		active = (b43_compare_bbatt(&cal->bbatt, &phy->bbatt) &&
-			  b43_compare_rfatt(&cal->rfatt, &phy->rfatt));
+		active = (b43_compare_bbatt(&cal->bbatt, &phy->g->bbatt) &&
+			  b43_compare_rfatt(&cal->rfatt, &phy->g->rfatt));
 		fappend("BB(%d), RF(%d,%d)  ->  I=%d, Q=%d  "
 			"(expires in %lu sec)%s\n",
 			cal->bbatt.att,
@@ -654,12 +544,7 @@ static ssize_t b43_debugfs_read(struct file *file, char __user *userbuf,
 			goto out_unlock;
 		}
 		memset(buf, 0, bufsize);
-		if (dfops->take_irqlock) {
-			spin_lock_irq(&dev->wl->irq_lock);
-			ret = dfops->read(dev, buf, bufsize);
-			spin_unlock_irq(&dev->wl->irq_lock);
-		} else
-			ret = dfops->read(dev, buf, bufsize);
+		ret = dfops->read(dev, buf, bufsize);
 		if (ret <= 0) {
 			free_pages((unsigned long)buf, buforder);
 			err = ret;
@@ -721,12 +606,7 @@ static ssize_t b43_debugfs_write(struct file *file,
 		err = -EFAULT;
 		goto out_freepage;
 	}
-	if (dfops->take_irqlock) {
-		spin_lock_irq(&dev->wl->irq_lock);
-		err = dfops->write(dev, buf, count);
-		spin_unlock_irq(&dev->wl->irq_lock);
-	} else
-		err = dfops->write(dev, buf, count);
+	err = dfops->write(dev, buf, count);
 	if (err)
 		goto out_freepage;
 
@@ -739,7 +619,7 @@ out_unlock:
 }
 
 
-#define B43_DEBUGFS_FOPS(name, _read, _write, _take_irqlock)	\
+#define B43_DEBUGFS_FOPS(name, _read, _write)			\
 	static struct b43_debugfs_fops fops_##name = {		\
 		.read	= _read,				\
 		.write	= _write,				\
@@ -750,27 +630,33 @@ out_unlock:
 		},						\
 		.file_struct_offset = offsetof(struct b43_dfsentry, \
 					       file_##name),	\
-		.take_irqlock	= _take_irqlock,		\
 	}
 
-B43_DEBUGFS_FOPS(shm16read, shm16read__read_file, shm16read__write_file, 1);
-B43_DEBUGFS_FOPS(shm16write, NULL, shm16write__write_file, 1);
-B43_DEBUGFS_FOPS(shm32read, shm32read__read_file, shm32read__write_file, 1);
-B43_DEBUGFS_FOPS(shm32write, NULL, shm32write__write_file, 1);
-B43_DEBUGFS_FOPS(mmio16read, mmio16read__read_file, mmio16read__write_file, 1);
-B43_DEBUGFS_FOPS(mmio16write, NULL, mmio16write__write_file, 1);
-B43_DEBUGFS_FOPS(mmio32read, mmio32read__read_file, mmio32read__write_file, 1);
-B43_DEBUGFS_FOPS(mmio32write, NULL, mmio32write__write_file, 1);
-B43_DEBUGFS_FOPS(tsf, tsf_read_file, tsf_write_file, 1);
-B43_DEBUGFS_FOPS(txstat, txstat_read_file, NULL, 0);
-B43_DEBUGFS_FOPS(txpower_g, txpower_g_read_file, txpower_g_write_file, 0);
-B43_DEBUGFS_FOPS(restart, NULL, restart_write_file, 1);
-B43_DEBUGFS_FOPS(loctls, loctls_read_file, NULL, 0);
+B43_DEBUGFS_FOPS(shm16read, shm16read__read_file, shm16read__write_file);
+B43_DEBUGFS_FOPS(shm16write, NULL, shm16write__write_file);
+B43_DEBUGFS_FOPS(shm32read, shm32read__read_file, shm32read__write_file);
+B43_DEBUGFS_FOPS(shm32write, NULL, shm32write__write_file);
+B43_DEBUGFS_FOPS(mmio16read, mmio16read__read_file, mmio16read__write_file);
+B43_DEBUGFS_FOPS(mmio16write, NULL, mmio16write__write_file);
+B43_DEBUGFS_FOPS(mmio32read, mmio32read__read_file, mmio32read__write_file);
+B43_DEBUGFS_FOPS(mmio32write, NULL, mmio32write__write_file);
+B43_DEBUGFS_FOPS(txstat, txstat_read_file, NULL);
+B43_DEBUGFS_FOPS(restart, NULL, restart_write_file);
+B43_DEBUGFS_FOPS(loctls, loctls_read_file, NULL);
 
 
-int b43_debug(struct b43_wldev *dev, enum b43_dyndbg feature)
+bool b43_debug(struct b43_wldev *dev, enum b43_dyndbg feature)
 {
-	return !!(dev->dfsentry && dev->dfsentry->dyn_debug[feature]);
+	bool enabled;
+
+	enabled = (dev->dfsentry && dev->dfsentry->dyn_debug[feature]);
+	if (unlikely(enabled)) {
+		/* Force full debugging messages, if the user enabled
+		 * some dynamic debugging feature. */
+		b43_modparam_verbose = B43_VERBOSITY_MAX;
+	}
+
+	return enabled;
 }
 
 static void b43_remove_dynamic_debug(struct b43_wldev *dev)
@@ -802,6 +688,8 @@ static void b43_add_dynamic_debug(struct b43_wldev *dev)
 	add_dyn_dbg("debug_pwork_stop", B43_DBG_PWORK_STOP, 0);
 	add_dyn_dbg("debug_lo", B43_DBG_LO, 0);
 	add_dyn_dbg("debug_firmware", B43_DBG_FIRMWARE, 0);
+	add_dyn_dbg("debug_keys", B43_DBG_KEYS, 0);
+	add_dyn_dbg("debug_verbose_stats", B43_DBG_VERBOSESTATS, 0);
 
 #undef add_dyn_dbg
 }
@@ -828,7 +716,6 @@ void b43_debugfs_add_device(struct b43_wldev *dev)
 		return;
 	}
 	log->end = -1;
-	spin_lock_init(&log->lock);
 
 	dev->dfsentry = e;
 
@@ -875,9 +762,7 @@ void b43_debugfs_add_device(struct b43_wldev *dev)
 	ADD_FILE(mmio16write, 0200);
 	ADD_FILE(mmio32read, 0600);
 	ADD_FILE(mmio32write, 0200);
-	ADD_FILE(tsf, 0600);
 	ADD_FILE(txstat, 0400);
-	ADD_FILE(txpower_g, 0600);
 	ADD_FILE(restart, 0200);
 	ADD_FILE(loctls, 0400);
 
@@ -905,9 +790,7 @@ void b43_debugfs_remove_device(struct b43_wldev *dev)
 	debugfs_remove(e->file_mmio16write.dentry);
 	debugfs_remove(e->file_mmio32read.dentry);
 	debugfs_remove(e->file_mmio32write.dentry);
-	debugfs_remove(e->file_tsf.dentry);
 	debugfs_remove(e->file_txstat.dentry);
-	debugfs_remove(e->file_txpower_g.dentry);
 	debugfs_remove(e->file_restart.dentry);
 	debugfs_remove(e->file_loctls.dentry);
 
@@ -916,7 +799,6 @@ void b43_debugfs_remove_device(struct b43_wldev *dev)
 	kfree(e);
 }
 
-/* Called with IRQs disabled. */
 void b43_debugfs_log_txstat(struct b43_wldev *dev,
 			    const struct b43_txstatus *status)
 {
@@ -928,14 +810,12 @@ void b43_debugfs_log_txstat(struct b43_wldev *dev,
 	if (!e)
 		return;
 	log = &e->txstatlog;
-	spin_lock(&log->lock); /* IRQs are already disabled. */
 	i = log->end + 1;
 	if (i == B43_NR_LOGGED_TXSTATUS)
 		i = 0;
 	log->end = i;
 	cur = &(log->log[i]);
 	memcpy(cur, status, sizeof(*cur));
-	spin_unlock(&log->lock);
 }
 
 void b43_debugfs_init(void)

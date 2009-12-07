@@ -15,6 +15,7 @@
 #include <linux/completion.h>
 #include <linux/sched.h>
 #include <linux/freezer.h>
+#include <linux/kthread.h>
 #include "nodelist.h"
 
 
@@ -31,7 +32,7 @@ void jffs2_garbage_collect_trigger(struct jffs2_sb_info *c)
 /* This must only ever be called when no GC thread is currently running */
 int jffs2_start_garbage_collect_thread(struct jffs2_sb_info *c)
 {
-	pid_t pid;
+	struct task_struct *tsk;
 	int ret = 0;
 
 	BUG_ON(c->gc_task);
@@ -39,15 +40,16 @@ int jffs2_start_garbage_collect_thread(struct jffs2_sb_info *c)
 	init_completion(&c->gc_thread_start);
 	init_completion(&c->gc_thread_exit);
 
-	pid = kernel_thread(jffs2_garbage_collect_thread, c, CLONE_FS|CLONE_FILES);
-	if (pid < 0) {
-		printk(KERN_WARNING "fork failed for JFFS2 garbage collect thread: %d\n", -pid);
+	tsk = kthread_run(jffs2_garbage_collect_thread, c, "jffs2_gcd_mtd%d", c->mtd->index);
+	if (IS_ERR(tsk)) {
+		printk(KERN_WARNING "fork failed for JFFS2 garbage collect thread: %ld\n", -PTR_ERR(tsk));
 		complete(&c->gc_thread_exit);
-		ret = pid;
+		ret = PTR_ERR(tsk);
 	} else {
 		/* Wait for it... */
-		D1(printk(KERN_DEBUG "JFFS2: Garbage collect thread is pid %d\n", pid));
+		D1(printk(KERN_DEBUG "JFFS2: Garbage collect thread is pid %d\n", tsk->pid));
 		wait_for_completion(&c->gc_thread_start);
+		ret = tsk->pid;
 	}
 
 	return ret;
@@ -71,7 +73,6 @@ static int jffs2_garbage_collect_thread(void *_c)
 {
 	struct jffs2_sb_info *c = _c;
 
-	daemonize("jffs2_gcd_mtd%d", c->mtd->index);
 	allow_signal(SIGKILL);
 	allow_signal(SIGSTOP);
 	allow_signal(SIGCONT);
@@ -93,15 +94,24 @@ static int jffs2_garbage_collect_thread(void *_c)
 			schedule();
 		} else
 			spin_unlock(&c->erase_completion_lock);
+			
 
+		/* Problem - immediately after bootup, the GCD spends a lot
+		 * of time in places like jffs2_kill_fragtree(); so much so
+		 * that userspace processes (like gdm and X) are starved
+		 * despite plenty of cond_resched()s and renicing.  Yield()
+		 * doesn't help, either (presumably because userspace and GCD
+		 * are generally competing for a higher latency resource -
+		 * disk).
+		 * This forces the GCD to slow the hell down.   Pulling an
+		 * inode in with read_inode() is much preferable to having
+		 * the GC thread get there first. */
+		schedule_timeout_interruptible(msecs_to_jiffies(50));
 
-		/* This thread is purely an optimisation. But if it runs when
-		   other things could be running, it actually makes things a
-		   lot worse. Use yield() and put it at the back of the runqueue
-		   every time. Especially during boot, pulling an inode in
-		   with read_inode() is much preferable to having the GC thread
-		   get there first. */
-		yield();
+		if (kthread_should_stop()) {
+			D1(printk(KERN_DEBUG "jffs2_garbage_collect_thread():  kthread_stop() called.\n"));
+			goto die;
+		}
 
 		/* Put_super will send a SIGKILL and then wait on the sem.
 		 */

@@ -145,6 +145,7 @@ static int tx_params[MAX_UNITS] = {-1, -1, -1, -1, -1, -1, -1, -1};
 /* Time in jiffies before concluding the transmitter is hung. */
 #define TX_TIMEOUT  (5*HZ)
 
+#include <linux/capability.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
@@ -171,10 +172,10 @@ static int tx_params[MAX_UNITS] = {-1, -1, -1, -1, -1, -1, -1, -1};
 #include <asm/unaligned.h>
 #include <asm/cache.h>
 
-static char version[] __devinitdata =
+static const char version[] __devinitconst =
 KERN_INFO DRV_NAME ".c:v" DRV_VERSION " " DRV_RELDATE "  Written by Donald Becker\n"
-KERN_INFO "   Some modifications by Eric kasten <kasten@nscl.msu.edu>\n"
-KERN_INFO "   Further modifications by Keith Underwood <keithu@parl.clemson.edu>\n";
+"   Some modifications by Eric kasten <kasten@nscl.msu.edu>\n"
+"   Further modifications by Keith Underwood <keithu@parl.clemson.edu>\n";
 
 
 /* IP_MF appears to be only defined in <netinet/ip.h>, however,
@@ -557,7 +558,8 @@ static int netdev_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
 static void hamachi_timer(unsigned long data);
 static void hamachi_tx_timeout(struct net_device *dev);
 static void hamachi_init_ring(struct net_device *dev);
-static int hamachi_start_xmit(struct sk_buff *skb, struct net_device *dev);
+static netdev_tx_t hamachi_start_xmit(struct sk_buff *skb,
+				      struct net_device *dev);
 static irqreturn_t hamachi_interrupt(int irq, void *dev_instance);
 static int hamachi_rx(struct net_device *dev);
 static inline int hamachi_tx(struct net_device *dev);
@@ -567,6 +569,20 @@ static struct net_device_stats *hamachi_get_stats(struct net_device *dev);
 static void set_rx_mode(struct net_device *dev);
 static const struct ethtool_ops ethtool_ops;
 static const struct ethtool_ops ethtool_ops_no_mii;
+
+static const struct net_device_ops hamachi_netdev_ops = {
+	.ndo_open		= hamachi_open,
+	.ndo_stop		= hamachi_close,
+	.ndo_start_xmit		= hamachi_start_xmit,
+	.ndo_get_stats		= hamachi_get_stats,
+	.ndo_set_multicast_list	= set_rx_mode,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_tx_timeout		= hamachi_tx_timeout,
+	.ndo_do_ioctl		= netdev_ioctl,
+};
+
 
 static int __devinit hamachi_init_one (struct pci_dev *pdev,
 				    const struct pci_device_id *ent)
@@ -582,7 +598,6 @@ static int __devinit hamachi_init_one (struct pci_dev *pdev,
 	void *ring_space;
 	dma_addr_t ring_dma;
 	int ret = -ENOMEM;
-	DECLARE_MAC_BUF(mac);
 
 /* when built into the kernel, we only print version if device is found */
 #ifndef MODULE
@@ -723,17 +738,11 @@ static int __devinit hamachi_init_one (struct pci_dev *pdev,
 
 
 	/* The Hamachi-specific entries in the device structure. */
-	dev->open = &hamachi_open;
-	dev->hard_start_xmit = &hamachi_start_xmit;
-	dev->stop = &hamachi_close;
-	dev->get_stats = &hamachi_get_stats;
-	dev->set_multicast_list = &set_rx_mode;
-	dev->do_ioctl = &netdev_ioctl;
+	dev->netdev_ops = &hamachi_netdev_ops;
 	if (chip_tbl[hmp->chip_id].flags & CanHaveMII)
 		SET_ETHTOOL_OPS(dev, &ethtool_ops);
 	else
 		SET_ETHTOOL_OPS(dev, &ethtool_ops_no_mii);
-	dev->tx_timeout = &hamachi_tx_timeout;
 	dev->watchdog_timeo = TX_TIMEOUT;
 	if (mtu)
 		dev->mtu = mtu;
@@ -744,9 +753,9 @@ static int __devinit hamachi_init_one (struct pci_dev *pdev,
 		goto err_out_unmap_rx;
 	}
 
-	printk(KERN_INFO "%s: %s type %x at %p, %s, IRQ %d.\n",
+	printk(KERN_INFO "%s: %s type %x at %p, %pM, IRQ %d.\n",
 		   dev->name, chip_tbl[chip_id].name, readl(ioaddr + ChipRev),
-		   ioaddr, print_mac(mac, dev->dev_addr), irq);
+		   ioaddr, dev->dev_addr, irq);
 	i = readb(ioaddr + PCIClkMeas);
 	printk(KERN_INFO "%s:  %d-bit %d Mhz PCI bus (%d), Virtual Jumpers "
 		   "%2.2x, LPA %4.4x.\n",
@@ -1073,11 +1082,14 @@ static void hamachi_tx_timeout(struct net_device *dev)
 	{
 		printk(KERN_DEBUG "  Rx ring %p: ", hmp->rx_ring);
 		for (i = 0; i < RX_RING_SIZE; i++)
-			printk(" %8.8x", le32_to_cpu(hmp->rx_ring[i].status_n_length));
-		printk("\n"KERN_DEBUG"  Tx ring %p: ", hmp->tx_ring);
+			printk(KERN_CONT " %8.8x",
+			       le32_to_cpu(hmp->rx_ring[i].status_n_length));
+		printk(KERN_CONT "\n");
+		printk(KERN_DEBUG"  Tx ring %p: ", hmp->tx_ring);
 		for (i = 0; i < TX_RING_SIZE; i++)
-			printk(" %4.4x", le32_to_cpu(hmp->tx_ring[i].status_n_length));
-		printk("\n");
+			printk(KERN_CONT " %4.4x",
+			       le32_to_cpu(hmp->tx_ring[i].status_n_length));
+		printk(KERN_CONT "\n");
 	}
 
 	/* Reinit the hardware and make sure the Rx and Tx processes
@@ -1156,7 +1168,7 @@ static void hamachi_tx_timeout(struct net_device *dev)
 	hmp->rx_ring[RX_RING_SIZE-1].status_n_length |= cpu_to_le32(DescEndRing);
 
 	/* Trigger an immediate transmit demand. */
-	dev->trans_start = jiffies;
+	dev->trans_start = jiffies; /* prevent tx timeout */
 	hmp->stats.tx_errors++;
 
 	/* Restart the chip's Tx/Rx processes . */
@@ -1237,7 +1249,7 @@ do { \
     csum_add(sum, (ih)->saddr & 0xffff); \
     csum_add(sum, (ih)->daddr >> 16); \
     csum_add(sum, (ih)->daddr & 0xffff); \
-    csum_add(sum, __constant_htons(IPPROTO_UDP)); \
+    csum_add(sum, cpu_to_be16(IPPROTO_UDP)); \
     csum_add(sum, (uh)->len); \
 } while (0)
 
@@ -1248,12 +1260,13 @@ do { \
     csum_add(sum, (ih)->saddr & 0xffff); \
     csum_add(sum, (ih)->daddr >> 16); \
     csum_add(sum, (ih)->daddr & 0xffff); \
-    csum_add(sum, __constant_htons(IPPROTO_TCP)); \
+    csum_add(sum, cpu_to_be16(IPPROTO_TCP)); \
     csum_add(sum, htons(len)); \
 } while (0)
 #endif
 
-static int hamachi_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t hamachi_start_xmit(struct sk_buff *skb,
+				      struct net_device *dev)
 {
 	struct hamachi_private *hmp = netdev_priv(dev);
 	unsigned entry;
@@ -1273,7 +1286,7 @@ static int hamachi_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		status=readw(hmp->base + TxStatus);
 		if( !(status & 0x0001) || (status & 0x0002))
 			writew(0x0001, hmp->base + TxCmd);
-		return 1;
+		return NETDEV_TX_BUSY;
 	}
 
 	/* Caution: the write order is important here, set the field
@@ -1289,7 +1302,7 @@ static int hamachi_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	    /* tack on checksum tag */
 	    u32 tagval = 0;
 	    struct ethhdr *eh = (struct ethhdr *)skb->data;
-	    if (eh->h_proto == __constant_htons(ETH_P_IP)) {
+	    if (eh->h_proto == cpu_to_be16(ETH_P_IP)) {
 		struct iphdr *ih = (struct iphdr *)((char *)eh + ETH_HLEN);
 		if (ih->protocol == IPPROTO_UDP) {
 		    struct udphdr *uh
@@ -1357,13 +1370,12 @@ static int hamachi_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		hmp->tx_full = 1;
 		netif_stop_queue(dev);
 	}
-	dev->trans_start = jiffies;
 
 	if (hamachi_debug > 4) {
 		printk(KERN_DEBUG "%s: Hamachi transmit frame #%d queued in slot %d.\n",
 			   dev->name, hmp->cur_tx, entry);
 	}
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /* The interrupt handler does all of the Rx thread work and cleans up
@@ -1598,7 +1610,7 @@ static int hamachi_rx(struct net_device *dev)
 				 */
 				if (ntohs(ih->tot_len) >= 46){
 					/* don't worry about frags */
-					if (!(ih->frag_off & __constant_htons(IP_MF|IP_OFFSET))) {
+					if (!(ih->frag_off & cpu_to_be16(IP_MF|IP_OFFSET))) {
 						u32 inv = *(u32 *) &buf_addr[data_size - 16];
 						u32 *p = (u32 *) &buf_addr[data_size - 20];
 						register u32 crc, p_r, p_r1;
@@ -1646,7 +1658,6 @@ static int hamachi_rx(struct net_device *dev)
 #endif  /* RX_CHECKSUM */
 
 			netif_rx(skb);
-			dev->last_rx = jiffies;
 			hmp->stats.rx_packets++;
 		}
 		entry = (++hmp->cur_rx) % RX_RING_SIZE;
@@ -1748,13 +1759,13 @@ static int hamachi_close(struct net_device *dev)
 
 #ifdef __i386__
 	if (hamachi_debug > 2) {
-		printk("\n"KERN_DEBUG"  Tx ring at %8.8x:\n",
+		printk(KERN_DEBUG "  Tx ring at %8.8x:\n",
 			   (int)hmp->tx_ring_dma);
 		for (i = 0; i < TX_RING_SIZE; i++)
-			printk(" %c #%d desc. %8.8x %8.8x.\n",
+			printk(KERN_DEBUG " %c #%d desc. %8.8x %8.8x.\n",
 				   readl(ioaddr + TxCurPtr) == (long)&hmp->tx_ring[i] ? '>' : ' ',
 				   i, hmp->tx_ring[i].status_n_length, hmp->tx_ring[i].addr);
-		printk("\n"KERN_DEBUG "  Rx ring %8.8x:\n",
+		printk(KERN_DEBUG "  Rx ring %8.8x:\n",
 			   (int)hmp->rx_ring_dma);
 		for (i = 0; i < RX_RING_SIZE; i++) {
 			printk(KERN_DEBUG " %c #%d desc. %4.4x %8.8x\n",
@@ -1765,7 +1776,7 @@ static int hamachi_close(struct net_device *dev)
 					u16 *addr = (u16 *)
 						hmp->rx_skbuff[i]->data;
 					int j;
-
+					printk(KERN_DEBUG "Addr: ");
 					for (j = 0; j < 0x50; j++)
 						printk(" %4.4x", addr[j]);
 					printk("\n");

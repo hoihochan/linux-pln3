@@ -80,7 +80,7 @@ static int ssb_pcmcia_cfg_write(struct ssb_bus *bus, u8 offset, u8 value)
 	reg.Action = CS_WRITE;
 	reg.Value = value;
 	res = pcmcia_access_configuration_register(bus->host_pcmcia, &reg);
-	if (unlikely(res != CS_SUCCESS))
+	if (unlikely(res != 0))
 		return -EBUSY;
 
 	return 0;
@@ -96,7 +96,7 @@ static int ssb_pcmcia_cfg_read(struct ssb_bus *bus, u8 offset, u8 *value)
 	reg.Offset = offset;
 	reg.Action = CS_READ;
 	res = pcmcia_access_configuration_register(bus->host_pcmcia, &reg);
-	if (unlikely(res != CS_SUCCESS))
+	if (unlikely(res != 0))
 		return -EBUSY;
 	*value = reg.Value;
 
@@ -583,7 +583,7 @@ static int ssb_pcmcia_sprom_write_all(struct ssb_bus *bus, const u16 *sprom)
 			ssb_printk(".");
 		err = ssb_pcmcia_sprom_write(bus, i, sprom[i]);
 		if (err) {
-			ssb_printk("\n" KERN_NOTICE PFX
+			ssb_printk(KERN_NOTICE PFX
 				   "Failed to write to SPROM.\n");
 			failed = 1;
 			break;
@@ -591,7 +591,7 @@ static int ssb_pcmcia_sprom_write_all(struct ssb_bus *bus, const u16 *sprom)
 	}
 	err = ssb_pcmcia_sprom_command(bus, SSB_PCMCIA_SPROMCTL_WRITEDIS);
 	if (err) {
-		ssb_printk("\n" KERN_NOTICE PFX
+		ssb_printk(KERN_NOTICE PFX
 			   "Could not disable SPROM write access.\n");
 		failed = 1;
 	}
@@ -638,17 +638,17 @@ int ssb_pcmcia_get_invariants(struct ssb_bus *bus,
 	tuple.TupleData = buf;
 	tuple.TupleDataMax = sizeof(buf);
 	res = pcmcia_get_first_tuple(bus->host_pcmcia, &tuple);
-	GOTO_ERROR_ON(res != CS_SUCCESS, "MAC first tpl");
+	GOTO_ERROR_ON(res != 0, "MAC first tpl");
 	res = pcmcia_get_tuple_data(bus->host_pcmcia, &tuple);
-	GOTO_ERROR_ON(res != CS_SUCCESS, "MAC first tpl data");
+	GOTO_ERROR_ON(res != 0, "MAC first tpl data");
 	while (1) {
 		GOTO_ERROR_ON(tuple.TupleDataLen < 1, "MAC tpl < 1");
 		if (tuple.TupleData[0] == CISTPL_FUNCE_LAN_NODE_ID)
 			break;
 		res = pcmcia_get_next_tuple(bus->host_pcmcia, &tuple);
-		GOTO_ERROR_ON(res != CS_SUCCESS, "MAC next tpl");
+		GOTO_ERROR_ON(res != 0, "MAC next tpl");
 		res = pcmcia_get_tuple_data(bus->host_pcmcia, &tuple);
-		GOTO_ERROR_ON(res != CS_SUCCESS, "MAC next tpl data");
+		GOTO_ERROR_ON(res != 0, "MAC next tpl data");
 	}
 	GOTO_ERROR_ON(tuple.TupleDataLen != ETH_ALEN + 2, "MAC tpl size");
 	memcpy(sprom->il0mac, &tuple.TupleData[2], ETH_ALEN);
@@ -659,9 +659,9 @@ int ssb_pcmcia_get_invariants(struct ssb_bus *bus,
 	tuple.TupleData = buf;
 	tuple.TupleDataMax = sizeof(buf);
 	res = pcmcia_get_first_tuple(bus->host_pcmcia, &tuple);
-	GOTO_ERROR_ON(res != CS_SUCCESS, "VEN first tpl");
+	GOTO_ERROR_ON(res != 0, "VEN first tpl");
 	res = pcmcia_get_tuple_data(bus->host_pcmcia, &tuple);
-	GOTO_ERROR_ON(res != CS_SUCCESS, "VEN first tpl data");
+	GOTO_ERROR_ON(res != 0, "VEN first tpl data");
 	while (1) {
 		GOTO_ERROR_ON(tuple.TupleDataLen < 1, "VEN tpl < 1");
 		switch (tuple.TupleData[0]) {
@@ -678,7 +678,8 @@ int ssb_pcmcia_get_invariants(struct ssb_bus *bus,
 			sprom->board_rev = tuple.TupleData[1];
 			break;
 		case SSB_PCMCIA_CIS_PA:
-			GOTO_ERROR_ON(tuple.TupleDataLen != 9,
+			GOTO_ERROR_ON((tuple.TupleDataLen != 9) &&
+				      (tuple.TupleDataLen != 10),
 				      "pa tpl size");
 			sprom->pa0b0 = tuple.TupleData[1] |
 				 ((u16)tuple.TupleData[2] << 8);
@@ -718,7 +719,8 @@ int ssb_pcmcia_get_invariants(struct ssb_bus *bus,
 			sprom->antenna_gain.ghz5.a3 = tuple.TupleData[1];
 			break;
 		case SSB_PCMCIA_CIS_BFLAGS:
-			GOTO_ERROR_ON(tuple.TupleDataLen != 3,
+			GOTO_ERROR_ON((tuple.TupleDataLen != 3) &&
+				      (tuple.TupleDataLen != 5),
 				      "bfl tpl size");
 			sprom->boardflags_lo = tuple.TupleData[1] |
 					 ((u16)tuple.TupleData[2] << 8);
@@ -733,11 +735,11 @@ int ssb_pcmcia_get_invariants(struct ssb_bus *bus,
 			break;
 		}
 		res = pcmcia_get_next_tuple(bus->host_pcmcia, &tuple);
-		if (res == CS_NO_MORE_ITEMS)
+		if (res == -ENOSPC)
 			break;
-		GOTO_ERROR_ON(res != CS_SUCCESS, "VEN next tpl");
+		GOTO_ERROR_ON(res != 0, "VEN next tpl");
 		res = pcmcia_get_tuple_data(bus->host_pcmcia, &tuple);
-		GOTO_ERROR_ON(res != CS_SUCCESS, "VEN next tpl data");
+		GOTO_ERROR_ON(res != 0, "VEN next tpl data");
 	}
 
 	return 0;

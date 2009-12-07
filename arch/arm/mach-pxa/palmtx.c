@@ -25,20 +25,27 @@
 #include <linux/pda_power.h>
 #include <linux/pwm_backlight.h>
 #include <linux/gpio.h>
+#include <linux/wm97xx_batt.h>
+#include <linux/power_supply.h>
+#include <linux/usb/gpio_vbus.h>
+#include <linux/mtd/nand.h>
+#include <linux/mtd/partitions.h>
+#include <linux/mtd/mtd.h>
+#include <linux/mtd/physmap.h>
 
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
 
+#include <mach/pxa27x.h>
 #include <mach/audio.h>
 #include <mach/palmtx.h>
 #include <mach/mmc.h>
 #include <mach/pxafb.h>
-#include <mach/pxa-regs.h>
-#include <mach/mfp-pxa27x.h>
 #include <mach/irda.h>
 #include <mach/pxa27x_keypad.h>
 #include <mach/udc.h>
+#include <mach/palmasoc.h>
 
 #include "generic.h"
 #include "devices.h"
@@ -54,14 +61,20 @@ static unsigned long palmtx_pin_config[] __initdata = {
 	GPIO110_MMC_DAT_2,
 	GPIO111_MMC_DAT_3,
 	GPIO112_MMC_CMD,
+	GPIO14_GPIO,	/* SD detect */
+	GPIO114_GPIO,	/* SD power */
+	GPIO115_GPIO,	/* SD r/o switch */
 
 	/* AC97 */
 	GPIO28_AC97_BITCLK,
 	GPIO29_AC97_SDATA_IN_0,
 	GPIO30_AC97_SDATA_OUT,
 	GPIO31_AC97_SYNC,
+	GPIO89_AC97_SYSCLK,
+	GPIO95_AC97_nRESET,
 
 	/* IrDA */
+	GPIO40_GPIO,	/* ir disable */
 	GPIO46_FICP_RXD,
 	GPIO47_FICP_TXD,
 
@@ -69,7 +82,8 @@ static unsigned long palmtx_pin_config[] __initdata = {
 	GPIO16_PWM0_OUT,
 
 	/* USB */
-	GPIO13_GPIO,
+	GPIO13_GPIO,	/* usb detect */
+	GPIO93_GPIO,	/* usb power */
 
 	/* PCMCIA */
 	GPIO48_nPOE,
@@ -82,70 +96,100 @@ static unsigned long palmtx_pin_config[] __initdata = {
 	GPIO55_nPREG,
 	GPIO56_nPWAIT,
 	GPIO57_nIOIS16,
+	GPIO94_GPIO,	/* wifi power 1 */
+	GPIO108_GPIO,	/* wifi power 2 */
+	GPIO116_GPIO,	/* wifi ready */
+
+	/* MATRIX KEYPAD */
+	GPIO100_KP_MKIN_0 | WAKEUP_ON_LEVEL_HIGH,
+	GPIO101_KP_MKIN_1 | WAKEUP_ON_LEVEL_HIGH,
+	GPIO102_KP_MKIN_2 | WAKEUP_ON_LEVEL_HIGH,
+	GPIO97_KP_MKIN_3 | WAKEUP_ON_LEVEL_HIGH,
+	GPIO103_KP_MKOUT_0,
+	GPIO104_KP_MKOUT_1,
+	GPIO105_KP_MKOUT_2,
+
+	/* LCD */
+	GPIO58_LCD_LDD_0,
+	GPIO59_LCD_LDD_1,
+	GPIO60_LCD_LDD_2,
+	GPIO61_LCD_LDD_3,
+	GPIO62_LCD_LDD_4,
+	GPIO63_LCD_LDD_5,
+	GPIO64_LCD_LDD_6,
+	GPIO65_LCD_LDD_7,
+	GPIO66_LCD_LDD_8,
+	GPIO67_LCD_LDD_9,
+	GPIO68_LCD_LDD_10,
+	GPIO69_LCD_LDD_11,
+	GPIO70_LCD_LDD_12,
+	GPIO71_LCD_LDD_13,
+	GPIO72_LCD_LDD_14,
+	GPIO73_LCD_LDD_15,
+	GPIO74_LCD_FCLK,
+	GPIO75_LCD_LCLK,
+	GPIO76_LCD_PCLK,
+	GPIO77_LCD_BIAS,
+
+	/* FFUART */
+	GPIO34_FFUART_RXD,
+	GPIO39_FFUART_TXD,
+
+	/* NAND */
+	GPIO15_nCS_1,
+	GPIO18_RDY,
+
+	/* MISC. */
+	GPIO10_GPIO,	/* hotsync button */
+	GPIO12_GPIO,	/* power detect */
+	GPIO107_GPIO,	/* earphone detect */
+};
+
+/******************************************************************************
+ * NOR Flash
+ ******************************************************************************/
+static struct mtd_partition palmtx_partitions[] = {
+	{
+		.name		= "Flash",
+		.offset		= 0x00000000,
+		.size		= MTDPART_SIZ_FULL,
+		.mask_flags	= 0
+	}
+};
+
+static struct physmap_flash_data palmtx_flash_data[] = {
+	{
+		.width		= 2,			/* bankwidth in bytes */
+		.parts		= palmtx_partitions,
+		.nr_parts	= ARRAY_SIZE(palmtx_partitions)
+	}
+};
+
+static struct resource palmtx_flash_resource = {
+	.start	= PXA_CS0_PHYS,
+	.end	= PXA_CS0_PHYS + SZ_8M - 1,
+	.flags	= IORESOURCE_MEM,
+};
+
+static struct platform_device palmtx_flash = {
+	.name		= "physmap-flash",
+	.id		= 0,
+	.resource	= &palmtx_flash_resource,
+	.num_resources	= 1,
+	.dev 		= {
+		.platform_data = palmtx_flash_data,
+	},
 };
 
 /******************************************************************************
  * SD/MMC card controller
  ******************************************************************************/
-static int palmtx_mci_init(struct device *dev, irq_handler_t palmtx_detect_int,
-				void *data)
-{
-	int err = 0;
-
-	/* Setup an interrupt for detecting card insert/remove events */
-	err = request_irq(IRQ_GPIO_PALMTX_SD_DETECT_N, palmtx_detect_int,
-			IRQF_DISABLED | IRQF_SAMPLE_RANDOM |
-			IRQF_TRIGGER_FALLING | IRQF_TRIGGER_RISING,
-			"SD/MMC card detect", data);
-	if (err) {
-		printk(KERN_ERR "%s: cannot request SD/MMC card detect IRQ\n",
-				__func__);
-		return err;
-	}
-
-	err = gpio_request(GPIO_NR_PALMTX_SD_POWER, "SD_POWER");
-	if (err)
-		goto pwr_err;
-
-	err = gpio_request(GPIO_NR_PALMTX_SD_READONLY, "SD_READONLY");
-	if (err)
-		goto ro_err;
-
-	printk(KERN_DEBUG "%s: irq registered\n", __func__);
-
-	return 0;
-
-ro_err:
-	gpio_free(GPIO_NR_PALMTX_SD_POWER);
-pwr_err:
-	free_irq(IRQ_GPIO_PALMTX_SD_DETECT_N, data);
-	return err;
-}
-
-static void palmtx_mci_exit(struct device *dev, void *data)
-{
-	gpio_free(GPIO_NR_PALMTX_SD_READONLY);
-	gpio_free(GPIO_NR_PALMTX_SD_POWER);
-	free_irq(IRQ_GPIO_PALMTX_SD_DETECT_N, data);
-}
-
-static void palmtx_mci_power(struct device *dev, unsigned int vdd)
-{
-	struct pxamci_platform_data *p_d = dev->platform_data;
-	gpio_set_value(GPIO_NR_PALMTX_SD_POWER, p_d->ocr_mask & (1 << vdd));
-}
-
-static int palmtx_mci_get_ro(struct device *dev)
-{
-	return gpio_get_value(GPIO_NR_PALMTX_SD_READONLY);
-}
-
 static struct pxamci_platform_data palmtx_mci_platform_data = {
-	.ocr_mask	= MMC_VDD_32_33 | MMC_VDD_33_34,
-	.setpower	= palmtx_mci_power,
-	.get_ro		= palmtx_mci_get_ro,
-	.init 		= palmtx_mci_init,
-	.exit		= palmtx_mci_exit,
+	.ocr_mask		= MMC_VDD_32_33 | MMC_VDD_33_34,
+	.gpio_card_detect	= GPIO_NR_PALMTX_SD_DETECT_N,
+	.gpio_card_ro		= GPIO_NR_PALMTX_SD_READONLY,
+	.gpio_power		= GPIO_NR_PALMTX_SD_POWER,
+	.detect_delay		= 20,
 };
 
 /******************************************************************************
@@ -165,7 +209,6 @@ static unsigned int palmtx_matrix_keys[] = {
 
 	KEY(3, 0, KEY_RIGHT),
 	KEY(3, 2, KEY_LEFT),
-
 };
 
 static struct pxa27x_keypad_platform_data palmtx_keypad_platform_data = {
@@ -207,11 +250,19 @@ static int palmtx_backlight_init(struct device *dev)
 	ret = gpio_request(GPIO_NR_PALMTX_BL_POWER, "BL POWER");
 	if (ret)
 		goto err;
+	ret = gpio_direction_output(GPIO_NR_PALMTX_BL_POWER, 0);
+	if (ret)
+		goto err2;
 	ret = gpio_request(GPIO_NR_PALMTX_LCD_POWER, "LCD POWER");
 	if (ret)
 		goto err2;
+	ret = gpio_direction_output(GPIO_NR_PALMTX_LCD_POWER, 0);
+	if (ret)
+		goto err3;
 
 	return 0;
+err3:
+	gpio_free(GPIO_NR_PALMTX_LCD_POWER);
 err2:
 	gpio_free(GPIO_NR_PALMTX_BL_POWER);
 err:
@@ -252,31 +303,26 @@ static struct platform_device palmtx_backlight = {
 /******************************************************************************
  * IrDA
  ******************************************************************************/
-static void palmtx_irda_transceiver_mode(struct device *dev, int mode)
-{
-	gpio_set_value(GPIO_NR_PALMTX_IR_DISABLE, mode & IR_OFF);
-	pxa2xx_transceiver_mode(dev, mode);
-}
-
 static struct pxaficp_platform_data palmtx_ficp_platform_data = {
-	.transceiver_cap	= IR_SIRMODE | IR_FIRMODE | IR_OFF,
-	.transceiver_mode	= palmtx_irda_transceiver_mode,
+	.gpio_pwdown		= GPIO_NR_PALMTX_IR_DISABLE,
+	.transceiver_cap	= IR_SIRMODE | IR_OFF,
 };
 
 /******************************************************************************
  * UDC
  ******************************************************************************/
-static void palmtx_udc_command(int cmd)
-{
-	gpio_set_value(GPIO_NR_PALMTX_USB_POWER, !cmd);
-	udelay(50);
-	gpio_set_value(GPIO_NR_PALMTX_USB_PULLUP, !cmd);
-}
-
-static struct pxa2xx_udc_mach_info palmtx_udc_info __initdata = {
+static struct gpio_vbus_mach_info palmtx_udc_info = {
 	.gpio_vbus		= GPIO_NR_PALMTX_USB_DETECT_N,
 	.gpio_vbus_inverted	= 1,
-	.udc_command		= palmtx_udc_command,
+	.gpio_pullup		= GPIO_NR_PALMTX_USB_PULLUP,
+};
+
+static struct platform_device palmtx_gpio_vbus = {
+	.name	= "gpio-vbus",
+	.id	= -1,
+	.dev	= {
+		.platform_data	= &palmtx_udc_info,
+	},
 };
 
 /******************************************************************************
@@ -288,17 +334,16 @@ static int power_supply_init(struct device *dev)
 
 	ret = gpio_request(GPIO_NR_PALMTX_POWER_DETECT, "CABLE_STATE_AC");
 	if (ret)
-		goto err_cs_ac;
-
-	ret = gpio_request(GPIO_NR_PALMTX_USB_DETECT_N, "CABLE_STATE_USB");
+		goto err1;
+	ret = gpio_direction_input(GPIO_NR_PALMTX_POWER_DETECT);
 	if (ret)
-		goto err_cs_usb;
+		goto err2;
 
 	return 0;
 
-err_cs_usb:
+err2:
 	gpio_free(GPIO_NR_PALMTX_POWER_DETECT);
-err_cs_ac:
+err1:
 	return ret;
 }
 
@@ -307,14 +352,8 @@ static int palmtx_is_ac_online(void)
 	return gpio_get_value(GPIO_NR_PALMTX_POWER_DETECT);
 }
 
-static int palmtx_is_usb_online(void)
-{
-	return !gpio_get_value(GPIO_NR_PALMTX_USB_DETECT_N);
-}
-
 static void power_supply_exit(struct device *dev)
 {
-	gpio_free(GPIO_NR_PALMTX_USB_DETECT_N);
 	gpio_free(GPIO_NR_PALMTX_POWER_DETECT);
 }
 
@@ -325,7 +364,6 @@ static char *palmtx_supplicants[] = {
 static struct pda_power_pdata power_supply_info = {
 	.init            = power_supply_init,
 	.is_ac_online    = palmtx_is_ac_online,
-	.is_usb_online   = palmtx_is_usb_online,
 	.exit            = power_supply_exit,
 	.supplied_to     = palmtx_supplicants,
 	.num_supplicants = ARRAY_SIZE(palmtx_supplicants),
@@ -336,6 +374,42 @@ static struct platform_device power_supply = {
 	.id   = -1,
 	.dev  = {
 		.platform_data = &power_supply_info,
+	},
+};
+
+/******************************************************************************
+ * WM97xx battery
+ ******************************************************************************/
+static struct wm97xx_batt_info wm97xx_batt_pdata = {
+	.batt_aux	= WM97XX_AUX_ID3,
+	.temp_aux	= WM97XX_AUX_ID2,
+	.charge_gpio	= -1,
+	.max_voltage	= PALMTX_BAT_MAX_VOLTAGE,
+	.min_voltage	= PALMTX_BAT_MIN_VOLTAGE,
+	.batt_mult	= 1000,
+	.batt_div	= 414,
+	.temp_mult	= 1,
+	.temp_div	= 1,
+	.batt_tech	= POWER_SUPPLY_TECHNOLOGY_LIPO,
+	.batt_name	= "main-batt",
+};
+
+/******************************************************************************
+ * aSoC audio
+ ******************************************************************************/
+static struct palm27x_asoc_info palmtx_asoc_pdata = {
+	.jack_gpio	= GPIO_NR_PALMTX_EARPHONE_DETECT,
+};
+
+static pxa2xx_audio_ops_t palmtx_ac97_pdata = {
+	.reset_gpio	= 95,
+};
+
+static struct platform_device palmtx_asoc = {
+	.name = "palm27x-asoc",
+	.id   = -1,
+	.dev  = {
+		.platform_data = &palmtx_asoc_pdata,
 	},
 };
 
@@ -366,6 +440,83 @@ static struct pxafb_mach_info palmtx_lcd_screen = {
 };
 
 /******************************************************************************
+ * NAND Flash
+ ******************************************************************************/
+static void palmtx_nand_cmd_ctl(struct mtd_info *mtd, int cmd,
+				 unsigned int ctrl)
+{
+	struct nand_chip *this = mtd->priv;
+	unsigned long nandaddr = (unsigned long)this->IO_ADDR_W;
+
+	if (cmd == NAND_CMD_NONE)
+		return;
+
+	if (ctrl & NAND_CLE)
+		writeb(cmd, PALMTX_NAND_CLE_VIRT);
+	else if (ctrl & NAND_ALE)
+		writeb(cmd, PALMTX_NAND_ALE_VIRT);
+	else
+		writeb(cmd, nandaddr);
+}
+
+static struct mtd_partition palmtx_partition_info[] = {
+	[0] = {
+		.name	= "palmtx-0",
+		.offset	= 0,
+		.size	= MTDPART_SIZ_FULL
+	},
+};
+
+static const char *palmtx_part_probes[] = { "cmdlinepart", NULL };
+
+struct platform_nand_data palmtx_nand_platdata = {
+	.chip	= {
+		.nr_chips		= 1,
+		.chip_offset		= 0,
+		.nr_partitions		= ARRAY_SIZE(palmtx_partition_info),
+		.partitions		= palmtx_partition_info,
+		.chip_delay		= 20,
+		.part_probe_types 	= palmtx_part_probes,
+	},
+	.ctrl	= {
+		.cmd_ctrl	= palmtx_nand_cmd_ctl,
+	},
+};
+
+static struct resource palmtx_nand_resource[] = {
+	[0]	= {
+		.start	= PXA_CS1_PHYS,
+		.end	= PXA_CS1_PHYS + SZ_1M - 1,
+		.flags	= IORESOURCE_MEM,
+	},
+};
+
+static struct platform_device palmtx_nand = {
+	.name		= "gen_nand",
+	.num_resources	= ARRAY_SIZE(palmtx_nand_resource),
+	.resource	= palmtx_nand_resource,
+	.id		= -1,
+	.dev		= {
+		.platform_data	= &palmtx_nand_platdata,
+	}
+};
+
+/******************************************************************************
+ * Power management - standby
+ ******************************************************************************/
+static void __init palmtx_pm_init(void)
+{
+	static u32 resume[] = {
+		0xe3a00101,	/* mov	r0,	#0x40000000 */
+		0xe380060f,	/* orr	r0, r0, #0x00f00000 */
+		0xe590f008,	/* ldr	pc, [r0, #0x08] */
+	};
+
+	/* copy the bootloader */
+	memcpy(phys_to_virt(PALMTX_STR_BASE), resume, sizeof(resume));
+}
+
+/******************************************************************************
  * Machine init
  ******************************************************************************/
 static struct platform_device *devices[] __initdata = {
@@ -374,6 +525,10 @@ static struct platform_device *devices[] __initdata = {
 #endif
 	&palmtx_backlight,
 	&power_supply,
+	&palmtx_asoc,
+	&palmtx_gpio_vbus,
+	&palmtx_flash,
+	&palmtx_nand,
 };
 
 static struct map_desc palmtx_io_desc[] __initdata = {
@@ -381,8 +536,18 @@ static struct map_desc palmtx_io_desc[] __initdata = {
 	.virtual	= PALMTX_PCMCIA_VIRT,
 	.pfn		= __phys_to_pfn(PALMTX_PCMCIA_PHYS),
 	.length		= PALMTX_PCMCIA_SIZE,
-	.type		= MT_DEVICE
-},
+	.type		= MT_DEVICE,
+}, {
+	.virtual	= PALMTX_NAND_ALE_VIRT,
+	.pfn		= __phys_to_pfn(PALMTX_NAND_ALE_PHYS),
+	.length		= SZ_1M,
+	.type		= MT_DEVICE,
+}, {
+	.virtual	= PALMTX_NAND_CLE_VIRT,
+	.pfn		= __phys_to_pfn(PALMTX_NAND_CLE_PHYS),
+	.length		= SZ_1M,
+	.type		= MT_DEVICE,
+}
 };
 
 static void __init palmtx_map_io(void)
@@ -391,16 +556,28 @@ static void __init palmtx_map_io(void)
 	iotable_init(palmtx_io_desc, ARRAY_SIZE(palmtx_io_desc));
 }
 
+/* setup udc GPIOs initial state */
+static void __init palmtx_udc_init(void)
+{
+	if (!gpio_request(GPIO_NR_PALMTX_USB_PULLUP, "UDC Vbus")) {
+		gpio_direction_output(GPIO_NR_PALMTX_USB_PULLUP, 1);
+		gpio_free(GPIO_NR_PALMTX_USB_PULLUP);
+	}
+}
+
+
 static void __init palmtx_init(void)
 {
 	pxa2xx_mfp_config(ARRAY_AND_SIZE(palmtx_pin_config));
 
+	palmtx_pm_init();
 	set_pxa_fb_info(&palmtx_lcd_screen);
 	pxa_set_mci_info(&palmtx_mci_platform_data);
-	pxa_set_udc_info(&palmtx_udc_info);
-	pxa_set_ac97_info(NULL);
+	palmtx_udc_init();
+	pxa_set_ac97_info(&palmtx_ac97_pdata);
 	pxa_set_ficp_info(&palmtx_ficp_platform_data);
 	pxa_set_keypad_info(&palmtx_keypad_platform_data);
+	wm97xx_bat_set_pdata(&wm97xx_batt_pdata);
 
 	platform_add_devices(devices, ARRAY_SIZE(devices));
 }

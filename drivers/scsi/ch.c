@@ -41,6 +41,7 @@ MODULE_DESCRIPTION("device driver for scsi media changer devices");
 MODULE_AUTHOR("Gerd Knorr <kraxel@bytesex.org>");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS_CHARDEV_MAJOR(SCSI_CHANGER_MAJOR);
+MODULE_ALIAS_SCSI_DEVICE(TYPE_MEDIUM_CHANGER);
 
 static int init = 1;
 module_param(init, int, 0444);
@@ -190,7 +191,7 @@ ch_do_scsi(scsi_changer *ch, unsigned char *cmd,
 
         result = scsi_execute_req(ch->device, cmd, direction, buffer,
 				  buflength, &sshdr, timeout * HZ,
-				  MAX_RETRIES);
+				  MAX_RETRIES, NULL);
 
 	dprintk("result: 0x%x\n",result);
 	if (driver_byte(result) & DRIVER_SENSE) {
@@ -352,6 +353,12 @@ ch_readconfig(scsi_changer *ch)
 	/* look up the devices of the data transfer elements */
 	ch->dt = kmalloc(ch->counts[CHET_DT]*sizeof(struct scsi_device),
 			 GFP_KERNEL);
+
+	if (!ch->dt) {
+		kfree(buffer);
+		return -ENOMEM;
+	}
+
 	for (elem = 0; elem < ch->counts[CHET_DT]; elem++) {
 		id  = -1;
 		lun = 0;
@@ -914,9 +921,9 @@ static int ch_probe(struct device *dev)
 	ch->minor = minor;
 	sprintf(ch->name,"ch%d",ch->minor);
 
-	class_dev = device_create_drvdata(ch_sysfs_class, dev,
-					  MKDEV(SCSI_CHANGER_MAJOR, ch->minor),
-					  ch, "s%s", ch->name);
+	class_dev = device_create(ch_sysfs_class, dev,
+				  MKDEV(SCSI_CHANGER_MAJOR, ch->minor), ch,
+				  "s%s", ch->name);
 	if (IS_ERR(class_dev)) {
 		printk(KERN_WARNING "ch%d: device_create failed\n",
 		       ch->minor);

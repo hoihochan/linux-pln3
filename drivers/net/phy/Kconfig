@@ -56,6 +56,12 @@ config BROADCOM_PHY
 	  Currently supports the BCM5411, BCM5421, BCM5461, BCM5464, BCM5481
 	  and BCM5482 PHYs.
 
+config BCM63XX_PHY
+	tristate "Drivers for Broadcom 63xx SOCs internal PHY"
+	depends on BCM63XX
+	---help---
+	  Currently supports the 6348 and 6358 PHYs.
+
 config ICPLUS_PHY
 	tristate "Drivers for ICPlus PHYs"
 	---help---
@@ -65,6 +71,22 @@ config REALTEK_PHY
 	tristate "Drivers for Realtek PHYs"
 	---help---
 	  Supports the Realtek 821x PHY.
+
+config NATIONAL_PHY
+	tristate "Drivers for National Semiconductor PHYs"
+	---help---
+	  Currently supports the DP83865 PHY.
+
+config STE10XP
+	depends on PHYLIB
+	tristate "Driver for STMicroelectronics STe10Xp PHYs"
+	---help---
+	  This is the driver for the STe100p and STe101p PHYs.
+
+config LSI_ET1011C_PHY
+	tristate "Driver for LSI ET1011C PHY"
+	---help---
+	  Supports the LSI ET1011C PHY.
 
 config FIXED_PHY
 	bool "Driver for MDIO Bus/PHY emulation with fixed speed/link PHYs"
@@ -84,10 +106,13 @@ config MDIO_BITBANG
 
 	  If in doubt, say N.
 
-config MDIO_OF_GPIO
+config MDIO_GPIO
 	tristate "Support for GPIO lib-based bitbanged MDIO buses"
-	depends on MDIO_BITBANG && OF_GPIO
+	depends on MDIO_BITBANG && GENERIC_GPIO
 	---help---
 	  Supports GPIO lib-based MDIO busses.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called mdio-gpio.
 
 endif # PHYLIB

@@ -181,6 +181,18 @@ out:
 }
 #endif
 
+static const struct net_device_ops netcard_netdev_ops = {
+	.ndo_open		= net_open,
+	.ndo_stop		= net_close,
+	.ndo_start_xmit		= net_send_packet,
+	.ndo_get_stats		= net_get_stats,
+	.ndo_set_multicast_list	= set_multicast_list,
+	.ndo_tx_timeout		= net_tx_timeout,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_set_mac_address	= eth_mac_addr,
+	.ndo_change_mtu		= eth_change_mtu,
+};
+
 /*
  * This is the real probe routine. Linux has a history of friendly device
  * probes on the ISA bus. A good device probes avoids doing writes, and
@@ -192,7 +204,6 @@ static int __init netcard_probe1(struct net_device *dev, int ioaddr)
 	static unsigned version_printed;
 	int i;
 	int err = -ENODEV;
-	DECLARE_MAC_BUF(mac);
 
 	/* Grab the region so that no one else tries to probe our ioports. */
 	if (!request_region(ioaddr, NETCARD_IO_EXTENT, cardname))
@@ -220,7 +231,7 @@ static int __init netcard_probe1(struct net_device *dev, int ioaddr)
 	for (i = 0; i < 6; i++)
 		dev->dev_addr[i] = inb(ioaddr + i);
 
-	printk("%s", print_mac(mac, dev->dev_addr));
+	printk("%pM", dev->dev_addr);
 
 	err = -EAGAIN;
 #ifdef jumpered_interrupts
@@ -304,13 +315,7 @@ static int __init netcard_probe1(struct net_device *dev, int ioaddr)
 	np = netdev_priv(dev);
 	spin_lock_init(&np->lock);
 
-	dev->open		= net_open;
-	dev->stop		= net_close;
-	dev->hard_start_xmit	= net_send_packet;
-	dev->get_stats		= net_get_stats;
-	dev->set_multicast_list = &set_multicast_list;
-
-        dev->tx_timeout		= &net_tx_timeout;
+        dev->netdev_ops		= &netcard_netdev_ops;
         dev->watchdog_timeo	= MY_TX_TIMEOUT;
 
 	err = register_netdev(dev);
@@ -425,7 +430,8 @@ static int net_send_packet(struct sk_buff *skb, struct net_device *dev)
 	 * hardware interrupt handler.  Queue flow control is
 	 * thus managed under this lock as well.
 	 */
-	spin_lock_irq(&np->lock);
+	unsigned long flags;
+	spin_lock_irqsave(&np->lock, flags);
 
 	add_to_tx_ring(np, skb, length);
 	dev->trans_start = jiffies;
@@ -441,7 +447,7 @@ static int net_send_packet(struct sk_buff *skb, struct net_device *dev)
 	 * is when the transmit statistics are updated.
 	 */
 
-	spin_unlock_irq(&np->lock);
+	spin_unlock_irqrestore(&np->lock, flags);
 #else
 	/* This is the case for older hardware which takes
 	 * a single transmit buffer at a time, and it is
@@ -462,7 +468,7 @@ static int net_send_packet(struct sk_buff *skb, struct net_device *dev)
 	dev_kfree_skb (skb);
 #endif
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 #if TX_RING
@@ -584,7 +590,6 @@ net_rx(struct net_device *dev)
 			insw(ioaddr, skb->data, (pkt_len + 1) >> 1);
 
 			netif_rx(skb);
-			dev->last_rx = jiffies;
 			lp->stats.rx_packets++;
 			lp->stats.rx_bytes += pkt_len;
 		}
@@ -711,15 +716,3 @@ cleanup_module(void)
 }
 
 #endif /* MODULE */
-
-/*
- * Local variables:
- *  compile-command:
- *	gcc -D__KERNEL__ -Wall -Wstrict-prototypes -Wwrite-strings
- *	-Wredundant-decls -O2 -m486 -c skeleton.c
- *  version-control: t
- *  kept-new-versions: 5
- *  tab-width: 4
- *  c-indent-level: 4
- * End:
- */

@@ -58,11 +58,17 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long write,
 	 * only copy the information from the master page table,
 	 * nothing more.
 	 */
+#ifdef CONFIG_64BIT
+# define VMALLOC_FAULT_TARGET no_context
+#else
+# define VMALLOC_FAULT_TARGET vmalloc_fault
+#endif
+
 	if (unlikely(address >= VMALLOC_START && address <= VMALLOC_END))
-		goto vmalloc_fault;
+		goto VMALLOC_FAULT_TARGET;
 #ifdef MODULE_START
 	if (unlikely(address >= MODULE_START && address < MODULE_END))
-		goto vmalloc_fault;
+		goto VMALLOC_FAULT_TARGET;
 #endif
 
 	/*
@@ -97,13 +103,12 @@ good_area:
 			goto bad_area;
 	}
 
-survive:
 	/*
 	 * If for any reason at all we couldn't handle the fault,
 	 * make sure we exit gracefully rather than endlessly redo
 	 * the fault.
 	 */
-	fault = handle_mm_fault(mm, vma, address, write);
+	fault = handle_mm_fault(mm, vma, address, write ? FAULT_FLAG_WRITE : 0);
 	if (unlikely(fault & VM_FAULT_ERROR)) {
 		if (fault & VM_FAULT_OOM)
 			goto out_of_memory;
@@ -167,21 +172,14 @@ no_context:
 	       field,  regs->regs[31]);
 	die("Oops", regs);
 
-/*
- * We ran out of memory, or some other thing happened to us that made
- * us unable to handle the page fault gracefully.
- */
 out_of_memory:
+	/*
+	 * We ran out of memory, call the OOM killer, and return the userspace
+	 * (which will retry the fault, or kill us if we got oom-killed).
+	 */
 	up_read(&mm->mmap_sem);
-	if (is_global_init(tsk)) {
-		yield();
-		down_read(&mm->mmap_sem);
-		goto survive;
-	}
-	printk("VM: killing process %s\n", tsk->comm);
-	if (user_mode(regs))
-		do_group_exit(SIGKILL);
-	goto no_context;
+	pagefault_out_of_memory();
+	return;
 
 do_sigbus:
 	up_read(&mm->mmap_sem);
@@ -211,6 +209,7 @@ do_sigbus:
 	force_sig_info(SIGBUS, &info, tsk);
 
 	return;
+#ifndef CONFIG_64BIT
 vmalloc_fault:
 	{
 		/*
@@ -249,4 +248,5 @@ vmalloc_fault:
 			goto no_context;
 		return;
 	}
+#endif
 }

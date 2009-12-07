@@ -2,6 +2,7 @@
  * printf.c:  Internal prom library printf facility.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
+ * Copyright (C) 1997 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
  * Copyright (c) 2002 Pete Zaitcev (zaitcev@yahoo.com)
  *
  * We used to warn all over the code: DO NOT USE prom_printf(),
@@ -13,15 +14,14 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/module.h>
+#include <linux/compiler.h>
 
 #include <asm/openprom.h>
 #include <asm/oplib.h>
 
 static char ppbuf[1024];
 
-void
-prom_write(const char *buf, unsigned int n)
+void notrace prom_write(const char *buf, unsigned int n)
 {
 	char ch;
 
@@ -33,8 +33,7 @@ prom_write(const char *buf, unsigned int n)
 	}
 }
 
-void
-prom_printf(char *fmt, ...)
+void notrace prom_printf(const char *fmt, ...)
 {
 	va_list args;
 	int i;
@@ -45,4 +44,3 @@ prom_printf(char *fmt, ...)
 
 	prom_write(ppbuf, i);
 }
-EXPORT_SYMBOL(prom_printf);

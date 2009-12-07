@@ -490,7 +490,6 @@ static int init_engine(struct snd_pcm_substream *substream,
 {
 	struct echoaudio *chip;
 	int err, per, rest, page, edge, offs;
-	struct snd_sg_buf *sgbuf;
 	struct audiopipe *pipe;
 
 	chip = snd_pcm_substream_chip(substream);
@@ -503,7 +502,7 @@ static int init_engine(struct snd_pcm_substream *substream,
 	if (pipe->index >= 0) {
 		DE_HWP(("hwp_ie free(%d)\n", pipe->index));
 		err = free_pipes(chip, pipe);
-		snd_assert(!err);
+		snd_BUG_ON(err);
 		chip->substream[pipe->index] = NULL;
 	}
 
@@ -531,10 +530,6 @@ static int init_engine(struct snd_pcm_substream *substream,
 		return err;
 	}
 
-	sgbuf = snd_pcm_substream_sgbuf(substream);
-
-	DE_HWP(("pcm_hw_params table size=%d pages=%d\n",
-		sgbuf->size, sgbuf->pages));
 	sglist_init(chip, pipe);
 	edge = PAGE_SIZE;
 	for (offs = page = per = 0; offs < params_buffer_bytes(hw_params);
@@ -543,16 +538,15 @@ static int init_engine(struct snd_pcm_substream *substream,
 		if (offs + rest > params_buffer_bytes(hw_params))
 			rest = params_buffer_bytes(hw_params) - offs;
 		while (rest) {
+			dma_addr_t addr;
+			addr = snd_pcm_sgbuf_get_addr(substream, offs);
 			if (rest <= edge - offs) {
-				sglist_add_mapping(chip, pipe,
-						   snd_sgbuf_get_addr(sgbuf, offs),
-						   rest);
+				sglist_add_mapping(chip, pipe, addr, rest);
 				sglist_add_irq(chip, pipe);
 				offs += rest;
 				rest = 0;
 			} else {
-				sglist_add_mapping(chip, pipe,
-						   snd_sgbuf_get_addr(sgbuf, offs),
+				sglist_add_mapping(chip, pipe, addr,
 						   edge - offs);
 				rest -= edge - offs;
 				offs = edge;
@@ -690,8 +684,10 @@ static int pcm_prepare(struct snd_pcm_substream *substream)
 		return -EINVAL;
 	}
 
-	snd_assert(pipe_index < px_num(chip), return -EINVAL);
-	snd_assert(is_pipe_allocated(chip, pipe_index), return -EINVAL);
+	if (snd_BUG_ON(pipe_index >= px_num(chip)))
+		return -EINVAL;
+	if (snd_BUG_ON(!is_pipe_allocated(chip, pipe_index)))
+		return -EINVAL;
 	set_audio_format(chip, pipe_index, &format);
 	return 0;
 }
@@ -954,6 +950,8 @@ static int __devinit snd_echo_new_pcm(struct echoaudio *chip)
 	Control interface
 ******************************************************************************/
 
+#if !defined(ECHOCARD_HAS_VMIXER) || defined(ECHOCARD_HAS_LINE_OUT_GAIN)
+
 /******************* PCM output volume *******************/
 static int snd_echo_output_gain_info(struct snd_kcontrol *kcontrol,
 				     struct snd_ctl_elem_info *uinfo)
@@ -1005,12 +1003,13 @@ static int snd_echo_output_gain_put(struct snd_kcontrol *kcontrol,
 	return changed;
 }
 
-#ifdef ECHOCARD_HAS_VMIXER
-/* On Vmixer cards this one controls the line-out volume */
+#ifdef ECHOCARD_HAS_LINE_OUT_GAIN
+/* On the Mia this one controls the line-out volume */
 static struct snd_kcontrol_new snd_echo_line_output_gain __devinitdata = {
 	.name = "Line Playback Volume",
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
-	.access = SNDRV_CTL_ELEM_ACCESS_READWRITE | SNDRV_CTL_ELEM_ACCESS_TLV_READ,
+	.access = SNDRV_CTL_ELEM_ACCESS_READWRITE |
+		  SNDRV_CTL_ELEM_ACCESS_TLV_READ,
 	.info = snd_echo_output_gain_info,
 	.get = snd_echo_output_gain_get,
 	.put = snd_echo_output_gain_put,
@@ -1027,6 +1026,8 @@ static struct snd_kcontrol_new snd_echo_pcm_output_gain __devinitdata = {
 	.tlv = {.p = db_scale_output_gain},
 };
 #endif
+
+#endif /* !ECHOCARD_HAS_VMIXER || ECHOCARD_HAS_LINE_OUT_GAIN */
 
 
 
@@ -2001,9 +2002,9 @@ static int __devinit snd_echo_probe(struct pci_dev *pci,
 
 	DE_INIT(("Echoaudio driver starting...\n"));
 	i = 0;
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE, 0);
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE, 0, &card);
+	if (err < 0)
+		return err;
 
 	snd_card_set_dev(card, &pci->dev);
 
@@ -2041,14 +2042,20 @@ static int __devinit snd_echo_probe(struct pci_dev *pci,
 
 #ifdef ECHOCARD_HAS_VMIXER
 	snd_echo_vmixer.count = num_pipes_out(chip) * num_busses_out(chip);
-	if ((err = snd_ctl_add(chip->card, snd_ctl_new1(&snd_echo_line_output_gain, chip))) < 0)
-		goto ctl_error;
 	if ((err = snd_ctl_add(chip->card, snd_ctl_new1(&snd_echo_vmixer, chip))) < 0)
 		goto ctl_error;
-#else
-	if ((err = snd_ctl_add(chip->card, snd_ctl_new1(&snd_echo_pcm_output_gain, chip))) < 0)
+#ifdef ECHOCARD_HAS_LINE_OUT_GAIN
+	err = snd_ctl_add(chip->card,
+			  snd_ctl_new1(&snd_echo_line_output_gain, chip));
+	if (err < 0)
 		goto ctl_error;
 #endif
+#else /* ECHOCARD_HAS_VMIXER */
+	err = snd_ctl_add(chip->card,
+			  snd_ctl_new1(&snd_echo_pcm_output_gain, chip));
+	if (err < 0)
+		goto ctl_error;
+#endif /* ECHOCARD_HAS_VMIXER */
 
 #ifdef ECHOCARD_HAS_INPUT_GAIN
 	if ((err = snd_ctl_add(chip->card, snd_ctl_new1(&snd_echo_line_input_gain, chip))) < 0)

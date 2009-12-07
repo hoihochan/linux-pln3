@@ -58,7 +58,7 @@
  * SMP-threaded, sysctl's added
  * (c) 1999 Manfred Spraul <manfred@colorfullife.com>
  * Enforced range limit on SEM_UNDO
- * (c) 2001 Red Hat Inc <alan@redhat.com>
+ * (c) 2001 Red Hat Inc
  * Lockless wakeup
  * (c) 2003 Manfred Spraul <manfred@colorfullife.com>
  *
@@ -504,7 +504,7 @@ static int count_semzcnt (struct sem_array * sma, ushort semnum)
 	return semzcnt;
 }
 
-void free_un(struct rcu_head *head)
+static void free_un(struct rcu_head *head)
 {
 	struct sem_undo *un = container_of(head, struct sem_undo, rcu);
 	kfree(un);
@@ -1223,7 +1223,6 @@ SYSCALL_DEFINE4(semtimedop, int, semid, struct sembuf __user *, tsops,
 	if (timeout && jiffies_left == 0)
 		error = -EAGAIN;
 	list_del(&queue.list);
-	goto out_unlock_free;
 
 out_unlock_free:
 	sem_unlock(sma);
@@ -1291,8 +1290,8 @@ void exit_sem(struct task_struct *tsk)
 		int i;
 
 		rcu_read_lock();
-		un = list_entry(rcu_dereference(ulp->list_proc.next),
-					struct sem_undo, list_proc);
+		un = list_entry_rcu(ulp->list_proc.next,
+				    struct sem_undo, list_proc);
 		if (&un->list_proc == &ulp->list_proc)
 			semid = -1;
 		 else

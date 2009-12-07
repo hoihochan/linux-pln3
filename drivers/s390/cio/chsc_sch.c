@@ -1,7 +1,8 @@
 /*
  * Driver for s390 chsc subchannels
  *
- * Copyright IBM Corp. 2008
+ * Copyright IBM Corp. 2008, 2009
+ *
  * Author(s): Cornelia Huck <cornelia.huck@de.ibm.com>
  *
  */
@@ -61,7 +62,7 @@ static void chsc_subchannel_irq(struct subchannel *sch)
 	}
 	private->request = NULL;
 	memcpy(&request->irb, irb, sizeof(*irb));
-	stsch(sch->schid, &sch->schib);
+	cio_update_schib(sch);
 	complete(&request->completion);
 	put_device(&sch->dev);
 }
@@ -84,8 +85,8 @@ static int chsc_subchannel_probe(struct subchannel *sch)
 		kfree(private);
 	} else {
 		sch->private = private;
-		if (sch->dev.uevent_suppress) {
-			sch->dev.uevent_suppress = 0;
+		if (dev_get_uevent_suppress(&sch->dev)) {
+			dev_set_uevent_suppress(&sch->dev, 0);
 			kobject_uevent(&sch->dev.kobj, KOBJ_ADD);
 		}
 	}
@@ -112,6 +113,31 @@ static void chsc_subchannel_shutdown(struct subchannel *sch)
 	cio_disable_subchannel(sch);
 }
 
+static int chsc_subchannel_prepare(struct subchannel *sch)
+{
+	int cc;
+	struct schib schib;
+	/*
+	 * Don't allow suspend while the subchannel is not idle
+	 * since we don't have a way to clear the subchannel and
+	 * cannot disable it with a request running.
+	 */
+	cc = stsch(sch->schid, &schib);
+	if (!cc && scsw_stctl(&schib.scsw))
+		return -EAGAIN;
+	return 0;
+}
+
+static int chsc_subchannel_freeze(struct subchannel *sch)
+{
+	return cio_disable_subchannel(sch);
+}
+
+static int chsc_subchannel_restore(struct subchannel *sch)
+{
+	return cio_enable_subchannel(sch, (u32)(unsigned long)sch);
+}
+
 static struct css_device_id chsc_subchannel_ids[] = {
 	{ .match_flags = 0x1, .type =SUBCHANNEL_TYPE_CHSC, },
 	{ /* end of list */ },
@@ -125,6 +151,10 @@ static struct css_driver chsc_subchannel_driver = {
 	.probe = chsc_subchannel_probe,
 	.remove = chsc_subchannel_remove,
 	.shutdown = chsc_subchannel_shutdown,
+	.prepare = chsc_subchannel_prepare,
+	.freeze = chsc_subchannel_freeze,
+	.thaw = chsc_subchannel_restore,
+	.restore = chsc_subchannel_restore,
 	.name = "chsc_subchannel",
 };
 
@@ -261,7 +291,7 @@ static int chsc_examine_irb(struct chsc_request *request)
 {
 	int backed_up;
 
-	if (!scsw_stctl(&request->irb.scsw) & SCSW_STCTL_STATUS_PEND)
+	if (!(scsw_stctl(&request->irb.scsw) & SCSW_STCTL_STATUS_PEND))
 		return -EIO;
 	backed_up = scsw_cstat(&request->irb.scsw) & SCHN_STAT_CHAIN_CHECK;
 	request->irb.scsw.cmd.cstat &= ~SCHN_STAT_CHAIN_CHECK;

@@ -73,8 +73,6 @@ static char *version =
    or override something. */
 #include <linux/module.h>
 
-#define PRINTK(x) printk x
-
 /*
   Sources:
 
@@ -168,6 +166,17 @@ writereg(struct net_device *dev, int portno, int value)
 	nubus_writew(swab16(value), dev->mem_start + portno);
 }
 
+static const struct net_device_ops mac89x0_netdev_ops = {
+	.ndo_open		= net_open,
+	.ndo_stop		= net_close,
+	.ndo_start_xmit		= net_send_packet,
+	.ndo_get_stats		= net_get_stats,
+	.ndo_set_multicast_list	= set_multicast_list,
+	.ndo_set_mac_address	= set_mac_address,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_change_mtu		= eth_change_mtu,
+};
+
 /* Probe for the CS8900 card in slot E.  We won't bother looking
    anywhere else until we have a really good reason to do so. */
 struct net_device * __init mac89x0_probe(int unit)
@@ -181,7 +190,6 @@ struct net_device * __init mac89x0_probe(int unit)
 	unsigned long ioaddr;
 	unsigned short sig;
 	int err = -ENODEV;
-	DECLARE_MAC_BUF(mac);
 
 	if (!MACH_IS_MAC)
 		return ERR_PTR(-ENODEV);
@@ -279,15 +287,9 @@ struct net_device * __init mac89x0_probe(int unit)
 
 	/* print the IRQ and ethernet address. */
 
-	printk(" IRQ %d ADDR %s\n",
-	       dev->irq, print_mac(mac, dev->dev_addr));
+	printk(" IRQ %d ADDR %pM\n", dev->irq, dev->dev_addr);
 
-	dev->open		= net_open;
-	dev->stop		= net_close;
-	dev->hard_start_xmit = net_send_packet;
-	dev->get_stats	= net_get_stats;
-	dev->set_multicast_list = &set_multicast_list;
-	dev->set_mac_address = &set_mac_address;
+	dev->netdev_ops		= &mac89x0_netdev_ops;
 
 	err = register_netdev(dev);
 	if (err)
@@ -398,7 +400,7 @@ net_send_packet(struct sk_buff *skb, struct net_device *dev)
 		/* Gasp!  It hasn't.  But that shouldn't happen since
 		   we're waiting for TxOk, so return 1 and requeue this packet. */
 		local_irq_restore(flags);
-		return 1;
+		return NETDEV_TX_BUSY;
 	}
 
 	/* Write the contents of the packet */
@@ -409,7 +411,7 @@ net_send_packet(struct sk_buff *skb, struct net_device *dev)
 	dev->trans_start = jiffies;
 	dev_kfree_skb (skb);
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /* The typical workload of the driver:
@@ -518,7 +520,6 @@ net_rx(struct net_device *dev)
 
         skb->protocol=eth_type_trans(skb,dev);
 	netif_rx(skb);
-	dev->last_rx = jiffies;
 	lp->stats.rx_packets++;
 	lp->stats.rx_bytes += length;
 }
@@ -628,14 +629,3 @@ cleanup_module(void)
 	free_netdev(dev_cs89x0);
 }
 #endif /* MODULE */
-
-/*
- * Local variables:
- *  compile-command: "m68k-linux-gcc -D__KERNEL__ -I../../include -Wall -Wstrict-prototypes -O2 -fomit-frame-pointer -pipe -fno-strength-reduce -ffixed-a2 -DMODULE -DMODVERSIONS -include ../../include/linux/modversions.h   -c -o mac89x0.o mac89x0.c"
- *  version-control: t
- *  kept-new-versions: 5
- *  c-indent-level: 8
- *  tab-width: 8
- * End:
- *
- */

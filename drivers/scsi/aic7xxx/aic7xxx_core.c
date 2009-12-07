@@ -814,6 +814,7 @@ ahc_intr(struct ahc_softc *ahc)
 static void
 ahc_restart(struct ahc_softc *ahc)
 {
+	uint8_t	sblkctl;
 
 	ahc_pause(ahc);
 
@@ -867,6 +868,12 @@ ahc_restart(struct ahc_softc *ahc)
 	ahc_outb(ahc, SEQCTL, ahc->seqctl);
 	ahc_outb(ahc, SEQADDR0, 0);
 	ahc_outb(ahc, SEQADDR1, 0);
+
+	/*
+	 * Take the LED out of diagnostic mode on PM resume, too
+	 */
+	sblkctl = ahc_inb(ahc, SBLKCTL);
+	ahc_outb(ahc, SBLKCTL, (sblkctl & ~(DIAGLEDEN|DIAGLEDON)));
 
 	ahc_unpause(ahc);
 }
@@ -5216,7 +5223,7 @@ ahc_chip_init(struct ahc_softc *ahc)
 
 	/*
 	 * Setup the allowed SCSI Sequences based on operational mode.
-	 * If we are a target, we'll enalbe select in operations once
+	 * If we are a target, we'll enable select in operations once
 	 * we've had a lun enabled.
 	 */
 	scsiseq_template = ENSELO|ENAUTOATNO|ENAUTOATNP;

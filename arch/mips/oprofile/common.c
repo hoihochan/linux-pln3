@@ -16,6 +16,7 @@
 
 extern struct op_mips_model op_model_mipsxx_ops __attribute__((weak));
 extern struct op_mips_model op_model_rm9000_ops __attribute__((weak));
+extern struct op_mips_model op_model_loongson2_ops __attribute__((weak));
 
 static struct op_mips_model *model;
 
@@ -32,7 +33,7 @@ static int op_mips_setup(void)
         return 0;
 }
 
-static int op_mips_create_files(struct super_block * sb, struct dentry * root)
+static int op_mips_create_files(struct super_block *sb, struct dentry *root)
 {
 	int i;
 
@@ -92,6 +93,9 @@ int __init oprofile_arch_init(struct oprofile_operations *ops)
 
 	case CPU_RM9000:
 		lmodel = &op_model_rm9000_ops;
+		break;
+	case CPU_LOONGSON2:
+		lmodel = &op_model_loongson2_ops;
 		break;
 	};
 

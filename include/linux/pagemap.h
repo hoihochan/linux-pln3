@@ -18,9 +18,12 @@
  * Bits in mapping->flags.  The lower __GFP_BITS_SHIFT bits are the page
  * allocation mode flags.
  */
-#define	AS_EIO		(__GFP_BITS_SHIFT + 0)	/* IO error on async write */
-#define AS_ENOSPC	(__GFP_BITS_SHIFT + 1)	/* ENOSPC on async write */
-#define AS_MM_ALL_LOCKS	(__GFP_BITS_SHIFT + 2)	/* under mm_take_all_locks() */
+enum mapping_flags {
+	AS_EIO		= __GFP_BITS_SHIFT + 0,	/* IO error on async write */
+	AS_ENOSPC	= __GFP_BITS_SHIFT + 1,	/* ENOSPC on async write */
+	AS_MM_ALL_LOCKS	= __GFP_BITS_SHIFT + 2,	/* under mm_take_all_locks() */
+	AS_UNEVICTABLE	= __GFP_BITS_SHIFT + 3,	/* e.g., ramdisk, SHM_LOCK */
+};
 
 static inline void mapping_set_error(struct address_space *mapping, int error)
 {
@@ -30,6 +33,23 @@ static inline void mapping_set_error(struct address_space *mapping, int error)
 		else
 			set_bit(AS_EIO, &mapping->flags);
 	}
+}
+
+static inline void mapping_set_unevictable(struct address_space *mapping)
+{
+	set_bit(AS_UNEVICTABLE, &mapping->flags);
+}
+
+static inline void mapping_clear_unevictable(struct address_space *mapping)
+{
+	clear_bit(AS_UNEVICTABLE, &mapping->flags);
+}
+
+static inline int mapping_unevictable(struct address_space *mapping)
+{
+	if (likely(mapping))
+		return test_bit(AS_UNEVICTABLE, &mapping->flags);
+	return !!mapping;
 }
 
 static inline gfp_t mapping_gfp_mask(struct address_space * mapping)
@@ -112,7 +132,7 @@ static inline int page_cache_get_speculative(struct page *page)
 {
 	VM_BUG_ON(in_interrupt());
 
-#if !defined(CONFIG_SMP) && defined(CONFIG_CLASSIC_RCU)
+#if !defined(CONFIG_SMP) && defined(CONFIG_TREE_RCU)
 # ifdef CONFIG_PREEMPT
 	VM_BUG_ON(!in_atomic());
 # endif
@@ -150,7 +170,7 @@ static inline int page_cache_add_speculative(struct page *page, int count)
 {
 	VM_BUG_ON(in_interrupt());
 
-#if !defined(CONFIG_SMP) && defined(CONFIG_CLASSIC_RCU)
+#if !defined(CONFIG_SMP) && defined(CONFIG_TREE_RCU)
 # ifdef CONFIG_PREEMPT
 	VM_BUG_ON(!in_atomic());
 # endif
@@ -272,19 +292,19 @@ extern int __lock_page_killable(struct page *page);
 extern void __lock_page_nosync(struct page *page);
 extern void unlock_page(struct page *page);
 
-static inline void set_page_locked(struct page *page)
+static inline void __set_page_locked(struct page *page)
 {
-	set_bit(PG_locked, &page->flags);
+	__set_bit(PG_locked, &page->flags);
 }
 
-static inline void clear_page_locked(struct page *page)
+static inline void __clear_page_locked(struct page *page)
 {
-	clear_bit(PG_locked, &page->flags);
+	__clear_bit(PG_locked, &page->flags);
 }
 
 static inline int trylock_page(struct page *page)
 {
-	return !test_and_set_bit(PG_locked, &page->flags);
+	return (likely(!test_and_set_bit_lock(PG_locked, &page->flags)));
 }
 
 /*
@@ -352,6 +372,11 @@ static inline void wait_on_page_writeback(struct page *page)
 extern void end_page_writeback(struct page *page);
 
 /*
+ * Add an arbitrary waiter to a page's wait queue
+ */
+extern void add_page_wait_queue(struct page *page, wait_queue_t *waiter);
+
+/*
  * Fault a userspace page into pagetables.  Return non-zero on a fault.
  *
  * This assumes that two userspace pages are always sufficient.  That's
@@ -411,17 +436,17 @@ extern void __remove_from_page_cache(struct page *page);
 
 /*
  * Like add_to_page_cache_locked, but used to add newly allocated pages:
- * the page is new, so we can just run set_page_locked() against it.
+ * the page is new, so we can just run __set_page_locked() against it.
  */
 static inline int add_to_page_cache(struct page *page,
 		struct address_space *mapping, pgoff_t offset, gfp_t gfp_mask)
 {
 	int error;
 
-	set_page_locked(page);
+	__set_page_locked(page);
 	error = add_to_page_cache_locked(page, mapping, offset, gfp_mask);
 	if (unlikely(error))
-		clear_page_locked(page);
+		__clear_page_locked(page);
 	return error;
 }
 

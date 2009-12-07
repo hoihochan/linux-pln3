@@ -23,6 +23,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/interrupt.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/miscdevice.h>
@@ -75,6 +76,7 @@ MODULE_DEVICE_TABLE(pci, applicom_pci_tbl);
 MODULE_AUTHOR("David Woodhouse & Applicom International");
 MODULE_DESCRIPTION("Driver for Applicom Profibus card");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS_MISCDEV(AC_MINOR);
 
 MODULE_SUPPORTED_DEVICE("ac");
 
@@ -478,7 +480,7 @@ static int do_ac_read(int IndexCard, char __user *buf,
 		struct st_ram_io *st_loc, struct mailbox *mailbox)
 {
 	void __iomem *from = apbs[IndexCard].RamIO + RAM_TO_PC;
-	unsigned char *to = (unsigned char *)&mailbox;
+	unsigned char *to = (unsigned char *)mailbox;
 #ifdef DEBUG
 	int c;
 #endif

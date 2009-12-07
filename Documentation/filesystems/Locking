@@ -97,8 +97,8 @@ prototypes:
 	void (*put_super) (struct super_block *);
 	void (*write_super) (struct super_block *);
 	int (*sync_fs)(struct super_block *sb, int wait);
-	void (*write_super_lockfs) (struct super_block *);
-	void (*unlockfs) (struct super_block *);
+	int (*freeze_fs) (struct super_block *);
+	int (*unfreeze_fs) (struct super_block *);
 	int (*statfs) (struct dentry *, struct kstatfs *);
 	int (*remount_fs) (struct super_block *, int *, char *);
 	void (*clear_inode) (struct inode *);
@@ -109,27 +109,28 @@ prototypes:
 
 locking rules:
 	All may block.
-			BKL	s_lock	s_umount
-alloc_inode:		no	no	no
-destroy_inode:		no
-dirty_inode:		no				(must not sleep)
-write_inode:		no
-drop_inode:		no				!!!inode_lock!!!
-delete_inode:		no
-put_super:		yes	yes	no
-write_super:		no	yes	read
-sync_fs:		no	no	read
-write_super_lockfs:	?
-unlockfs:		?
-statfs:			no	no	no
-remount_fs:		yes	yes	maybe		(see below)
-clear_inode:		no
-umount_begin:		yes	no	no
-show_options:		no				(vfsmount->sem)
-quota_read:		no	no	no		(see below)
-quota_write:		no	no	no		(see below)
+	None have BKL
+			s_umount
+alloc_inode:
+destroy_inode:
+dirty_inode:				(must not sleep)
+write_inode:
+drop_inode:				!!!inode_lock!!!
+delete_inode:
+put_super:		write
+write_super:		read
+sync_fs:		read
+freeze_fs:		read
+unfreeze_fs:		read
+statfs:			no
+remount_fs:		maybe		(see below)
+clear_inode:
+umount_begin:		no
+show_options:		no		(namespace_sem)
+quota_read:		no		(see below)
+quota_write:		no		(see below)
 
-->remount_fs() will have the s_umount lock if it's already mounted.
+->remount_fs() will have the s_umount exclusive lock if it's already mounted.
 When called from get_sb_single, it does NOT have the s_umount lock.
 ->quota_read() and ->quota_write() functions are both guaranteed to
 be the only ones operating on the quota file by the quota code (via
@@ -161,8 +162,12 @@ prototypes:
 	int (*set_page_dirty)(struct page *page);
 	int (*readpages)(struct file *filp, struct address_space *mapping,
 			struct list_head *pages, unsigned nr_pages);
-	int (*prepare_write)(struct file *, struct page *, unsigned, unsigned);
-	int (*commit_write)(struct file *, struct page *, unsigned, unsigned);
+	int (*write_begin)(struct file *, struct address_space *mapping,
+				loff_t pos, unsigned len, unsigned flags,
+				struct page **pagep, void **fsdata);
+	int (*write_end)(struct file *, struct address_space *mapping,
+				loff_t pos, unsigned len, unsigned copied,
+				struct page *page, void *fsdata);
 	sector_t (*bmap)(struct address_space *, sector_t);
 	int (*invalidatepage) (struct page *, unsigned long);
 	int (*releasepage) (struct page *, int);
@@ -180,18 +185,16 @@ sync_page:		no	maybe
 writepages:		no
 set_page_dirty		no	no
 readpages:		no
-prepare_write:		no	yes			yes
-commit_write:		no	yes			yes
 write_begin:		no	locks the page		yes
 write_end:		no	yes, unlocks		yes
 perform_write:		no	n/a			yes
-bmap:			yes
+bmap:			no
 invalidatepage:		no	yes
 releasepage:		no	yes
 direct_IO:		no
 launder_page:		no	yes
 
-	->prepare_write(), ->commit_write(), ->sync_page() and ->readpage()
+	->write_begin(), ->write_end(), ->sync_page() and ->readpage()
 may be called from the request handler (/dev/loop).
 
 	->readpage() unlocks the page, either synchronously or via I/O
@@ -392,11 +395,10 @@ prototypes:
 	unsigned long (*get_unmapped_area)(struct file *, unsigned long,
 			unsigned long, unsigned long, unsigned long);
 	int (*check_flags)(int);
-	int (*dir_notify)(struct file *, unsigned long);
 };
 
 locking rules:
-	All except ->poll() may block.
+	All may block.
 			BKL
 llseek:			no	(see below)
 read:			no
@@ -422,7 +424,6 @@ sendfile:		no
 sendpage:		no
 get_unmapped_area:	no
 check_flags:		no
-dir_notify:		no
 
 ->llseek() locking has moved from llseek to the individual llseek
 implementations.  If your fs is not using generic_file_llseek, you
@@ -437,8 +438,11 @@ grab BKL for cases when we close a file that had been opened r/w, but that
 can and should be done using the internal locking with smaller critical areas).
 Current worst offender is ext2_get_block()...
 
-->fasync() is a mess. This area needs a big cleanup and that will probably
-affect locking.
+->fasync() is called without BKL protection, and is responsible for
+maintaining the FASYNC bit in filp->f_flags.  Most instances call
+fasync_helper(), which does that maintenance, so it's not normally
+something one needs to worry about.  Return values > 0 will be mapped to
+zero in the VFS layer.
 
 ->readdir() and ->ioctl() on directories must be changed. Ideally we would
 move ->readdir() to inode_operations and use a separate method for directory

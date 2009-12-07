@@ -6,6 +6,7 @@
  *  file VFS functions
  */
 
+#include <linux/smp_lock.h>
 #include "hpfs_fn.h"
 
 #define BLOCKS(size) (((size) + 511) >> 9)
@@ -143,5 +144,5 @@ const struct file_operations hpfs_file_ops =
 const struct inode_operations hpfs_file_iops =
 {
 	.truncate	= hpfs_truncate,
-	.setattr	= hpfs_notify_change,
+	.setattr	= hpfs_setattr,
 };

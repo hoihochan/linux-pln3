@@ -152,6 +152,7 @@ static int gdth_get_info(char *buffer,char **start,off_t offset,int length,
                          struct Scsi_Host *host, gdth_ha_str *ha)
 {
     int size = 0,len = 0;
+    int hlen;
     off_t begin = 0,pos = 0;
     int id, i, j, k, sec, flag;
     int no_mdrv = 0, drv_no, is_mirr;
@@ -192,11 +193,11 @@ static int gdth_get_info(char *buffer,char **start,off_t offset,int length,
     if (reserve_list[0] == 0xff)
         strcpy(hrec, "--");
     else {
-        sprintf(hrec, "%d", reserve_list[0]);
+        hlen = sprintf(hrec, "%d", reserve_list[0]);
         for (i = 1;  i < MAX_RES_ARGS; i++) {
             if (reserve_list[i] == 0xff) 
                 break;
-            sprintf(hrec,"%s,%d", hrec, reserve_list[i]);
+            hlen += snprintf(hrec + hlen , 161 - hlen, ",%d", reserve_list[i]);
         }
     }
     size = sprintf(buffer+len,
@@ -747,70 +748,4 @@ static void gdth_wait_completion(gdth_ha_str *ha, int busnum, int id)
         }
     }
     spin_unlock_irqrestore(&ha->smp_lock, flags);
-}
-
-static void gdth_stop_timeout(gdth_ha_str *ha, int busnum, int id)
-{
-    ulong flags;
-    Scsi_Cmnd *scp;
-    unchar b, t;
-
-    spin_lock_irqsave(&ha->smp_lock, flags);
-
-    for (scp = ha->req_first; scp; scp = (Scsi_Cmnd *)scp->SCp.ptr) {
-        struct gdth_cmndinfo *cmndinfo = gdth_cmnd_priv(scp);
-        if (!cmndinfo->internal_command) {
-            b = scp->device->channel;
-            t = scp->device->id;
-            if (t == (unchar)id && b == (unchar)busnum) {
-                TRACE2(("gdth_stop_timeout(): update_timeout()\n"));
-                cmndinfo->timeout = gdth_update_timeout(scp, 0);
-            }
-        }
-    }
-    spin_unlock_irqrestore(&ha->smp_lock, flags);
-}
-
-static void gdth_start_timeout(gdth_ha_str *ha, int busnum, int id)
-{
-    ulong flags;
-    Scsi_Cmnd *scp;
-    unchar b, t;
-
-    spin_lock_irqsave(&ha->smp_lock, flags);
-
-    for (scp = ha->req_first; scp; scp = (Scsi_Cmnd *)scp->SCp.ptr) {
-        struct gdth_cmndinfo *cmndinfo = gdth_cmnd_priv(scp);
-        if (!cmndinfo->internal_command) {
-            b = scp->device->channel;
-            t = scp->device->id;
-            if (t == (unchar)id && b == (unchar)busnum) {
-                TRACE2(("gdth_start_timeout(): update_timeout()\n"));
-                gdth_update_timeout(scp, cmndinfo->timeout);
-            }
-        }
-    }
-    spin_unlock_irqrestore(&ha->smp_lock, flags);
-}
-
-static int gdth_update_timeout(Scsi_Cmnd *scp, int timeout)
-{
-    int oldto;
-
-    oldto = scp->timeout_per_command;
-    scp->timeout_per_command = timeout;
-
-    if (timeout == 0) {
-        del_timer(&scp->eh_timeout);
-        scp->eh_timeout.data = (unsigned long) NULL;
-        scp->eh_timeout.expires = 0;
-    } else {
-        if (scp->eh_timeout.data != (unsigned long) NULL) 
-            del_timer(&scp->eh_timeout);
-        scp->eh_timeout.data = (unsigned long) scp;
-        scp->eh_timeout.expires = jiffies + timeout;
-        add_timer(&scp->eh_timeout);
-    }
-
-    return oldto;
 }

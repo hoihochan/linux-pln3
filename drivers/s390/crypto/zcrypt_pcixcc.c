@@ -361,7 +361,7 @@ static void rng_type6CPRB_msgX(struct ap_device *ap_dev,
 		.ToCardLen1	= sizeof *msg - sizeof(msg->hdr),
 		.FromCardLen1	= sizeof *msg - sizeof(msg->hdr),
 	};
-	static struct CPRBX static_cprbx = {
+	static struct CPRBX local_cprbx = {
 		.cprb_len	= 0x00dc,
 		.cprb_ver_id	= 0x02,
 		.func_id	= {0x54, 0x32},
@@ -372,7 +372,7 @@ static void rng_type6CPRB_msgX(struct ap_device *ap_dev,
 
 	msg->hdr = static_type6_hdrX;
 	msg->hdr.FromCardLen2 = random_number_length,
-	msg->cprbx = static_cprbx;
+	msg->cprbx = local_cprbx;
 	msg->cprbx.rpl_datal = random_number_length,
 	msg->cprbx.domain = AP_QID_QUEUE(ap_dev->qid);
 	memcpy(msg->function_code, msg->hdr.function_code, 0x02);
@@ -561,7 +561,8 @@ static int convert_response_ica(struct zcrypt_device *zdev,
 		if (msg->cprbx.cprb_ver_id == 0x02)
 			return convert_type86_ica(zdev, reply,
 						  outputdata, outputdatalength);
-		/* no break, incorrect cprb version is an unknown response */
+		/* Fall through, no break, incorrect cprb version is an unknown
+		 * response */
 	default: /* Unknown response type, this should NEVER EVER happen */
 		zdev->online = 0;
 		return -EAGAIN;	/* repeat the request on a different device. */
@@ -587,7 +588,8 @@ static int convert_response_xcrb(struct zcrypt_device *zdev,
 		}
 		if (msg->cprbx.cprb_ver_id == 0x02)
 			return convert_type86_xcrb(zdev, reply, xcRB);
-		/* no break, incorrect cprb version is an unknown response */
+		/* Fall through, no break, incorrect cprb version is an unknown
+		 * response */
 	default: /* Unknown response type, this should NEVER EVER happen */
 		xcRB->status = 0x0008044DL; /* HDD_InvalidParm */
 		zdev->online = 0;
@@ -610,7 +612,8 @@ static int convert_response_rng(struct zcrypt_device *zdev,
 			return -EINVAL;
 		if (msg->cprbx.cprb_ver_id == 0x02)
 			return convert_type86_rng(zdev, reply, data);
-		/* no break, incorrect cprb version is an unknown response */
+		/* Fall through, no break, incorrect cprb version is an unknown
+		 * response */
 	default: /* Unknown response type, this should NEVER EVER happen */
 		zdev->online = 0;
 		return -EAGAIN;	/* repeat the request on a different device. */
@@ -635,13 +638,16 @@ static void zcrypt_pcixcc_receive(struct ap_device *ap_dev,
 	};
 	struct response_type *resp_type =
 		(struct response_type *) msg->private;
-	struct type86x_reply *t86r = reply->message;
+	struct type86x_reply *t86r;
 	int length;
 
 	/* Copy the reply message to the request message buffer. */
-	if (IS_ERR(reply))
+	if (IS_ERR(reply)) {
 		memcpy(msg->message, &error_reply, sizeof(error_reply));
-	else if (t86r->hdr.type == TYPE86_RSP_CODE &&
+		goto out;
+	}
+	t86r = reply->message;
+	if (t86r->hdr.type == TYPE86_RSP_CODE &&
 		 t86r->cprbx.cprb_ver_id == 0x02) {
 		switch (resp_type->type) {
 		case PCIXCC_RESPONSE_TYPE_ICA:
@@ -660,6 +666,7 @@ static void zcrypt_pcixcc_receive(struct ap_device *ap_dev,
 		}
 	} else
 		memcpy(msg->message, reply->message, sizeof error_reply);
+out:
 	complete(&(resp_type->work));
 }
 
@@ -777,8 +784,7 @@ static long zcrypt_pcixcc_send_cprb(struct zcrypt_device *zdev,
 		/* Signal pending. */
 		ap_cancel_message(zdev->ap_dev, &ap_msg);
 out_free:
-	memset(ap_msg.message, 0x0, ap_msg.length);
-	kfree(ap_msg.message);
+	kzfree(ap_msg.message);
 	return rc;
 }
 

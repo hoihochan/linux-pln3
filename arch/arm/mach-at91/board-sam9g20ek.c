@@ -24,6 +24,8 @@
 #include <linux/platform_device.h>
 #include <linux/spi/spi.h>
 #include <linux/spi/at73c213.h>
+#include <linux/gpio_keys.h>
+#include <linux/input.h>
 #include <linux/clk.h>
 
 #include <mach/hardware.h>
@@ -37,7 +39,9 @@
 
 #include <mach/board.h>
 #include <mach/gpio.h>
+#include <mach/at91sam9_smc.h>
 
+#include "sam9_smc.h"
 #include "generic.h"
 
 
@@ -46,7 +50,7 @@ static void __init ek_map_io(void)
 	/* Initialize processor: 18.432 MHz crystal */
 	at91sam9260_initialize(18432000);
 
-	/* DGBU on ttyS0. (Rx & Tx only) */
+	/* DBGU on ttyS0. (Rx & Tx only) */
 	at91_register_uart(0, 0, 0);
 
 	/* USART0 on ttyS1. (Rx, Tx, CTS, RTS, DTR, DSR, DCD, RI) */
@@ -122,16 +126,16 @@ static struct mtd_partition __initdata ek_nand_partition[] = {
 	{
 		.name   = "Bootstrap",
 		.offset = 0,
-		.size   = 4 * 1024 * 1024,
+		.size   = 4 * SZ_1M,
 	},
 	{
 		.name	= "Partition 1",
-		.offset	= 4 * 1024 * 1024,
-		.size	= 60 * 1024 * 1024,
+		.offset	= MTDPART_OFS_NXTBLK,
+		.size	= 60 * SZ_1M,
 	},
 	{
 		.name	= "Partition 2",
-		.offset	= 64 * 1024 * 1024,
+		.offset	= MTDPART_OFS_NXTBLK,
 		.size	= MTDPART_SIZ_FULL,
 	},
 };
@@ -155,6 +159,38 @@ static struct atmel_nand_data __initdata ek_nand_data = {
 	.bus_width_16	= 0,
 #endif
 };
+
+static struct sam9_smc_config __initdata ek_nand_smc_config = {
+	.ncs_read_setup		= 0,
+	.nrd_setup		= 2,
+	.ncs_write_setup	= 0,
+	.nwe_setup		= 2,
+
+	.ncs_read_pulse		= 4,
+	.nrd_pulse		= 4,
+	.ncs_write_pulse	= 4,
+	.nwe_pulse		= 4,
+
+	.read_cycle		= 7,
+	.write_cycle		= 7,
+
+	.mode			= AT91_SMC_READMODE | AT91_SMC_WRITEMODE | AT91_SMC_EXNWMODE_DISABLE,
+	.tdf_cycles		= 3,
+};
+
+static void __init ek_add_device_nand(void)
+{
+	/* setup bus-width (8 or 16) */
+	if (ek_nand_data.bus_width_16)
+		ek_nand_smc_config.mode |= AT91_SMC_DBW_16;
+	else
+		ek_nand_smc_config.mode |= AT91_SMC_DBW_8;
+
+	/* configure chip-select 3 (NAND) */
+	sam9_smc_configure(3, &ek_nand_smc_config);
+
+	at91_add_device_nand(&ek_nand_data);
+}
 
 
 /*
@@ -184,6 +220,64 @@ static struct gpio_led ek_leds[] = {
 	}
 };
 
+
+/*
+ * GPIO Buttons
+ */
+#if defined(CONFIG_KEYBOARD_GPIO) || defined(CONFIG_KEYBOARD_GPIO_MODULE)
+static struct gpio_keys_button ek_buttons[] = {
+	{
+		.gpio		= AT91_PIN_PA30,
+		.code		= BTN_3,
+		.desc		= "Button 3",
+		.active_low	= 1,
+		.wakeup		= 1,
+	},
+	{
+		.gpio		= AT91_PIN_PA31,
+		.code		= BTN_4,
+		.desc		= "Button 4",
+		.active_low	= 1,
+		.wakeup		= 1,
+	}
+};
+
+static struct gpio_keys_platform_data ek_button_data = {
+	.buttons	= ek_buttons,
+	.nbuttons	= ARRAY_SIZE(ek_buttons),
+};
+
+static struct platform_device ek_button_device = {
+	.name		= "gpio-keys",
+	.id		= -1,
+	.num_resources	= 0,
+	.dev		= {
+		.platform_data	= &ek_button_data,
+	}
+};
+
+static void __init ek_add_device_buttons(void)
+{
+	at91_set_gpio_input(AT91_PIN_PA30, 1);	/* btn3 */
+	at91_set_deglitch(AT91_PIN_PA30, 1);
+	at91_set_gpio_input(AT91_PIN_PA31, 1);	/* btn4 */
+	at91_set_deglitch(AT91_PIN_PA31, 1);
+
+	platform_device_register(&ek_button_device);
+}
+#else
+static void __init ek_add_device_buttons(void) {}
+#endif
+
+
+static struct i2c_board_info __initdata ek_i2c_devices[] = {
+	{
+		I2C_BOARD_INFO("24c512", 0x50),
+		I2C_BOARD_INFO("wm8731", 0x1b),
+	},
+};
+
+
 static void __init ek_board_init(void)
 {
 	/* Serial */
@@ -195,15 +289,21 @@ static void __init ek_board_init(void)
 	/* SPI */
 	at91_add_device_spi(ek_spi_devices, ARRAY_SIZE(ek_spi_devices));
 	/* NAND */
-	at91_add_device_nand(&ek_nand_data);
+	ek_add_device_nand();
 	/* Ethernet */
 	at91_add_device_eth(&ek_macb_data);
 	/* MMC */
 	at91_add_device_mmc(0, &ek_mmc_data);
 	/* I2C */
-	at91_add_device_i2c(NULL, 0);
+	at91_add_device_i2c(ek_i2c_devices, ARRAY_SIZE(ek_i2c_devices));
 	/* LEDs */
 	at91_gpio_leds(ek_leds, ARRAY_SIZE(ek_leds));
+	/* Push Buttons */
+	ek_add_device_buttons();
+	/* PCK0 provides MCLK to the WM8731 */
+	at91_set_B_periph(AT91_PIN_PC1, 0);
+	/* SSC (for WM8731) */
+	at91_add_device_ssc(AT91SAM9260_ID_SSC, ATMEL_SSC_TX);
 }
 
 MACHINE_START(AT91SAM9G20EK, "Atmel AT91SAM9G20-EK")

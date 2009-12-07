@@ -33,13 +33,14 @@ xfs-$(CONFIG_XFS_QUOTA)		+= $(addprefix quota/, \
 				   xfs_qm_syscalls.o \
 				   xfs_qm_bhv.o \
 				   xfs_qm.o)
+xfs-$(CONFIG_XFS_QUOTA)		+= linux-2.6/xfs_quotaops.o
 
 ifeq ($(CONFIG_XFS_QUOTA),y)
 xfs-$(CONFIG_PROC_FS)		+= quota/xfs_qm_stats.o
 endif
 
 xfs-$(CONFIG_XFS_RT)		+= xfs_rtalloc.o
-xfs-$(CONFIG_XFS_POSIX_ACL)	+= xfs_acl.o
+xfs-$(CONFIG_XFS_POSIX_ACL)	+= $(XFS_LINUX)/xfs_acl.o
 xfs-$(CONFIG_PROC_FS)		+= $(XFS_LINUX)/xfs_stats.o
 xfs-$(CONFIG_SYSCTL)		+= $(XFS_LINUX)/xfs_sysctl.o
 xfs-$(CONFIG_COMPAT)		+= $(XFS_LINUX)/xfs_ioctl32.o
@@ -85,13 +86,12 @@ xfs-y				+= xfs_alloc.o \
 				   xfs_trans_inode.o \
 				   xfs_trans_item.o \
 				   xfs_utils.o \
-				   xfs_vfsops.o \
 				   xfs_vnodeops.o \
 				   xfs_rw.o \
-				   xfs_dmops.o \
-				   xfs_qmops.o
+				   xfs_dmops.o
 
-xfs-$(CONFIG_XFS_TRACE)		+= xfs_dir2_trace.o
+xfs-$(CONFIG_XFS_TRACE)		+= xfs_btree_trace.o \
+				   xfs_dir2_trace.o
 
 # Objects in linux/
 xfs-y				+= $(addprefix $(XFS_LINUX)/, \
@@ -106,7 +106,7 @@ xfs-y				+= $(addprefix $(XFS_LINUX)/, \
 				   xfs_iops.o \
 				   xfs_lrw.o \
 				   xfs_super.o \
-				   xfs_vnode.o \
+				   xfs_sync.o \
 				   xfs_xattr.o)
 
 # Objects in support/

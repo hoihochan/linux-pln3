@@ -429,7 +429,7 @@ SIMPLE_PORT_ATTR(promiscuous);
 SIMPLE_PORT_ATTR(num_mcast);
 CUSTOM_PORT_ATTR(lpar_map, "0x%X\n", port->lpar_map);
 CUSTOM_PORT_ATTR(stopped_map, "0x%X\n", port->stopped_map);
-CUSTOM_PORT_ATTR(mac_addr, "0x%lX\n", port->mac_addr);
+CUSTOM_PORT_ATTR(mac_addr, "0x%llX\n", port->mac_addr);
 
 #define GET_PORT_ATTR(_name)	(&veth_port_attr_##_name.attr)
 static struct attribute *veth_port_default_attrs[] = {
@@ -952,7 +952,7 @@ static int veth_change_mtu(struct net_device *dev, int new_mtu)
 
 static void veth_set_multicast_list(struct net_device *dev)
 {
-	struct veth_port *port = (struct veth_port *) dev->priv;
+	struct veth_port *port = netdev_priv(dev);
 	unsigned long flags;
 
 	write_lock_irqsave(&port->mcast_gate, flags);
@@ -1021,6 +1021,16 @@ static const struct ethtool_ops ops = {
 	.get_link = veth_get_link,
 };
 
+static const struct net_device_ops veth_netdev_ops = {
+	.ndo_open		= veth_open,
+	.ndo_stop		= veth_close,
+	.ndo_start_xmit		= veth_start_xmit,
+	.ndo_change_mtu		= veth_change_mtu,
+	.ndo_set_multicast_list	= veth_set_multicast_list,
+	.ndo_set_mac_address	= NULL,
+	.ndo_validate_addr	= eth_validate_addr,
+};
+
 static struct net_device *veth_probe_one(int vlan,
 		struct vio_dev *vio_dev)
 {
@@ -1044,7 +1054,7 @@ static struct net_device *veth_probe_one(int vlan,
 		return NULL;
 	}
 
-	port = (struct veth_port *) dev->priv;
+	port = netdev_priv(dev);
 
 	spin_lock_init(&port->queue_lock);
 	rwlock_init(&port->mcast_gate);
@@ -1067,12 +1077,7 @@ static struct net_device *veth_probe_one(int vlan,
 
 	memcpy(&port->mac_addr, mac_addr, ETH_ALEN);
 
-	dev->open = veth_open;
-	dev->hard_start_xmit = veth_start_xmit;
-	dev->stop = veth_close;
-	dev->change_mtu = veth_change_mtu;
-	dev->set_mac_address = NULL;
-	dev->set_multicast_list = veth_set_multicast_list;
+	dev->netdev_ops = &veth_netdev_ops;
 	SET_ETHTOOL_OPS(dev, &ops);
 
 	SET_NETDEV_DEV(dev, vdev);
@@ -1102,7 +1107,7 @@ static int veth_transmit_to_one(struct sk_buff *skb, HvLpIndex rlp,
 				struct net_device *dev)
 {
 	struct veth_lpar_connection *cnx = veth_cnx[rlp];
-	struct veth_port *port = (struct veth_port *) dev->priv;
+	struct veth_port *port = netdev_priv(dev);
 	HvLpEvent_Rc rc;
 	struct veth_msg *msg = NULL;
 	unsigned long flags;
@@ -1191,7 +1196,7 @@ static void veth_transmit_to_many(struct sk_buff *skb,
 static int veth_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	unsigned char *frame = skb->data;
-	struct veth_port *port = (struct veth_port *) dev->priv;
+	struct veth_port *port = netdev_priv(dev);
 	HvLpIndexMap lpmask;
 
 	if (! (frame[0] & 0x01)) {
@@ -1200,7 +1205,7 @@ static int veth_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 		if ( ! ((1 << rlp) & port->lpar_map) ) {
 			dev_kfree_skb(skb);
-			return 0;
+			return NETDEV_TX_OK;
 		}
 
 		lpmask = 1 << rlp;
@@ -1212,7 +1217,7 @@ static int veth_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	dev_kfree_skb(skb);
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /* You must hold the connection's lock when you call this function. */
@@ -1255,7 +1260,7 @@ static void veth_wake_queues(struct veth_lpar_connection *cnx)
 		if (! dev)
 			continue;
 
-		port = (struct veth_port *)dev->priv;
+		port = netdev_priv(dev);
 
 		if (! (port->lpar_map & (1<<cnx->remote_lp)))
 			continue;
@@ -1284,7 +1289,7 @@ static void veth_stop_queues(struct veth_lpar_connection *cnx)
 		if (! dev)
 			continue;
 
-		port = (struct veth_port *)dev->priv;
+		port = netdev_priv(dev);
 
 		/* If this cnx is not on the vlan for this port, continue */
 		if (! (port->lpar_map & (1 << cnx->remote_lp)))
@@ -1506,7 +1511,7 @@ static void veth_receive(struct veth_lpar_connection *cnx,
 			continue;
 		}
 
-		port = (struct veth_port *)dev->priv;
+		port = netdev_priv(dev);
 		dest = *((u64 *) skb->data) & 0xFFFFFFFFFFFF0000;
 
 		if ((vlan > HVMAXARCHITECTEDVIRTUALLANS) || !port) {

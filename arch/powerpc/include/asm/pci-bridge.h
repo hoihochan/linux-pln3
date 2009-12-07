@@ -13,7 +13,6 @@
 
 struct device_node;
 
-extern unsigned int ppc_pci_flags;
 enum {
 	/* Force re-assigning all resources (ignore firmware
 	 * setup completely)
@@ -36,6 +35,31 @@ enum {
 	/* ... except for domain 0 */
 	PPC_PCI_COMPAT_DOMAIN_0		= 0x00000020,
 };
+#ifdef CONFIG_PCI
+extern unsigned int ppc_pci_flags;
+
+static inline void ppc_pci_set_flags(int flags)
+{
+	ppc_pci_flags = flags;
+}
+
+static inline void ppc_pci_add_flags(int flags)
+{
+	ppc_pci_flags |= flags;
+}
+
+static inline int ppc_pci_has_flag(int flag)
+{
+	return (ppc_pci_flags & flag);
+}
+#else
+static inline void ppc_pci_set_flags(int flags) { }
+static inline void ppc_pci_add_flags(int flags) { }
+static inline int ppc_pci_has_flag(int flag)
+{
+	return 0;
+}
+#endif
 
 
 /*
@@ -53,32 +77,31 @@ struct pci_controller {
 
 	int first_busno;
 	int last_busno;
-#ifndef CONFIG_PPC64
 	int self_busno;
-#endif
 
 	void __iomem *io_base_virt;
 #ifdef CONFIG_PPC64
 	void *io_base_alloc;
 #endif
 	resource_size_t io_base_phys;
-#ifndef CONFIG_PPC64
 	resource_size_t pci_io_size;
-#endif
 
 	/* Some machines (PReP) have a non 1:1 mapping of
 	 * the PCI memory space in the CPU bus space
 	 */
 	resource_size_t pci_mem_offset;
-#ifdef CONFIG_PPC64
-	unsigned long pci_io_size;
-#endif
+
+	/* Some machines have a special region to forward the ISA
+	 * "memory" cycles such as VGA memory regions. Left to 0
+	 * if unsupported
+	 */
+	resource_size_t	isa_mem_phys;
+	resource_size_t	isa_mem_size;
 
 	struct pci_ops *ops;
 	unsigned int __iomem *cfg_addr;
 	void __iomem *cfg_data;
 
-#ifndef CONFIG_PPC64
 	/*
 	 * Used for variants of PCI indirect handling and possible quirks:
 	 *  SET_CFG_TYPE - used on 4xx or any PHB that does explicit type0/1
@@ -102,36 +125,22 @@ struct pci_controller {
 #define PPC_INDIRECT_TYPE_BIG_ENDIAN		0x00000010
 #define PPC_INDIRECT_TYPE_BROKEN_MRM		0x00000020
 	u32 indirect_type;
-#endif	/* !CONFIG_PPC64 */
 	/* Currently, we limit ourselves to 1 IO range and 3 mem
 	 * ranges since the common pci_bus structure can't handle more
 	 */
 	struct resource	io_resource;
 	struct resource mem_resources[3];
 	int global_number;		/* PCI domain number */
+
+	resource_size_t dma_window_base_cur;
+	resource_size_t dma_window_size;
+
 #ifdef CONFIG_PPC64
 	unsigned long buid;
-	unsigned long dma_window_base_cur;
-	unsigned long dma_window_size;
 
 	void *private_data;
 #endif	/* CONFIG_PPC64 */
 };
-
-#ifndef CONFIG_PPC64
-
-static inline struct pci_controller *pci_bus_to_host(const struct pci_bus *bus)
-{
-	return bus->sysdata;
-}
-
-static inline int isa_vaddr_is_ioport(void __iomem *address)
-{
-	/* No specific ISA handling on ppc32 at this stage, it
-	 * all goes through PCI
-	 */
-	return 0;
-}
 
 /* These are used for config access before all the PCI probing
    has been done. */
@@ -154,7 +163,22 @@ extern int early_find_capability(struct pci_controller *hose, int bus,
 extern void setup_indirect_pci(struct pci_controller* hose,
 			       resource_size_t cfg_addr,
 			       resource_size_t cfg_data, u32 flags);
-extern void setup_grackle(struct pci_controller *hose);
+
+#ifndef CONFIG_PPC64
+
+static inline struct pci_controller *pci_bus_to_host(const struct pci_bus *bus)
+{
+	return bus->sysdata;
+}
+
+static inline int isa_vaddr_is_ioport(void __iomem *address)
+{
+	/* No specific ISA handling on ppc32 at this stage, it
+	 * all goes through PCI
+	 */
+	return 0;
+}
+
 #else	/* CONFIG_PPC64 */
 
 /*
@@ -190,6 +214,7 @@ struct pci_dn {
 #define PCI_DN(dn)	((struct pci_dn *) (dn)->data)
 
 extern struct device_node *fetch_dev_dn(struct pci_dev *dev);
+extern void * update_dn_pci_info(struct device_node *dn, void *data);
 
 /* Get a device_node from a pci_dev.  This code must be fast except
  * in the case where the sysdata is incorrect and needs to be fixed
@@ -234,9 +259,6 @@ extern void pcibios_remove_pci_devices(struct pci_bus *bus);
 
 /** Discover new pci devices under this bus, and add them */
 extern void pcibios_add_pci_devices(struct pci_bus *bus);
-extern void pcibios_fixup_new_pci_devices(struct pci_bus *bus);
-
-extern int pcibios_remove_root_bus(struct pci_controller *phb);
 
 static inline struct pci_controller *pci_bus_to_host(const struct pci_bus *bus)
 {
@@ -259,11 +281,6 @@ static inline int isa_vaddr_is_ioport(void __iomem *address)
 extern int pcibios_unmap_io_space(struct pci_bus *bus);
 extern int pcibios_map_io_space(struct pci_bus *bus);
 
-/* Return values for ppc_md.pci_probe_mode function */
-#define PCI_PROBE_NONE		-1	/* Don't look at this bus at all */
-#define PCI_PROBE_NORMAL	0	/* Do normal PCI probing */
-#define PCI_PROBE_DEVTREE	1	/* Instantiate from device tree */
-
 #ifdef CONFIG_NUMA
 #define PHB_SET_NODE(PHB, NODE)		((PHB)->node = (NODE))
 #else
@@ -283,6 +300,7 @@ extern void pci_process_bridge_OF_ranges(struct pci_controller *hose,
 /* Allocate & free a PCI host bridge structure */
 extern struct pci_controller *pcibios_alloc_controller(struct device_node *dev);
 extern void pcibios_free_controller(struct pci_controller *phb);
+extern void pcibios_setup_phb_resources(struct pci_controller *hose);
 
 #ifdef CONFIG_PCI
 extern unsigned long pci_address_to_pio(phys_addr_t address);

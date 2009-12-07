@@ -14,6 +14,7 @@
 #include <linux/prctl.h>
 #include <linux/highuid.h>
 #include <linux/fs.h>
+#include <linux/perf_event.h>
 #include <linux/resource.h>
 #include <linux/kernel.h>
 #include <linux/kexec.h>
@@ -33,6 +34,8 @@
 #include <linux/task_io_accounting_ops.h>
 #include <linux/seccomp.h>
 #include <linux/cpu.h>
+#include <linux/ptrace.h>
+#include <linux/fs_struct.h>
 
 #include <linux/compat.h>
 #include <linux/syscalls.h>
@@ -112,12 +115,17 @@ EXPORT_SYMBOL(cad_pid);
 
 void (*pm_power_off_prepare)(void);
 
+/*
+ * set the priority of a task
+ * - the caller must hold the RCU read lock
+ */
 static int set_one_prio(struct task_struct *p, int niceval, int error)
 {
+	const struct cred *cred = current_cred(), *pcred = __task_cred(p);
 	int no_nice;
 
-	if (p->uid != current->euid &&
-		p->euid != current->euid && !capable(CAP_SYS_NICE)) {
+	if (pcred->uid  != cred->euid &&
+	    pcred->euid != cred->euid && !capable(CAP_SYS_NICE)) {
 		error = -EPERM;
 		goto out;
 	}
@@ -141,6 +149,7 @@ SYSCALL_DEFINE3(setpriority, int, which, int, who, int, niceval)
 {
 	struct task_struct *g, *p;
 	struct user_struct *user;
+	const struct cred *cred = current_cred();
 	int error = -EINVAL;
 	struct pid *pgrp;
 
@@ -174,18 +183,18 @@ SYSCALL_DEFINE3(setpriority, int, which, int, who, int, niceval)
 			} while_each_pid_thread(pgrp, PIDTYPE_PGID, p);
 			break;
 		case PRIO_USER:
-			user = current->user;
+			user = (struct user_struct *) cred->user;
 			if (!who)
-				who = current->uid;
-			else
-				if ((who != current->uid) && !(user = find_user(who)))
-					goto out_unlock;	/* No processes for this user */
+				who = cred->uid;
+			else if ((who != cred->uid) &&
+				 !(user = find_user(who)))
+				goto out_unlock;	/* No processes for this user */
 
 			do_each_thread(g, p)
-				if (p->uid == who)
+				if (__task_cred(p)->uid == who)
 					error = set_one_prio(p, niceval, error);
 			while_each_thread(g, p);
-			if (who != current->uid)
+			if (who != cred->uid)
 				free_uid(user);		/* For find_user() */
 			break;
 	}
@@ -205,6 +214,7 @@ SYSCALL_DEFINE2(getpriority, int, which, int, who)
 {
 	struct task_struct *g, *p;
 	struct user_struct *user;
+	const struct cred *cred = current_cred();
 	long niceval, retval = -ESRCH;
 	struct pid *pgrp;
 
@@ -236,21 +246,21 @@ SYSCALL_DEFINE2(getpriority, int, which, int, who)
 			} while_each_pid_thread(pgrp, PIDTYPE_PGID, p);
 			break;
 		case PRIO_USER:
-			user = current->user;
+			user = (struct user_struct *) cred->user;
 			if (!who)
-				who = current->uid;
-			else
-				if ((who != current->uid) && !(user = find_user(who)))
-					goto out_unlock;	/* No processes for this user */
+				who = cred->uid;
+			else if ((who != cred->uid) &&
+				 !(user = find_user(who)))
+				goto out_unlock;	/* No processes for this user */
 
 			do_each_thread(g, p)
-				if (p->uid == who) {
+				if (__task_cred(p)->uid == who) {
 					niceval = 20 - task_nice(p);
 					if (niceval > retval)
 						retval = niceval;
 				}
 			while_each_thread(g, p);
-			if (who != current->uid)
+			if (who != cred->uid)
 				free_uid(user);		/* for find_user() */
 			break;
 	}
@@ -351,6 +361,7 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
 		void __user *, arg)
 {
 	char buffer[256];
+	int ret = 0;
 
 	/* We only trust the superuser with rebooting the system. */
 	if (!capable(CAP_SYS_BOOT))
@@ -388,7 +399,7 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
 		kernel_halt();
 		unlock_kernel();
 		do_exit(0);
-		break;
+		panic("cannot halt");
 
 	case LINUX_REBOOT_CMD_POWER_OFF:
 		kernel_power_off();
@@ -408,29 +419,22 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
 
 #ifdef CONFIG_KEXEC
 	case LINUX_REBOOT_CMD_KEXEC:
-		{
-			int ret;
-			ret = kernel_kexec();
-			unlock_kernel();
-			return ret;
-		}
+		ret = kernel_kexec();
+		break;
 #endif
 
 #ifdef CONFIG_HIBERNATION
 	case LINUX_REBOOT_CMD_SW_SUSPEND:
-		{
-			int ret = hibernate();
-			unlock_kernel();
-			return ret;
-		}
+		ret = hibernate();
+		break;
 #endif
 
 	default:
-		unlock_kernel();
-		return -EINVAL;
+		ret = -EINVAL;
+		break;
 	}
 	unlock_kernel();
-	return 0;
+	return ret;
 }
 
 static void deferred_cad(struct work_struct *dummy)
@@ -473,46 +477,48 @@ void ctrl_alt_del(void)
  */
 SYSCALL_DEFINE2(setregid, gid_t, rgid, gid_t, egid)
 {
-	int old_rgid = current->gid;
-	int old_egid = current->egid;
-	int new_rgid = old_rgid;
-	int new_egid = old_egid;
+	const struct cred *old;
+	struct cred *new;
 	int retval;
+
+	new = prepare_creds();
+	if (!new)
+		return -ENOMEM;
+	old = current_cred();
 
 	retval = security_task_setgid(rgid, egid, (gid_t)-1, LSM_SETID_RE);
 	if (retval)
-		return retval;
+		goto error;
 
+	retval = -EPERM;
 	if (rgid != (gid_t) -1) {
-		if ((old_rgid == rgid) ||
-		    (current->egid==rgid) ||
+		if (old->gid == rgid ||
+		    old->egid == rgid ||
 		    capable(CAP_SETGID))
-			new_rgid = rgid;
+			new->gid = rgid;
 		else
-			return -EPERM;
+			goto error;
 	}
 	if (egid != (gid_t) -1) {
-		if ((old_rgid == egid) ||
-		    (current->egid == egid) ||
-		    (current->sgid == egid) ||
+		if (old->gid == egid ||
+		    old->egid == egid ||
+		    old->sgid == egid ||
 		    capable(CAP_SETGID))
-			new_egid = egid;
+			new->egid = egid;
 		else
-			return -EPERM;
+			goto error;
 	}
-	if (new_egid != old_egid) {
-		set_dumpable(current->mm, suid_dumpable);
-		smp_wmb();
-	}
+
 	if (rgid != (gid_t) -1 ||
-	    (egid != (gid_t) -1 && egid != old_rgid))
-		current->sgid = new_egid;
-	current->fsgid = new_egid;
-	current->egid = new_egid;
-	current->gid = new_rgid;
-	key_fsgid_changed(current);
-	proc_id_connector(current, PROC_EVENT_GID);
-	return 0;
+	    (egid != (gid_t) -1 && egid != old->gid))
+		new->sgid = new->egid;
+	new->fsgid = new->egid;
+
+	return commit_creds(new);
+
+error:
+	abort_creds(new);
+	return retval;
 }
 
 /*
@@ -522,56 +528,59 @@ SYSCALL_DEFINE2(setregid, gid_t, rgid, gid_t, egid)
  */
 SYSCALL_DEFINE1(setgid, gid_t, gid)
 {
-	int old_egid = current->egid;
+	const struct cred *old;
+	struct cred *new;
 	int retval;
+
+	new = prepare_creds();
+	if (!new)
+		return -ENOMEM;
+	old = current_cred();
 
 	retval = security_task_setgid(gid, (gid_t)-1, (gid_t)-1, LSM_SETID_ID);
 	if (retval)
-		return retval;
+		goto error;
 
-	if (capable(CAP_SETGID)) {
-		if (old_egid != gid) {
-			set_dumpable(current->mm, suid_dumpable);
-			smp_wmb();
-		}
-		current->gid = current->egid = current->sgid = current->fsgid = gid;
-	} else if ((gid == current->gid) || (gid == current->sgid)) {
-		if (old_egid != gid) {
-			set_dumpable(current->mm, suid_dumpable);
-			smp_wmb();
-		}
-		current->egid = current->fsgid = gid;
-	}
+	retval = -EPERM;
+	if (capable(CAP_SETGID))
+		new->gid = new->egid = new->sgid = new->fsgid = gid;
+	else if (gid == old->gid || gid == old->sgid)
+		new->egid = new->fsgid = gid;
 	else
-		return -EPERM;
+		goto error;
 
-	key_fsgid_changed(current);
-	proc_id_connector(current, PROC_EVENT_GID);
-	return 0;
+	return commit_creds(new);
+
+error:
+	abort_creds(new);
+	return retval;
 }
-  
-static int set_user(uid_t new_ruid, int dumpclear)
+
+/*
+ * change the user struct in a credentials set to match the new UID
+ */
+static int set_user(struct cred *new)
 {
 	struct user_struct *new_user;
 
-	new_user = alloc_uid(current->nsproxy->user_ns, new_ruid);
+	new_user = alloc_uid(current_user_ns(), new->uid);
 	if (!new_user)
 		return -EAGAIN;
 
+	if (!task_can_switch_user(new_user, current)) {
+		free_uid(new_user);
+		return -EINVAL;
+	}
+
 	if (atomic_read(&new_user->processes) >=
 				current->signal->rlim[RLIMIT_NPROC].rlim_cur &&
-			new_user != current->nsproxy->user_ns->root_user) {
+			new_user != INIT_USER) {
 		free_uid(new_user);
 		return -EAGAIN;
 	}
 
-	switch_uid(new_user);
-
-	if (dumpclear) {
-		set_dumpable(current->mm, suid_dumpable);
-		smp_wmb();
-	}
-	current->uid = new_ruid;
+	free_uid(new->user);
+	new->user = new_user;
 	return 0;
 }
 
@@ -592,54 +601,57 @@ static int set_user(uid_t new_ruid, int dumpclear)
  */
 SYSCALL_DEFINE2(setreuid, uid_t, ruid, uid_t, euid)
 {
-	int old_ruid, old_euid, old_suid, new_ruid, new_euid;
+	const struct cred *old;
+	struct cred *new;
 	int retval;
+
+	new = prepare_creds();
+	if (!new)
+		return -ENOMEM;
+	old = current_cred();
 
 	retval = security_task_setuid(ruid, euid, (uid_t)-1, LSM_SETID_RE);
 	if (retval)
-		return retval;
+		goto error;
 
-	new_ruid = old_ruid = current->uid;
-	new_euid = old_euid = current->euid;
-	old_suid = current->suid;
-
+	retval = -EPERM;
 	if (ruid != (uid_t) -1) {
-		new_ruid = ruid;
-		if ((old_ruid != ruid) &&
-		    (current->euid != ruid) &&
+		new->uid = ruid;
+		if (old->uid != ruid &&
+		    old->euid != ruid &&
 		    !capable(CAP_SETUID))
-			return -EPERM;
+			goto error;
 	}
 
 	if (euid != (uid_t) -1) {
-		new_euid = euid;
-		if ((old_ruid != euid) &&
-		    (current->euid != euid) &&
-		    (current->suid != euid) &&
+		new->euid = euid;
+		if (old->uid != euid &&
+		    old->euid != euid &&
+		    old->suid != euid &&
 		    !capable(CAP_SETUID))
-			return -EPERM;
+			goto error;
 	}
 
-	if (new_ruid != old_ruid && set_user(new_ruid, new_euid != old_euid) < 0)
-		return -EAGAIN;
-
-	if (new_euid != old_euid) {
-		set_dumpable(current->mm, suid_dumpable);
-		smp_wmb();
+	if (new->uid != old->uid) {
+		retval = set_user(new);
+		if (retval < 0)
+			goto error;
 	}
-	current->fsuid = current->euid = new_euid;
 	if (ruid != (uid_t) -1 ||
-	    (euid != (uid_t) -1 && euid != old_ruid))
-		current->suid = current->euid;
-	current->fsuid = current->euid;
+	    (euid != (uid_t) -1 && euid != old->uid))
+		new->suid = new->euid;
+	new->fsuid = new->euid;
 
-	key_fsuid_changed(current);
-	proc_id_connector(current, PROC_EVENT_UID);
+	retval = security_task_fix_setuid(new, old, LSM_SETID_RE);
+	if (retval < 0)
+		goto error;
 
-	return security_task_post_setuid(old_ruid, old_euid, old_suid, LSM_SETID_RE);
+	return commit_creds(new);
+
+error:
+	abort_creds(new);
+	return retval;
 }
-
-
 		
 /*
  * setuid() is implemented like SysV with SAVED_IDS 
@@ -654,36 +666,42 @@ SYSCALL_DEFINE2(setreuid, uid_t, ruid, uid_t, euid)
  */
 SYSCALL_DEFINE1(setuid, uid_t, uid)
 {
-	int old_euid = current->euid;
-	int old_ruid, old_suid, new_suid;
+	const struct cred *old;
+	struct cred *new;
 	int retval;
+
+	new = prepare_creds();
+	if (!new)
+		return -ENOMEM;
+	old = current_cred();
 
 	retval = security_task_setuid(uid, (uid_t)-1, (uid_t)-1, LSM_SETID_ID);
 	if (retval)
-		return retval;
+		goto error;
 
-	old_ruid = current->uid;
-	old_suid = current->suid;
-	new_suid = old_suid;
-	
+	retval = -EPERM;
 	if (capable(CAP_SETUID)) {
-		if (uid != old_ruid && set_user(uid, old_euid != uid) < 0)
-			return -EAGAIN;
-		new_suid = uid;
-	} else if ((uid != current->uid) && (uid != new_suid))
-		return -EPERM;
-
-	if (old_euid != uid) {
-		set_dumpable(current->mm, suid_dumpable);
-		smp_wmb();
+		new->suid = new->uid = uid;
+		if (uid != old->uid) {
+			retval = set_user(new);
+			if (retval < 0)
+				goto error;
+		}
+	} else if (uid != old->uid && uid != new->suid) {
+		goto error;
 	}
-	current->fsuid = current->euid = uid;
-	current->suid = new_suid;
 
-	key_fsuid_changed(current);
-	proc_id_connector(current, PROC_EVENT_UID);
+	new->fsuid = new->euid = uid;
 
-	return security_task_post_setuid(old_ruid, old_euid, old_suid, LSM_SETID_ID);
+	retval = security_task_fix_setuid(new, old, LSM_SETID_ID);
+	if (retval < 0)
+		goto error;
+
+	return commit_creds(new);
+
+error:
+	abort_creds(new);
+	return retval;
 }
 
 
@@ -693,54 +711,65 @@ SYSCALL_DEFINE1(setuid, uid_t, uid)
  */
 SYSCALL_DEFINE3(setresuid, uid_t, ruid, uid_t, euid, uid_t, suid)
 {
-	int old_ruid = current->uid;
-	int old_euid = current->euid;
-	int old_suid = current->suid;
+	const struct cred *old;
+	struct cred *new;
 	int retval;
+
+	new = prepare_creds();
+	if (!new)
+		return -ENOMEM;
 
 	retval = security_task_setuid(ruid, euid, suid, LSM_SETID_RES);
 	if (retval)
-		return retval;
+		goto error;
+	old = current_cred();
 
+	retval = -EPERM;
 	if (!capable(CAP_SETUID)) {
-		if ((ruid != (uid_t) -1) && (ruid != current->uid) &&
-		    (ruid != current->euid) && (ruid != current->suid))
-			return -EPERM;
-		if ((euid != (uid_t) -1) && (euid != current->uid) &&
-		    (euid != current->euid) && (euid != current->suid))
-			return -EPERM;
-		if ((suid != (uid_t) -1) && (suid != current->uid) &&
-		    (suid != current->euid) && (suid != current->suid))
-			return -EPERM;
+		if (ruid != (uid_t) -1 && ruid != old->uid &&
+		    ruid != old->euid  && ruid != old->suid)
+			goto error;
+		if (euid != (uid_t) -1 && euid != old->uid &&
+		    euid != old->euid  && euid != old->suid)
+			goto error;
+		if (suid != (uid_t) -1 && suid != old->uid &&
+		    suid != old->euid  && suid != old->suid)
+			goto error;
 	}
+
 	if (ruid != (uid_t) -1) {
-		if (ruid != current->uid && set_user(ruid, euid != current->euid) < 0)
-			return -EAGAIN;
-	}
-	if (euid != (uid_t) -1) {
-		if (euid != current->euid) {
-			set_dumpable(current->mm, suid_dumpable);
-			smp_wmb();
+		new->uid = ruid;
+		if (ruid != old->uid) {
+			retval = set_user(new);
+			if (retval < 0)
+				goto error;
 		}
-		current->euid = euid;
 	}
-	current->fsuid = current->euid;
+	if (euid != (uid_t) -1)
+		new->euid = euid;
 	if (suid != (uid_t) -1)
-		current->suid = suid;
+		new->suid = suid;
+	new->fsuid = new->euid;
 
-	key_fsuid_changed(current);
-	proc_id_connector(current, PROC_EVENT_UID);
+	retval = security_task_fix_setuid(new, old, LSM_SETID_RES);
+	if (retval < 0)
+		goto error;
 
-	return security_task_post_setuid(old_ruid, old_euid, old_suid, LSM_SETID_RES);
+	return commit_creds(new);
+
+error:
+	abort_creds(new);
+	return retval;
 }
 
 SYSCALL_DEFINE3(getresuid, uid_t __user *, ruid, uid_t __user *, euid, uid_t __user *, suid)
 {
+	const struct cred *cred = current_cred();
 	int retval;
 
-	if (!(retval = put_user(current->uid, ruid)) &&
-	    !(retval = put_user(current->euid, euid)))
-		retval = put_user(current->suid, suid);
+	if (!(retval   = put_user(cred->uid,  ruid)) &&
+	    !(retval   = put_user(cred->euid, euid)))
+		retval = put_user(cred->suid, suid);
 
 	return retval;
 }
@@ -750,48 +779,55 @@ SYSCALL_DEFINE3(getresuid, uid_t __user *, ruid, uid_t __user *, euid, uid_t __u
  */
 SYSCALL_DEFINE3(setresgid, gid_t, rgid, gid_t, egid, gid_t, sgid)
 {
+	const struct cred *old;
+	struct cred *new;
 	int retval;
+
+	new = prepare_creds();
+	if (!new)
+		return -ENOMEM;
+	old = current_cred();
 
 	retval = security_task_setgid(rgid, egid, sgid, LSM_SETID_RES);
 	if (retval)
-		return retval;
+		goto error;
 
+	retval = -EPERM;
 	if (!capable(CAP_SETGID)) {
-		if ((rgid != (gid_t) -1) && (rgid != current->gid) &&
-		    (rgid != current->egid) && (rgid != current->sgid))
-			return -EPERM;
-		if ((egid != (gid_t) -1) && (egid != current->gid) &&
-		    (egid != current->egid) && (egid != current->sgid))
-			return -EPERM;
-		if ((sgid != (gid_t) -1) && (sgid != current->gid) &&
-		    (sgid != current->egid) && (sgid != current->sgid))
-			return -EPERM;
+		if (rgid != (gid_t) -1 && rgid != old->gid &&
+		    rgid != old->egid  && rgid != old->sgid)
+			goto error;
+		if (egid != (gid_t) -1 && egid != old->gid &&
+		    egid != old->egid  && egid != old->sgid)
+			goto error;
+		if (sgid != (gid_t) -1 && sgid != old->gid &&
+		    sgid != old->egid  && sgid != old->sgid)
+			goto error;
 	}
-	if (egid != (gid_t) -1) {
-		if (egid != current->egid) {
-			set_dumpable(current->mm, suid_dumpable);
-			smp_wmb();
-		}
-		current->egid = egid;
-	}
-	current->fsgid = current->egid;
-	if (rgid != (gid_t) -1)
-		current->gid = rgid;
-	if (sgid != (gid_t) -1)
-		current->sgid = sgid;
 
-	key_fsgid_changed(current);
-	proc_id_connector(current, PROC_EVENT_GID);
-	return 0;
+	if (rgid != (gid_t) -1)
+		new->gid = rgid;
+	if (egid != (gid_t) -1)
+		new->egid = egid;
+	if (sgid != (gid_t) -1)
+		new->sgid = sgid;
+	new->fsgid = new->egid;
+
+	return commit_creds(new);
+
+error:
+	abort_creds(new);
+	return retval;
 }
 
 SYSCALL_DEFINE3(getresgid, gid_t __user *, rgid, gid_t __user *, egid, gid_t __user *, sgid)
 {
+	const struct cred *cred = current_cred();
 	int retval;
 
-	if (!(retval = put_user(current->gid, rgid)) &&
-	    !(retval = put_user(current->egid, egid)))
-		retval = put_user(current->sgid, sgid);
+	if (!(retval   = put_user(cred->gid,  rgid)) &&
+	    !(retval   = put_user(cred->egid, egid)))
+		retval = put_user(cred->sgid, sgid);
 
 	return retval;
 }
@@ -805,27 +841,35 @@ SYSCALL_DEFINE3(getresgid, gid_t __user *, rgid, gid_t __user *, egid, gid_t __u
  */
 SYSCALL_DEFINE1(setfsuid, uid_t, uid)
 {
-	int old_fsuid;
+	const struct cred *old;
+	struct cred *new;
+	uid_t old_fsuid;
 
-	old_fsuid = current->fsuid;
-	if (security_task_setuid(uid, (uid_t)-1, (uid_t)-1, LSM_SETID_FS))
-		return old_fsuid;
+	new = prepare_creds();
+	if (!new)
+		return current_fsuid();
+	old = current_cred();
+	old_fsuid = old->fsuid;
 
-	if (uid == current->uid || uid == current->euid ||
-	    uid == current->suid || uid == current->fsuid || 
+	if (security_task_setuid(uid, (uid_t)-1, (uid_t)-1, LSM_SETID_FS) < 0)
+		goto error;
+
+	if (uid == old->uid  || uid == old->euid  ||
+	    uid == old->suid || uid == old->fsuid ||
 	    capable(CAP_SETUID)) {
 		if (uid != old_fsuid) {
-			set_dumpable(current->mm, suid_dumpable);
-			smp_wmb();
+			new->fsuid = uid;
+			if (security_task_fix_setuid(new, old, LSM_SETID_FS) == 0)
+				goto change_okay;
 		}
-		current->fsuid = uid;
 	}
 
-	key_fsuid_changed(current);
-	proc_id_connector(current, PROC_EVENT_UID);
+error:
+	abort_creds(new);
+	return old_fsuid;
 
-	security_task_post_setuid(old_fsuid, (uid_t)-1, (uid_t)-1, LSM_SETID_FS);
-
+change_okay:
+	commit_creds(new);
 	return old_fsuid;
 }
 
@@ -834,61 +878,63 @@ SYSCALL_DEFINE1(setfsuid, uid_t, uid)
  */
 SYSCALL_DEFINE1(setfsgid, gid_t, gid)
 {
-	int old_fsgid;
+	const struct cred *old;
+	struct cred *new;
+	gid_t old_fsgid;
 
-	old_fsgid = current->fsgid;
+	new = prepare_creds();
+	if (!new)
+		return current_fsgid();
+	old = current_cred();
+	old_fsgid = old->fsgid;
+
 	if (security_task_setgid(gid, (gid_t)-1, (gid_t)-1, LSM_SETID_FS))
-		return old_fsgid;
+		goto error;
 
-	if (gid == current->gid || gid == current->egid ||
-	    gid == current->sgid || gid == current->fsgid || 
+	if (gid == old->gid  || gid == old->egid  ||
+	    gid == old->sgid || gid == old->fsgid ||
 	    capable(CAP_SETGID)) {
 		if (gid != old_fsgid) {
-			set_dumpable(current->mm, suid_dumpable);
-			smp_wmb();
+			new->fsgid = gid;
+			goto change_okay;
 		}
-		current->fsgid = gid;
-		key_fsgid_changed(current);
-		proc_id_connector(current, PROC_EVENT_GID);
 	}
+
+error:
+	abort_creds(new);
 	return old_fsgid;
+
+change_okay:
+	commit_creds(new);
+	return old_fsgid;
+}
+
+void do_sys_times(struct tms *tms)
+{
+	struct task_cputime cputime;
+	cputime_t cutime, cstime;
+
+	thread_group_cputime(current, &cputime);
+	spin_lock_irq(&current->sighand->siglock);
+	cutime = current->signal->cutime;
+	cstime = current->signal->cstime;
+	spin_unlock_irq(&current->sighand->siglock);
+	tms->tms_utime = cputime_to_clock_t(cputime.utime);
+	tms->tms_stime = cputime_to_clock_t(cputime.stime);
+	tms->tms_cutime = cputime_to_clock_t(cutime);
+	tms->tms_cstime = cputime_to_clock_t(cstime);
 }
 
 SYSCALL_DEFINE1(times, struct tms __user *, tbuf)
 {
-	/*
-	 *	In the SMP world we might just be unlucky and have one of
-	 *	the times increment as we use it. Since the value is an
-	 *	atomically safe type this is just fine. Conceptually its
-	 *	as if the syscall took an instant longer to occur.
-	 */
 	if (tbuf) {
 		struct tms tmp;
-		struct task_struct *tsk = current;
-		struct task_struct *t;
-		cputime_t utime, stime, cutime, cstime;
 
-		spin_lock_irq(&tsk->sighand->siglock);
-		utime = tsk->signal->utime;
-		stime = tsk->signal->stime;
-		t = tsk;
-		do {
-			utime = cputime_add(utime, t->utime);
-			stime = cputime_add(stime, t->stime);
-			t = next_thread(t);
-		} while (t != tsk);
-
-		cutime = tsk->signal->cutime;
-		cstime = tsk->signal->cstime;
-		spin_unlock_irq(&tsk->sighand->siglock);
-
-		tmp.tms_utime = cputime_to_clock_t(utime);
-		tmp.tms_stime = cputime_to_clock_t(stime);
-		tmp.tms_cutime = cputime_to_clock_t(cutime);
-		tmp.tms_cstime = cputime_to_clock_t(cstime);
+		do_sys_times(&tmp);
 		if (copy_to_user(tbuf, &tmp, sizeof(struct tms)))
 			return -EFAULT;
 	}
+	force_successful_syscall_return();
 	return (long) jiffies_64_to_clock_t(get_jiffies_64());
 }
 
@@ -963,10 +1009,8 @@ SYSCALL_DEFINE2(setpgid, pid_t, pid, pid_t, pgid)
 	if (err)
 		goto out;
 
-	if (task_pgrp(p) != pgrp) {
+	if (task_pgrp(p) != pgrp)
 		change_pid(p, PIDTYPE_PGID, pgrp);
-		set_task_pgrp(p, pid_nr(pgrp));
-	}
 
 	err = 0;
 out:
@@ -1061,271 +1105,15 @@ SYSCALL_DEFINE0(setsid)
 	group_leader->signal->leader = 1;
 	__set_special_pids(sid);
 
-	spin_lock(&group_leader->sighand->siglock);
-	group_leader->signal->tty = NULL;
-	spin_unlock(&group_leader->sighand->siglock);
+	proc_clear_tty(group_leader);
 
 	err = session;
 out:
 	write_unlock_irq(&tasklist_lock);
+	if (err > 0)
+		proc_sid_connector(group_leader);
 	return err;
 }
-
-/*
- * Supplementary group IDs
- */
-
-/* init to 2 - one for init_task, one to ensure it is never freed */
-struct group_info init_groups = { .usage = ATOMIC_INIT(2) };
-
-struct group_info *groups_alloc(int gidsetsize)
-{
-	struct group_info *group_info;
-	int nblocks;
-	int i;
-
-	nblocks = (gidsetsize + NGROUPS_PER_BLOCK - 1) / NGROUPS_PER_BLOCK;
-	/* Make sure we always allocate at least one indirect block pointer */
-	nblocks = nblocks ? : 1;
-	group_info = kmalloc(sizeof(*group_info) + nblocks*sizeof(gid_t *), GFP_USER);
-	if (!group_info)
-		return NULL;
-	group_info->ngroups = gidsetsize;
-	group_info->nblocks = nblocks;
-	atomic_set(&group_info->usage, 1);
-
-	if (gidsetsize <= NGROUPS_SMALL)
-		group_info->blocks[0] = group_info->small_block;
-	else {
-		for (i = 0; i < nblocks; i++) {
-			gid_t *b;
-			b = (void *)__get_free_page(GFP_USER);
-			if (!b)
-				goto out_undo_partial_alloc;
-			group_info->blocks[i] = b;
-		}
-	}
-	return group_info;
-
-out_undo_partial_alloc:
-	while (--i >= 0) {
-		free_page((unsigned long)group_info->blocks[i]);
-	}
-	kfree(group_info);
-	return NULL;
-}
-
-EXPORT_SYMBOL(groups_alloc);
-
-void groups_free(struct group_info *group_info)
-{
-	if (group_info->blocks[0] != group_info->small_block) {
-		int i;
-		for (i = 0; i < group_info->nblocks; i++)
-			free_page((unsigned long)group_info->blocks[i]);
-	}
-	kfree(group_info);
-}
-
-EXPORT_SYMBOL(groups_free);
-
-/* export the group_info to a user-space array */
-static int groups_to_user(gid_t __user *grouplist,
-    struct group_info *group_info)
-{
-	int i;
-	unsigned int count = group_info->ngroups;
-
-	for (i = 0; i < group_info->nblocks; i++) {
-		unsigned int cp_count = min(NGROUPS_PER_BLOCK, count);
-		unsigned int len = cp_count * sizeof(*grouplist);
-
-		if (copy_to_user(grouplist, group_info->blocks[i], len))
-			return -EFAULT;
-
-		grouplist += NGROUPS_PER_BLOCK;
-		count -= cp_count;
-	}
-	return 0;
-}
-
-/* fill a group_info from a user-space array - it must be allocated already */
-static int groups_from_user(struct group_info *group_info,
-    gid_t __user *grouplist)
-{
-	int i;
-	unsigned int count = group_info->ngroups;
-
-	for (i = 0; i < group_info->nblocks; i++) {
-		unsigned int cp_count = min(NGROUPS_PER_BLOCK, count);
-		unsigned int len = cp_count * sizeof(*grouplist);
-
-		if (copy_from_user(group_info->blocks[i], grouplist, len))
-			return -EFAULT;
-
-		grouplist += NGROUPS_PER_BLOCK;
-		count -= cp_count;
-	}
-	return 0;
-}
-
-/* a simple Shell sort */
-static void groups_sort(struct group_info *group_info)
-{
-	int base, max, stride;
-	int gidsetsize = group_info->ngroups;
-
-	for (stride = 1; stride < gidsetsize; stride = 3 * stride + 1)
-		; /* nothing */
-	stride /= 3;
-
-	while (stride) {
-		max = gidsetsize - stride;
-		for (base = 0; base < max; base++) {
-			int left = base;
-			int right = left + stride;
-			gid_t tmp = GROUP_AT(group_info, right);
-
-			while (left >= 0 && GROUP_AT(group_info, left) > tmp) {
-				GROUP_AT(group_info, right) =
-				    GROUP_AT(group_info, left);
-				right = left;
-				left -= stride;
-			}
-			GROUP_AT(group_info, right) = tmp;
-		}
-		stride /= 3;
-	}
-}
-
-/* a simple bsearch */
-int groups_search(struct group_info *group_info, gid_t grp)
-{
-	unsigned int left, right;
-
-	if (!group_info)
-		return 0;
-
-	left = 0;
-	right = group_info->ngroups;
-	while (left < right) {
-		unsigned int mid = (left+right)/2;
-		int cmp = grp - GROUP_AT(group_info, mid);
-		if (cmp > 0)
-			left = mid + 1;
-		else if (cmp < 0)
-			right = mid;
-		else
-			return 1;
-	}
-	return 0;
-}
-
-/* validate and set current->group_info */
-int set_current_groups(struct group_info *group_info)
-{
-	int retval;
-	struct group_info *old_info;
-
-	retval = security_task_setgroups(group_info);
-	if (retval)
-		return retval;
-
-	groups_sort(group_info);
-	get_group_info(group_info);
-
-	task_lock(current);
-	old_info = current->group_info;
-	current->group_info = group_info;
-	task_unlock(current);
-
-	put_group_info(old_info);
-
-	return 0;
-}
-
-EXPORT_SYMBOL(set_current_groups);
-
-SYSCALL_DEFINE2(getgroups, int, gidsetsize, gid_t __user *, grouplist)
-{
-	int i = 0;
-
-	/*
-	 *	SMP: Nobody else can change our grouplist. Thus we are
-	 *	safe.
-	 */
-
-	if (gidsetsize < 0)
-		return -EINVAL;
-
-	/* no need to grab task_lock here; it cannot change */
-	i = current->group_info->ngroups;
-	if (gidsetsize) {
-		if (i > gidsetsize) {
-			i = -EINVAL;
-			goto out;
-		}
-		if (groups_to_user(grouplist, current->group_info)) {
-			i = -EFAULT;
-			goto out;
-		}
-	}
-out:
-	return i;
-}
-
-/*
- *	SMP: Our groups are copy-on-write. We can set them safely
- *	without another task interfering.
- */
- 
-SYSCALL_DEFINE2(setgroups, int, gidsetsize, gid_t __user *, grouplist)
-{
-	struct group_info *group_info;
-	int retval;
-
-	if (!capable(CAP_SETGID))
-		return -EPERM;
-	if ((unsigned)gidsetsize > NGROUPS_MAX)
-		return -EINVAL;
-
-	group_info = groups_alloc(gidsetsize);
-	if (!group_info)
-		return -ENOMEM;
-	retval = groups_from_user(group_info, grouplist);
-	if (retval) {
-		put_group_info(group_info);
-		return retval;
-	}
-
-	retval = set_current_groups(group_info);
-	put_group_info(group_info);
-
-	return retval;
-}
-
-/*
- * Check whether we're fsgid/egid or in the supplemental group..
- */
-int in_group_p(gid_t grp)
-{
-	int retval = 1;
-	if (grp != current->fsgid)
-		retval = groups_search(current->group_info, grp);
-	return retval;
-}
-
-EXPORT_SYMBOL(in_group_p);
-
-int in_egroup_p(gid_t grp)
-{
-	int retval = 1;
-	if (grp != current->egid)
-		retval = groups_search(current->group_info, grp);
-	return retval;
-}
-
-EXPORT_SYMBOL(in_egroup_p);
 
 DECLARE_RWSEM(uts_sem);
 
@@ -1352,8 +1140,10 @@ SYSCALL_DEFINE2(sethostname, char __user *, name, int, len)
 	down_write(&uts_sem);
 	errno = -EFAULT;
 	if (!copy_from_user(tmp, name, len)) {
-		memcpy(utsname()->nodename, tmp, len);
-		utsname()->nodename[len] = 0;
+		struct new_utsname *u = utsname();
+
+		memcpy(u->nodename, tmp, len);
+		memset(u->nodename + len, 0, sizeof(u->nodename) - len);
 		errno = 0;
 	}
 	up_write(&uts_sem);
@@ -1365,15 +1155,17 @@ SYSCALL_DEFINE2(sethostname, char __user *, name, int, len)
 SYSCALL_DEFINE2(gethostname, char __user *, name, int, len)
 {
 	int i, errno;
+	struct new_utsname *u;
 
 	if (len < 0)
 		return -EINVAL;
 	down_read(&uts_sem);
-	i = 1 + strlen(utsname()->nodename);
+	u = utsname();
+	i = 1 + strlen(u->nodename);
 	if (i > len)
 		i = len;
 	errno = 0;
-	if (copy_to_user(name, utsname()->nodename, i))
+	if (copy_to_user(name, u->nodename, i))
 		errno = -EFAULT;
 	up_read(&uts_sem);
 	return errno;
@@ -1398,8 +1190,10 @@ SYSCALL_DEFINE2(setdomainname, char __user *, name, int, len)
 	down_write(&uts_sem);
 	errno = -EFAULT;
 	if (!copy_from_user(tmp, name, len)) {
-		memcpy(utsname()->domainname, tmp, len);
-		utsname()->domainname[len] = 0;
+		struct new_utsname *u = utsname();
+
+		memcpy(u->domainname, tmp, len);
+		memset(u->domainname + len, 0, sizeof(u->domainname) - len);
 		errno = 0;
 	}
 	up_write(&uts_sem);
@@ -1447,7 +1241,6 @@ SYSCALL_DEFINE2(old_getrlimit, unsigned int, resource,
 SYSCALL_DEFINE2(setrlimit, unsigned int, resource, struct rlimit __user *, rlim)
 {
 	struct rlimit new_rlim, *old_rlim;
-	unsigned long it_prof_secs;
 	int retval;
 
 	if (resource >= RLIM_NLIMITS)
@@ -1493,18 +1286,7 @@ SYSCALL_DEFINE2(setrlimit, unsigned int, resource, struct rlimit __user *, rlim)
 	if (new_rlim.rlim_cur == RLIM_INFINITY)
 		goto out;
 
-	it_prof_secs = cputime_to_secs(current->signal->it_prof_expires);
-	if (it_prof_secs == 0 || new_rlim.rlim_cur <= it_prof_secs) {
-		unsigned long rlim_cur = new_rlim.rlim_cur;
-		cputime_t cputime;
-
-		cputime = secs_to_cputime(rlim_cur);
-		read_lock(&tasklist_lock);
-		spin_lock_irq(&current->sighand->siglock);
-		set_process_cpu_timer(current, CPUCLOCK_PROF, &cputime, NULL);
-		spin_unlock_irq(&current->sighand->siglock);
-		read_unlock(&tasklist_lock);
-	}
+	update_rlimit_cpu(new_rlim.rlim_cur);
 out:
 	return 0;
 }
@@ -1542,11 +1324,8 @@ out:
  *
  */
 
-static void accumulate_thread_rusage(struct task_struct *t, struct rusage *r,
-				     cputime_t *utimep, cputime_t *stimep)
+static void accumulate_thread_rusage(struct task_struct *t, struct rusage *r)
 {
-	*utimep = cputime_add(*utimep, t->utime);
-	*stimep = cputime_add(*stimep, t->stime);
 	r->ru_nvcsw += t->nvcsw;
 	r->ru_nivcsw += t->nivcsw;
 	r->ru_minflt += t->min_flt;
@@ -1560,12 +1339,17 @@ static void k_getrusage(struct task_struct *p, int who, struct rusage *r)
 	struct task_struct *t;
 	unsigned long flags;
 	cputime_t utime, stime;
+	struct task_cputime cputime;
+	unsigned long maxrss = 0;
 
 	memset((char *) r, 0, sizeof *r);
 	utime = stime = cputime_zero;
 
 	if (who == RUSAGE_THREAD) {
-		accumulate_thread_rusage(p, r, &utime, &stime);
+		utime = task_utime(current);
+		stime = task_stime(current);
+		accumulate_thread_rusage(p, r);
+		maxrss = p->signal->maxrss;
 		goto out;
 	}
 
@@ -1583,22 +1367,26 @@ static void k_getrusage(struct task_struct *p, int who, struct rusage *r)
 			r->ru_majflt = p->signal->cmaj_flt;
 			r->ru_inblock = p->signal->cinblock;
 			r->ru_oublock = p->signal->coublock;
+			maxrss = p->signal->cmaxrss;
 
 			if (who == RUSAGE_CHILDREN)
 				break;
 
 		case RUSAGE_SELF:
-			utime = cputime_add(utime, p->signal->utime);
-			stime = cputime_add(stime, p->signal->stime);
+			thread_group_cputime(p, &cputime);
+			utime = cputime_add(utime, cputime.utime);
+			stime = cputime_add(stime, cputime.stime);
 			r->ru_nvcsw += p->signal->nvcsw;
 			r->ru_nivcsw += p->signal->nivcsw;
 			r->ru_minflt += p->signal->min_flt;
 			r->ru_majflt += p->signal->maj_flt;
 			r->ru_inblock += p->signal->inblock;
 			r->ru_oublock += p->signal->oublock;
+			if (maxrss < p->signal->maxrss)
+				maxrss = p->signal->maxrss;
 			t = p;
 			do {
-				accumulate_thread_rusage(t, r, &utime, &stime);
+				accumulate_thread_rusage(t, r);
 				t = next_thread(t);
 			} while (t != p);
 			break;
@@ -1611,6 +1399,15 @@ static void k_getrusage(struct task_struct *p, int who, struct rusage *r)
 out:
 	cputime_to_timeval(utime, &r->ru_utime);
 	cputime_to_timeval(stime, &r->ru_stime);
+
+	if (who != RUSAGE_CHILDREN) {
+		struct mm_struct *mm = get_task_mm(p);
+		if (mm) {
+			setmax_mm_hiwater_rss(&maxrss, mm);
+			mmput(mm);
+		}
+	}
+	r->ru_maxrss = maxrss * (PAGE_SIZE / 1024); /* convert pages to KBs */
 }
 
 int getrusage(struct task_struct *p, int who, struct rusage __user *ru)
@@ -1637,50 +1434,56 @@ SYSCALL_DEFINE1(umask, int, mask)
 SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 		unsigned long, arg4, unsigned long, arg5)
 {
-	long error = 0;
+	struct task_struct *me = current;
+	unsigned char comm[sizeof(me->comm)];
+	long error;
 
-	if (security_task_prctl(option, arg2, arg3, arg4, arg5, &error))
+	error = security_task_prctl(option, arg2, arg3, arg4, arg5);
+	if (error != -ENOSYS)
 		return error;
 
+	error = 0;
 	switch (option) {
 		case PR_SET_PDEATHSIG:
 			if (!valid_signal(arg2)) {
 				error = -EINVAL;
 				break;
 			}
-			current->pdeath_signal = arg2;
+			me->pdeath_signal = arg2;
+			error = 0;
 			break;
 		case PR_GET_PDEATHSIG:
-			error = put_user(current->pdeath_signal, (int __user *)arg2);
+			error = put_user(me->pdeath_signal, (int __user *)arg2);
 			break;
 		case PR_GET_DUMPABLE:
-			error = get_dumpable(current->mm);
+			error = get_dumpable(me->mm);
 			break;
 		case PR_SET_DUMPABLE:
 			if (arg2 < 0 || arg2 > 1) {
 				error = -EINVAL;
 				break;
 			}
-			set_dumpable(current->mm, arg2);
+			set_dumpable(me->mm, arg2);
+			error = 0;
 			break;
 
 		case PR_SET_UNALIGN:
-			error = SET_UNALIGN_CTL(current, arg2);
+			error = SET_UNALIGN_CTL(me, arg2);
 			break;
 		case PR_GET_UNALIGN:
-			error = GET_UNALIGN_CTL(current, arg2);
+			error = GET_UNALIGN_CTL(me, arg2);
 			break;
 		case PR_SET_FPEMU:
-			error = SET_FPEMU_CTL(current, arg2);
+			error = SET_FPEMU_CTL(me, arg2);
 			break;
 		case PR_GET_FPEMU:
-			error = GET_FPEMU_CTL(current, arg2);
+			error = GET_FPEMU_CTL(me, arg2);
 			break;
 		case PR_SET_FPEXC:
-			error = SET_FPEXC_CTL(current, arg2);
+			error = SET_FPEXC_CTL(me, arg2);
 			break;
 		case PR_GET_FPEXC:
-			error = GET_FPEXC_CTL(current, arg2);
+			error = GET_FPEXC_CTL(me, arg2);
 			break;
 		case PR_GET_TIMING:
 			error = PR_TIMING_STATISTICAL;
@@ -1688,33 +1491,28 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 		case PR_SET_TIMING:
 			if (arg2 != PR_TIMING_STATISTICAL)
 				error = -EINVAL;
+			else
+				error = 0;
 			break;
 
-		case PR_SET_NAME: {
-			struct task_struct *me = current;
-			unsigned char ncomm[sizeof(me->comm)];
-
-			ncomm[sizeof(me->comm)-1] = 0;
-			if (strncpy_from_user(ncomm, (char __user *)arg2,
-						sizeof(me->comm)-1) < 0)
+		case PR_SET_NAME:
+			comm[sizeof(me->comm)-1] = 0;
+			if (strncpy_from_user(comm, (char __user *)arg2,
+					      sizeof(me->comm) - 1) < 0)
 				return -EFAULT;
-			set_task_comm(me, ncomm);
+			set_task_comm(me, comm);
 			return 0;
-		}
-		case PR_GET_NAME: {
-			struct task_struct *me = current;
-			unsigned char tcomm[sizeof(me->comm)];
-
-			get_task_comm(tcomm, me);
-			if (copy_to_user((char __user *)arg2, tcomm, sizeof(tcomm)))
+		case PR_GET_NAME:
+			get_task_comm(comm, me);
+			if (copy_to_user((char __user *)arg2, comm,
+					 sizeof(comm)))
 				return -EFAULT;
 			return 0;
-		}
 		case PR_GET_ENDIAN:
-			error = GET_ENDIAN(current, arg2);
+			error = GET_ENDIAN(me, arg2);
 			break;
 		case PR_SET_ENDIAN:
-			error = SET_ENDIAN(current, arg2);
+			error = SET_ENDIAN(me, arg2);
 			break;
 
 		case PR_GET_SECCOMP:
@@ -1728,6 +1526,58 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 			break;
 		case PR_SET_TSC:
 			error = SET_TSC_CTL(arg2);
+			break;
+		case PR_TASK_PERF_EVENTS_DISABLE:
+			error = perf_event_task_disable();
+			break;
+		case PR_TASK_PERF_EVENTS_ENABLE:
+			error = perf_event_task_enable();
+			break;
+		case PR_GET_TIMERSLACK:
+			error = current->timer_slack_ns;
+			break;
+		case PR_SET_TIMERSLACK:
+			if (arg2 <= 0)
+				current->timer_slack_ns =
+					current->default_timer_slack_ns;
+			else
+				current->timer_slack_ns = arg2;
+			error = 0;
+			break;
+		case PR_MCE_KILL:
+			if (arg4 | arg5)
+				return -EINVAL;
+			switch (arg2) {
+			case PR_MCE_KILL_CLEAR:
+				if (arg3 != 0)
+					return -EINVAL;
+				current->flags &= ~PF_MCE_PROCESS;
+				break;
+			case PR_MCE_KILL_SET:
+				current->flags |= PF_MCE_PROCESS;
+				if (arg3 == PR_MCE_KILL_EARLY)
+					current->flags |= PF_MCE_EARLY;
+				else if (arg3 == PR_MCE_KILL_LATE)
+					current->flags &= ~PF_MCE_EARLY;
+				else if (arg3 == PR_MCE_KILL_DEFAULT)
+					current->flags &=
+						~(PF_MCE_EARLY|PF_MCE_PROCESS);
+				else
+					return -EINVAL;
+				break;
+			default:
+				return -EINVAL;
+			}
+			error = 0;
+			break;
+		case PR_MCE_KILL_GET:
+			if (arg2 | arg3 | arg4 | arg5)
+				return -EINVAL;
+			if (current->flags & PF_MCE_PROCESS)
+				error = (current->flags & PF_MCE_EARLY) ?
+					PR_MCE_KILL_EARLY : PR_MCE_KILL_LATE;
+			else
+				error = PR_MCE_KILL_DEFAULT;
 			break;
 		default:
 			error = -EINVAL;

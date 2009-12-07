@@ -9,7 +9,7 @@
 
 #define RAW_VALID_HOOKS ((1 << NF_INET_PRE_ROUTING) | (1 << NF_INET_LOCAL_OUT))
 
-static struct
+static const struct
 {
 	struct ipt_replace repl;
 	struct ipt_standard entries[2];
@@ -36,12 +36,11 @@ static struct
 	.term = IPT_ERROR_INIT,			/* ERROR */
 };
 
-static struct xt_table packet_raw = {
+static const struct xt_table packet_raw = {
 	.name = "raw",
 	.valid_hooks =  RAW_VALID_HOOKS,
-	.lock = __RW_LOCK_UNLOCKED(packet_raw.lock),
 	.me = THIS_MODULE,
-	.af = AF_INET,
+	.af = NFPROTO_IPV4,
 };
 
 /* The work comes in here from netfilter.c. */
@@ -53,7 +52,7 @@ ipt_hook(unsigned int hook,
 	 int (*okfn)(struct sk_buff *))
 {
 	return ipt_do_table(skb, hook, in, out,
-			    nf_pre_routing_net(in, out)->ipv4.iptable_raw);
+			    dev_net(in)->ipv4.iptable_raw);
 }
 
 static unsigned int
@@ -65,28 +64,24 @@ ipt_local_hook(unsigned int hook,
 {
 	/* root is playing with raw sockets. */
 	if (skb->len < sizeof(struct iphdr) ||
-	    ip_hdrlen(skb) < sizeof(struct iphdr)) {
-		if (net_ratelimit())
-			printk("iptable_raw: ignoring short SOCK_RAW "
-			       "packet.\n");
+	    ip_hdrlen(skb) < sizeof(struct iphdr))
 		return NF_ACCEPT;
-	}
 	return ipt_do_table(skb, hook, in, out,
-			    nf_local_out_net(in, out)->ipv4.iptable_raw);
+			    dev_net(out)->ipv4.iptable_raw);
 }
 
 /* 'raw' is the very first table. */
 static struct nf_hook_ops ipt_ops[] __read_mostly = {
 	{
 		.hook = ipt_hook,
-		.pf = PF_INET,
+		.pf = NFPROTO_IPV4,
 		.hooknum = NF_INET_PRE_ROUTING,
 		.priority = NF_IP_PRI_RAW,
 		.owner = THIS_MODULE,
 	},
 	{
 		.hook = ipt_local_hook,
-		.pf = PF_INET,
+		.pf = NFPROTO_IPV4,
 		.hooknum = NF_INET_LOCAL_OUT,
 		.priority = NF_IP_PRI_RAW,
 		.owner = THIS_MODULE,

@@ -5,7 +5,7 @@
  * This file is released under the GPL.
  */
 
-#include "dm.h"
+#include <linux/device-mapper.h>
 
 #include <linux/bio.h>
 #include <linux/mempool.h>
@@ -22,6 +22,7 @@ struct dm_io_client {
 /* FIXME: can we shrink this ? */
 struct io {
 	unsigned long error_bits;
+	unsigned long eopnotsupp_bits;
 	atomic_t count;
 	struct task_struct *sleeper;
 	struct dm_io_client *client;
@@ -56,7 +57,7 @@ struct dm_io_client *dm_io_client_create(unsigned num_pages)
 	if (!client->pool)
 		goto bad;
 
-	client->bios = bioset_create(16, 16);
+	client->bios = bioset_create(16, 0);
 	if (!client->bios)
 		goto bad;
 
@@ -107,8 +108,11 @@ static inline unsigned bio_get_region(struct bio *bio)
  *---------------------------------------------------------------*/
 static void dec_count(struct io *io, unsigned int region, int error)
 {
-	if (error)
+	if (error) {
 		set_bit(region, &io->error_bits);
+		if (error == -EOPNOTSUPP)
+			set_bit(region, &io->eopnotsupp_bits);
+	}
 
 	if (atomic_dec_and_test(&io->count)) {
 		if (io->sleeper)
@@ -330,7 +334,7 @@ static void dispatch_io(int rw, unsigned int num_regions,
 	struct dpages old_pages = *dp;
 
 	if (sync)
-		rw |= (1 << BIO_RW_SYNC);
+		rw |= (1 << BIO_RW_SYNCIO) | (1 << BIO_RW_UNPLUG);
 
 	/*
 	 * For multiple regions we need to be careful to rewind
@@ -360,7 +364,9 @@ static int sync_io(struct dm_io_client *client, unsigned int num_regions,
 		return -EIO;
 	}
 
+retry:
 	io.error_bits = 0;
+	io.eopnotsupp_bits = 0;
 	atomic_set(&io.count, 1); /* see dispatch_io() */
 	io.sleeper = current;
 	io.client = client;
@@ -370,15 +376,17 @@ static int sync_io(struct dm_io_client *client, unsigned int num_regions,
 	while (1) {
 		set_current_state(TASK_UNINTERRUPTIBLE);
 
-		if (!atomic_read(&io.count) || signal_pending(current))
+		if (!atomic_read(&io.count))
 			break;
 
 		io_schedule();
 	}
 	set_current_state(TASK_RUNNING);
 
-	if (atomic_read(&io.count))
-		return -EINTR;
+	if (io.eopnotsupp_bits && (rw & (1 << BIO_RW_BARRIER))) {
+		rw &= ~(1 << BIO_RW_BARRIER);
+		goto retry;
+	}
 
 	if (error_bits)
 		*error_bits = io.error_bits;
@@ -400,6 +408,7 @@ static int async_io(struct dm_io_client *client, unsigned int num_regions,
 
 	io = mempool_alloc(client->pool, GFP_NOIO);
 	io->error_bits = 0;
+	io->eopnotsupp_bits = 0;
 	atomic_set(&io->count, 1); /* see dispatch_io() */
 	io->sleeper = NULL;
 	io->client = client;

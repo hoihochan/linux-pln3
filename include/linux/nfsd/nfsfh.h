@@ -14,9 +14,8 @@
 #ifndef _LINUX_NFSD_FH_H
 #define _LINUX_NFSD_FH_H
 
-#include <asm/types.h>
-#ifdef __KERNEL__
 # include <linux/types.h>
+#ifdef __KERNEL__
 # include <linux/string.h>
 # include <linux/fs.h>
 #endif
@@ -68,6 +67,10 @@ struct nfs_fhbase_old {
  *     1  - 4 byte user specified identifier
  *     2  - 4 byte major, 4 byte minor, 4 byte inode number - DEPRECATED
  *     3  - 4 byte device id, encoded for user-space, 4 byte inode number
+ *     4  - 4 byte inode number and 4 byte uuid
+ *     5  - 8 byte uuid
+ *     6  - 16 byte uuid
+ *     7  - 8 byte inode number and 16 byte uuid
  *
  * The fileid_type identified how the file within the filesystem is encoded.
  * This is (will be) passed to, and set by, the underlying filesystem if it supports
@@ -148,9 +151,15 @@ typedef struct svc_fh {
 	__u64			fh_pre_size;	/* size before operation */
 	struct timespec		fh_pre_mtime;	/* mtime before oper */
 	struct timespec		fh_pre_ctime;	/* ctime before oper */
+	/*
+	 * pre-op nfsv4 change attr: note must check IS_I_VERSION(inode)
+	 *  to find out if it is valid.
+	 */
+	u64			fh_pre_change;
 
 	/* Post-op attributes saved in fh_unlock */
 	struct kstat		fh_post_attr;	/* full attrs after operation */
+	u64			fh_post_change; /* nfsv4 change; see above */
 #endif /* CONFIG_NFSD_V3 */
 
 } svc_fh;
@@ -266,6 +275,13 @@ fh_copy(struct svc_fh *dst, struct svc_fh *src)
 	return dst;
 }
 
+static inline void
+fh_copy_shallow(struct knfsd_fh *dst, struct knfsd_fh *src)
+{
+	dst->fh_size = src->fh_size;
+	memcpy(&dst->fh_base, &src->fh_base, src->fh_size);
+}
+
 static __inline__ struct svc_fh *
 fh_init(struct svc_fh *fhp, int maxsize)
 {
@@ -288,6 +304,7 @@ fill_pre_wcc(struct svc_fh *fhp)
 		fhp->fh_pre_mtime = inode->i_mtime;
 		fhp->fh_pre_ctime = inode->i_ctime;
 		fhp->fh_pre_size  = inode->i_size;
+		fhp->fh_pre_change = inode->i_version;
 		fhp->fh_pre_saved = 1;
 	}
 }

@@ -1,5 +1,5 @@
 /*
- * acpi-cpufreq.c - ACPI Processor P-States Driver ($Revision: 1.4 $)
+ * acpi-cpufreq.c - ACPI Processor P-States Driver
  *
  *  Copyright (C) 2001, 2002 Andy Grover <andrew.grover@intel.com>
  *  Copyright (C) 2001, 2002 Paul Diefenbaugh <paul.s.diefenbaugh@intel.com>
@@ -33,18 +33,21 @@
 #include <linux/cpufreq.h>
 #include <linux/compiler.h>
 #include <linux/dmi.h>
+#include <trace/events/power.h>
 
 #include <linux/acpi.h>
+#include <linux/io.h>
+#include <linux/delay.h>
+#include <linux/uaccess.h>
+
 #include <acpi/processor.h>
 
-#include <asm/io.h>
 #include <asm/msr.h>
 #include <asm/processor.h>
 #include <asm/cpufeature.h>
-#include <asm/delay.h>
-#include <asm/uaccess.h>
 
-#define dprintk(msg...) cpufreq_debug_printk(CPUFREQ_DEBUG_DRIVER, "acpi-cpufreq", msg)
+#define dprintk(msg...) cpufreq_debug_printk(CPUFREQ_DEBUG_DRIVER, \
+		"acpi-cpufreq", msg)
 
 MODULE_AUTHOR("Paul Diefenbaugh, Dominik Brodowski");
 MODULE_DESCRIPTION("ACPI Processor P-States Driver");
@@ -57,17 +60,17 @@ enum {
 };
 
 #define INTEL_MSR_RANGE		(0xffff)
-#define CPUID_6_ECX_APERFMPERF_CAPABILITY	(0x1)
 
 struct acpi_cpufreq_data {
 	struct acpi_processor_performance *acpi_data;
 	struct cpufreq_frequency_table *freq_table;
-	unsigned int max_freq;
 	unsigned int resume;
 	unsigned int cpu_feature;
 };
 
 static DEFINE_PER_CPU(struct acpi_cpufreq_data *, drv_data);
+
+static DEFINE_PER_CPU(struct aperfmperf, old_perf);
 
 /* acpi_perf_data is a pointer to percpu data. */
 static struct acpi_processor_performance *acpi_perf_data;
@@ -80,11 +83,7 @@ static int check_est_cpu(unsigned int cpuid)
 {
 	struct cpuinfo_x86 *cpu = &cpu_data(cpuid);
 
-	if (cpu->x86_vendor != X86_VENDOR_INTEL ||
-	    !cpu_has(cpu, X86_FEATURE_EST))
-		return 0;
-
-	return 1;
+	return cpu_has(cpu, X86_FEATURE_EST);
 }
 
 static unsigned extract_io(u32 value, struct acpi_cpufreq_data *data)
@@ -94,7 +93,7 @@ static unsigned extract_io(u32 value, struct acpi_cpufreq_data *data)
 
 	perf = data->acpi_data;
 
-	for (i=0; i<perf->state_count; i++) {
+	for (i = 0; i < perf->state_count; i++) {
 		if (value == perf->states[i].status)
 			return data->freq_table[i].frequency;
 	}
@@ -109,7 +108,7 @@ static unsigned extract_msr(u32 msr, struct acpi_cpufreq_data *data)
 	msr &= INTEL_MSR_RANGE;
 	perf = data->acpi_data;
 
-	for (i=0; data->freq_table[i].frequency != CPUFREQ_TABLE_END; i++) {
+	for (i = 0; data->freq_table[i].frequency != CPUFREQ_TABLE_END; i++) {
 		if (msr == perf->states[data->freq_table[i].index].status)
 			return data->freq_table[i].frequency;
 	}
@@ -137,20 +136,20 @@ struct io_addr {
 	u8 bit_width;
 };
 
-typedef union {
-	struct msr_addr msr;
-	struct io_addr io;
-} drv_addr_union;
-
 struct drv_cmd {
 	unsigned int type;
-	cpumask_t mask;
-	drv_addr_union addr;
+	const struct cpumask *mask;
+	union {
+		struct msr_addr msr;
+		struct io_addr io;
+	} addr;
 	u32 val;
 };
 
-static void do_drv_read(struct drv_cmd *cmd)
+/* Called via smp_call_function_single(), on the target CPU */
+static void do_drv_read(void *_cmd)
 {
+	struct drv_cmd *cmd = _cmd;
 	u32 h;
 
 	switch (cmd->type) {
@@ -167,8 +166,10 @@ static void do_drv_read(struct drv_cmd *cmd)
 	}
 }
 
-static void do_drv_write(struct drv_cmd *cmd)
+/* Called via smp_call_function_many(), on the target CPUs */
+static void do_drv_write(void *_cmd)
 {
+	struct drv_cmd *cmd = _cmd;
 	u32 lo, hi;
 
 	switch (cmd->type) {
@@ -189,44 +190,38 @@ static void do_drv_write(struct drv_cmd *cmd)
 
 static void drv_read(struct drv_cmd *cmd)
 {
-	cpumask_t saved_mask = current->cpus_allowed;
 	cmd->val = 0;
 
-	set_cpus_allowed_ptr(current, &cmd->mask);
-	do_drv_read(cmd);
-	set_cpus_allowed_ptr(current, &saved_mask);
+	smp_call_function_single(cpumask_any(cmd->mask), do_drv_read, cmd, 1);
 }
 
 static void drv_write(struct drv_cmd *cmd)
 {
-	cpumask_t saved_mask = current->cpus_allowed;
-	unsigned int i;
+	int this_cpu;
 
-	for_each_cpu_mask_nr(i, cmd->mask) {
-		set_cpus_allowed_ptr(current, &cpumask_of_cpu(i));
+	this_cpu = get_cpu();
+	if (cpumask_test_cpu(this_cpu, cmd->mask))
 		do_drv_write(cmd);
-	}
-
-	set_cpus_allowed_ptr(current, &saved_mask);
-	return;
+	smp_call_function_many(cmd->mask, do_drv_write, cmd, 1);
+	put_cpu();
 }
 
-static u32 get_cur_val(const cpumask_t *mask)
+static u32 get_cur_val(const struct cpumask *mask)
 {
 	struct acpi_processor_performance *perf;
 	struct drv_cmd cmd;
 
-	if (unlikely(cpus_empty(*mask)))
+	if (unlikely(cpumask_empty(mask)))
 		return 0;
 
-	switch (per_cpu(drv_data, first_cpu(*mask))->cpu_feature) {
+	switch (per_cpu(drv_data, cpumask_first(mask))->cpu_feature) {
 	case SYSTEM_INTEL_MSR_CAPABLE:
 		cmd.type = SYSTEM_INTEL_MSR_CAPABLE;
 		cmd.addr.msr.reg = MSR_IA32_PERF_STATUS;
 		break;
 	case SYSTEM_IO_CAPABLE:
 		cmd.type = SYSTEM_IO_CAPABLE;
-		perf = per_cpu(drv_data, first_cpu(*mask))->acpi_data;
+		perf = per_cpu(drv_data, cpumask_first(mask))->acpi_data;
 		cmd.addr.io.port = perf->control_register.address;
 		cmd.addr.io.bit_width = perf->control_register.bit_width;
 		break;
@@ -234,13 +229,20 @@ static u32 get_cur_val(const cpumask_t *mask)
 		return 0;
 	}
 
-	cmd.mask = *mask;
-
+	cmd.mask = mask;
 	drv_read(&cmd);
 
 	dprintk("get_cur_val = %u\n", cmd.val);
 
 	return cmd.val;
+}
+
+/* Called via smp_call_function_single(), on the target CPU */
+static void read_measured_perf_ctrs(void *_cur)
+{
+	struct aperfmperf *am = _cur;
+
+	get_aperfmperf(am);
 }
 
 /*
@@ -256,82 +258,21 @@ static u32 get_cur_val(const cpumask_t *mask)
  * Only IA32_APERF/IA32_MPERF ratio is architecturally defined and
  * no meaning should be associated with absolute values of these MSRs.
  */
-static unsigned int get_measured_perf(unsigned int cpu)
+static unsigned int get_measured_perf(struct cpufreq_policy *policy,
+				      unsigned int cpu)
 {
-	union {
-		struct {
-			u32 lo;
-			u32 hi;
-		} split;
-		u64 whole;
-	} aperf_cur, mperf_cur;
-
-	cpumask_t saved_mask;
-	unsigned int perf_percent;
+	struct aperfmperf perf;
+	unsigned long ratio;
 	unsigned int retval;
 
-	saved_mask = current->cpus_allowed;
-	set_cpus_allowed_ptr(current, &cpumask_of_cpu(cpu));
-	if (get_cpu() != cpu) {
-		/* We were not able to run on requested processor */
-		put_cpu();
+	if (smp_call_function_single(cpu, read_measured_perf_ctrs, &perf, 1))
 		return 0;
-	}
 
-	rdmsr(MSR_IA32_APERF, aperf_cur.split.lo, aperf_cur.split.hi);
-	rdmsr(MSR_IA32_MPERF, mperf_cur.split.lo, mperf_cur.split.hi);
+	ratio = calc_aperfmperf_ratio(&per_cpu(old_perf, cpu), &perf);
+	per_cpu(old_perf, cpu) = perf;
 
-	wrmsr(MSR_IA32_APERF, 0,0);
-	wrmsr(MSR_IA32_MPERF, 0,0);
+	retval = (policy->cpuinfo.max_freq * ratio) >> APERFMPERF_SHIFT;
 
-#ifdef __i386__
-	/*
-	 * We dont want to do 64 bit divide with 32 bit kernel
-	 * Get an approximate value. Return failure in case we cannot get
-	 * an approximate value.
-	 */
-	if (unlikely(aperf_cur.split.hi || mperf_cur.split.hi)) {
-		int shift_count;
-		u32 h;
-
-		h = max_t(u32, aperf_cur.split.hi, mperf_cur.split.hi);
-		shift_count = fls(h);
-
-		aperf_cur.whole >>= shift_count;
-		mperf_cur.whole >>= shift_count;
-	}
-
-	if (((unsigned long)(-1) / 100) < aperf_cur.split.lo) {
-		int shift_count = 7;
-		aperf_cur.split.lo >>= shift_count;
-		mperf_cur.split.lo >>= shift_count;
-	}
-
-	if (aperf_cur.split.lo && mperf_cur.split.lo)
-		perf_percent = (aperf_cur.split.lo * 100) / mperf_cur.split.lo;
-	else
-		perf_percent = 0;
-
-#else
-	if (unlikely(((unsigned long)(-1) / 100) < aperf_cur.whole)) {
-		int shift_count = 7;
-		aperf_cur.whole >>= shift_count;
-		mperf_cur.whole >>= shift_count;
-	}
-
-	if (aperf_cur.whole && mperf_cur.whole)
-		perf_percent = (aperf_cur.whole * 100) / mperf_cur.whole;
-	else
-		perf_percent = 0;
-
-#endif
-
-	retval = per_cpu(drv_data, cpu)->max_freq * perf_percent / 100;
-
-	put_cpu();
-	set_cpus_allowed_ptr(current, &saved_mask);
-
-	dprintk("cpu %d: performance percent %d\n", cpu, perf_percent);
 	return retval;
 }
 
@@ -349,7 +290,7 @@ static unsigned int get_cur_freq_on_cpu(unsigned int cpu)
 	}
 
 	cached_freq = data->freq_table[data->acpi_data->state].frequency;
-	freq = extract_freq(get_cur_val(&cpumask_of_cpu(cpu)), data);
+	freq = extract_freq(get_cur_val(cpumask_of(cpu)), data);
 	if (freq != cached_freq) {
 		/*
 		 * The dreaded BIOS frequency change behind our back.
@@ -363,13 +304,13 @@ static unsigned int get_cur_freq_on_cpu(unsigned int cpu)
 	return freq;
 }
 
-static unsigned int check_freqs(const cpumask_t *mask, unsigned int freq,
+static unsigned int check_freqs(const struct cpumask *mask, unsigned int freq,
 				struct acpi_cpufreq_data *data)
 {
 	unsigned int cur_freq;
 	unsigned int i;
 
-	for (i=0; i<100; i++) {
+	for (i = 0; i < 100; i++) {
 		cur_freq = extract_freq(get_cur_val(mask), data);
 		if (cur_freq == freq)
 			return 1;
@@ -384,7 +325,6 @@ static int acpi_cpufreq_target(struct cpufreq_policy *policy,
 	struct acpi_cpufreq_data *data = per_cpu(drv_data, policy->cpu);
 	struct acpi_processor_performance *perf;
 	struct cpufreq_freqs freqs;
-	cpumask_t online_policy_cpus;
 	struct drv_cmd cmd;
 	unsigned int next_state = 0; /* Index into freq_table */
 	unsigned int next_perf_state = 0; /* Index into perf table */
@@ -403,15 +343,10 @@ static int acpi_cpufreq_target(struct cpufreq_policy *policy,
 						data->freq_table,
 						target_freq,
 						relation, &next_state);
-	if (unlikely(result))
-		return -ENODEV;
-
-#ifdef CONFIG_HOTPLUG_CPU
-	/* cpufreq holds the hotplug lock, so we are safe from here on */
-	cpus_and(online_policy_cpus, cpu_online_map, policy->cpus);
-#else
-	online_policy_cpus = policy->cpus;
-#endif
+	if (unlikely(result)) {
+		result = -ENODEV;
+		goto out;
+	}
 
 	next_perf_state = data->freq_table[next_state].index;
 	if (perf->state == next_perf_state) {
@@ -422,9 +357,11 @@ static int acpi_cpufreq_target(struct cpufreq_policy *policy,
 		} else {
 			dprintk("Already at target state (P%d)\n",
 				next_perf_state);
-			return 0;
+			goto out;
 		}
 	}
+
+	trace_power_frequency(POWER_PSTATE, data->freq_table[next_state].frequency);
 
 	switch (data->cpu_feature) {
 	case SYSTEM_INTEL_MSR_CAPABLE:
@@ -439,19 +376,19 @@ static int acpi_cpufreq_target(struct cpufreq_policy *policy,
 		cmd.val = (u32) perf->states[next_perf_state].control;
 		break;
 	default:
-		return -ENODEV;
+		result = -ENODEV;
+		goto out;
 	}
 
-	cpus_clear(cmd.mask);
-
+	/* cpufreq holds the hotplug lock, so we are safe from here on */
 	if (policy->shared_type != CPUFREQ_SHARED_TYPE_ANY)
-		cmd.mask = online_policy_cpus;
+		cmd.mask = policy->cpus;
 	else
-		cpu_set(policy->cpu, cmd.mask);
+		cmd.mask = cpumask_of(policy->cpu);
 
 	freqs.old = perf->states[perf->state].core_frequency * 1000;
 	freqs.new = data->freq_table[next_state].frequency;
-	for_each_cpu_mask_nr(i, cmd.mask) {
+	for_each_cpu(i, cmd.mask) {
 		freqs.cpu = i;
 		cpufreq_notify_transition(&freqs, CPUFREQ_PRECHANGE);
 	}
@@ -459,19 +396,21 @@ static int acpi_cpufreq_target(struct cpufreq_policy *policy,
 	drv_write(&cmd);
 
 	if (acpi_pstate_strict) {
-		if (!check_freqs(&cmd.mask, freqs.new, data)) {
+		if (!check_freqs(cmd.mask, freqs.new, data)) {
 			dprintk("acpi_cpufreq_target failed (%d)\n",
 				policy->cpu);
-			return -EAGAIN;
+			result = -EAGAIN;
+			goto out;
 		}
 	}
 
-	for_each_cpu_mask_nr(i, cmd.mask) {
+	for_each_cpu(i, cmd.mask) {
 		freqs.cpu = i;
 		cpufreq_notify_transition(&freqs, CPUFREQ_POSTCHANGE);
 	}
 	perf->state = next_perf_state;
 
+out:
 	return result;
 }
 
@@ -495,7 +434,7 @@ acpi_cpufreq_guess_freq(struct acpi_cpufreq_data *data, unsigned int cpu)
 		unsigned long freq;
 		unsigned long freqn = perf->states[0].core_frequency * 1000;
 
-		for (i=0; i<(perf->state_count-1); i++) {
+		for (i = 0; i < (perf->state_count-1); i++) {
 			freq = freqn;
 			freqn = perf->states[i+1].core_frequency * 1000;
 			if ((2 * cpu_khz) > (freqn + freq)) {
@@ -512,6 +451,17 @@ acpi_cpufreq_guess_freq(struct acpi_cpufreq_data *data, unsigned int cpu)
 	}
 }
 
+static void free_acpi_perf_data(void)
+{
+	unsigned int i;
+
+	/* Freeing a NULL pointer is OK, and alloc_percpu zeroes. */
+	for_each_possible_cpu(i)
+		free_cpumask_var(per_cpu_ptr(acpi_perf_data, i)
+				 ->shared_cpu_map);
+	free_percpu(acpi_perf_data);
+}
+
 /*
  * acpi_cpufreq_early_init - initialize ACPI P-States library
  *
@@ -522,12 +472,23 @@ acpi_cpufreq_guess_freq(struct acpi_cpufreq_data *data, unsigned int cpu)
  */
 static int __init acpi_cpufreq_early_init(void)
 {
+	unsigned int i;
 	dprintk("acpi_cpufreq_early_init\n");
 
 	acpi_perf_data = alloc_percpu(struct acpi_processor_performance);
 	if (!acpi_perf_data) {
 		dprintk("Memory allocation error for acpi_perf_data.\n");
 		return -ENOMEM;
+	}
+	for_each_possible_cpu(i) {
+		if (!zalloc_cpumask_var_node(
+			&per_cpu_ptr(acpi_perf_data, i)->shared_cpu_map,
+			GFP_KERNEL, cpu_to_node(i))) {
+
+			/* Freeing a NULL pointer is OK: alloc_percpu zeroes. */
+			free_acpi_perf_data();
+			return -ENOMEM;
+		}
 	}
 
 	/* Do initialization in ACPI core */
@@ -562,6 +523,27 @@ static const struct dmi_system_id sw_any_bug_dmi_table[] = {
 	},
 	{ }
 };
+
+static int acpi_cpufreq_blacklist(struct cpuinfo_x86 *c)
+{
+	/* Intel Xeon Processor 7100 Series Specification Update
+	 * http://www.intel.com/Assets/PDF/specupdate/314554.pdf
+	 * AL30: A Machine Check Exception (MCE) Occurring during an
+	 * Enhanced Intel SpeedStep Technology Ratio Change May Cause
+	 * Both Processor Cores to Lock Up. */
+	if (c->x86_vendor == X86_VENDOR_INTEL) {
+		if ((c->x86 == 15) &&
+		    (c->x86_model == 6) &&
+		    (c->x86_mask == 8)) {
+			printk(KERN_INFO "acpi-cpufreq: Intel(R) "
+			    "Xeon(R) 7100 Errata AL30, processors may "
+			    "lock up on frequency changes: disabling "
+			    "acpi-cpufreq.\n");
+			return -ENODEV;
+		    }
+		}
+	return 0;
+}
 #endif
 
 static int acpi_cpufreq_cpu_init(struct cpufreq_policy *policy)
@@ -573,14 +555,25 @@ static int acpi_cpufreq_cpu_init(struct cpufreq_policy *policy)
 	unsigned int result = 0;
 	struct cpuinfo_x86 *c = &cpu_data(policy->cpu);
 	struct acpi_processor_performance *perf;
+#ifdef CONFIG_SMP
+	static int blacklisted;
+#endif
 
 	dprintk("acpi_cpufreq_cpu_init\n");
+
+#ifdef CONFIG_SMP
+	if (blacklisted)
+		return blacklisted;
+	blacklisted = acpi_cpufreq_blacklist(c);
+	if (blacklisted)
+		return blacklisted;
+#endif
 
 	data = kzalloc(sizeof(struct acpi_cpufreq_data), GFP_KERNEL);
 	if (!data)
 		return -ENOMEM;
 
-	data->acpi_data = percpu_ptr(acpi_perf_data, cpu);
+	data->acpi_data = per_cpu_ptr(acpi_perf_data, cpu);
 	per_cpu(drv_data, cpu) = data;
 
 	if (cpu_has(c, X86_FEATURE_CONSTANT_TSC))
@@ -599,15 +592,15 @@ static int acpi_cpufreq_cpu_init(struct cpufreq_policy *policy)
 	 */
 	if (policy->shared_type == CPUFREQ_SHARED_TYPE_ALL ||
 	    policy->shared_type == CPUFREQ_SHARED_TYPE_ANY) {
-		policy->cpus = perf->shared_cpu_map;
+		cpumask_copy(policy->cpus, perf->shared_cpu_map);
 	}
-	policy->related_cpus = perf->shared_cpu_map;
+	cpumask_copy(policy->related_cpus, perf->shared_cpu_map);
 
 #ifdef CONFIG_SMP
 	dmi_check_system(sw_any_bug_dmi_table);
-	if (bios_with_sw_any_bug && cpus_weight(policy->cpus) == 1) {
+	if (bios_with_sw_any_bug && cpumask_weight(policy->cpus) == 1) {
 		policy->shared_type = CPUFREQ_SHARED_TYPE_ALL;
-		policy->cpus = per_cpu(cpu_core_map, cpu);
+		cpumask_copy(policy->cpus, cpu_core_mask(cpu));
 	}
 #endif
 
@@ -652,17 +645,24 @@ static int acpi_cpufreq_cpu_init(struct cpufreq_policy *policy)
 
 	/* detect transition latency */
 	policy->cpuinfo.transition_latency = 0;
-	for (i=0; i<perf->state_count; i++) {
+	for (i = 0; i < perf->state_count; i++) {
 		if ((perf->states[i].transition_latency * 1000) >
 		    policy->cpuinfo.transition_latency)
 			policy->cpuinfo.transition_latency =
 			    perf->states[i].transition_latency * 1000;
 	}
 
-	data->max_freq = perf->states[0].core_frequency * 1000;
+	/* Check for high latency (>20uS) from buggy BIOSes, like on T42 */
+	if (perf->control_register.space_id == ACPI_ADR_SPACE_FIXED_HARDWARE &&
+	    policy->cpuinfo.transition_latency > 20 * 1000) {
+		policy->cpuinfo.transition_latency = 20 * 1000;
+		printk_once(KERN_INFO
+			    "P-state transition latency capped at 20 uS\n");
+	}
+
 	/* table init */
-	for (i=0; i<perf->state_count; i++) {
-		if (i>0 && perf->states[i].core_frequency >=
+	for (i = 0; i < perf->state_count; i++) {
+		if (i > 0 && perf->states[i].core_frequency >=
 		    data->freq_table[valid_states-1].frequency / 1000)
 			continue;
 
@@ -677,6 +677,9 @@ static int acpi_cpufreq_cpu_init(struct cpufreq_policy *policy)
 	result = cpufreq_frequency_table_cpuinfo(policy, data->freq_table);
 	if (result)
 		goto err_freqfree;
+
+	if (perf->states[0].core_frequency * 1000 != policy->cpuinfo.max_freq)
+		printk(KERN_WARNING FW_WARN "P-state 0 is not max freq\n");
 
 	switch (perf->control_register.space_id) {
 	case ACPI_ADR_SPACE_SYSTEM_IO:
@@ -695,12 +698,8 @@ static int acpi_cpufreq_cpu_init(struct cpufreq_policy *policy)
 	acpi_processor_notify_smm(THIS_MODULE);
 
 	/* Check for APERF/MPERF support in hardware */
-	if (c->x86_vendor == X86_VENDOR_INTEL && c->cpuid_level >= 6) {
-		unsigned int ecx;
-		ecx = cpuid_ecx(6);
-		if (ecx & CPUID_6_ECX_APERFMPERF_CAPABILITY)
-			acpi_cpufreq_driver.getavg = get_measured_perf;
-	}
+	if (cpu_has(c, X86_FEATURE_APERFMPERF))
+		acpi_cpufreq_driver.getavg = get_measured_perf;
 
 	dprintk("CPU%u - ACPI performance management activated.\n", cpu);
 	for (i = 0; i < perf->state_count; i++)
@@ -788,7 +787,11 @@ static int __init acpi_cpufreq_init(void)
 	if (ret)
 		return ret;
 
-	return cpufreq_register_driver(&acpi_cpufreq_driver);
+	ret = cpufreq_register_driver(&acpi_cpufreq_driver);
+	if (ret)
+		free_acpi_perf_data();
+
+	return ret;
 }
 
 static void __exit acpi_cpufreq_exit(void)
@@ -798,8 +801,6 @@ static void __exit acpi_cpufreq_exit(void)
 	cpufreq_unregister_driver(&acpi_cpufreq_driver);
 
 	free_percpu(acpi_perf_data);
-
-	return;
 }
 
 module_param(acpi_pstate_strict, uint, 0644);

@@ -64,12 +64,13 @@ static void navman_read_int_callback(struct urb *urb)
 	usb_serial_debug_data(debug, &port->dev, __func__,
 			      urb->actual_length, data);
 
-	tty = port->port.tty;
+	tty = tty_port_tty_get(&port->port);
 	if (tty && urb->actual_length) {
 		tty_buffer_request_room(tty, urb->actual_length);
 		tty_insert_flip_string(tty, data, urb->actual_length);
 		tty_flip_buffer_push(tty);
 	}
+	tty_kref_put(tty);
 
 exit:
 	result = usb_submit_urb(urb, GFP_ATOMIC);
@@ -79,8 +80,7 @@ exit:
 			__func__, result);
 }
 
-static int navman_open(struct tty_struct *tty,
-			struct usb_serial_port *port, struct file *filp)
+static int navman_open(struct tty_struct *tty, struct usb_serial_port *port)
 {
 	int result = 0;
 
@@ -97,8 +97,7 @@ static int navman_open(struct tty_struct *tty,
 	return result;
 }
 
-static void navman_close(struct tty_struct *tty,
-			struct usb_serial_port *port, struct file *filp)
+static void navman_close(struct usb_serial_port *port)
 {
 	dbg("%s - port %d", __func__, port->number);
 

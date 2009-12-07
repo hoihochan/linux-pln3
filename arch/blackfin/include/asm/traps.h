@@ -1,13 +1,10 @@
 /*
- *  linux/include/asm/traps.h
+ *  Copyright 2004-2009 Analog Devices Inc.
+ *                 2001 Lineo, Inc
+ *                        Tony Kou
+ *                 1993 Hamish Macdonald
  *
- *  Copyright (C) 1993        Hamish Macdonald
- *
- *  Lineo, Inc    Jul 2001    Tony Kou
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file COPYING in the main directory of this archive
- * for more details.
+ * Licensed under the GPL-2
  */
 
 #ifndef _BFIN_TRAPS_H
@@ -59,6 +56,9 @@
 	level "   or a 16-bit register is accessed with a 32-bit instruction.\n"
 #define HWC_x3(level) \
 	"External Memory Addressing Error\n"
+#define EXC_0x04(level) \
+	"Unimplmented exception occured\n" \
+	level " - Maybe you forgot to install a custom exception handler?\n"
 #define HWC_x12(level) \
 	"Performance Monitor Overflow\n"
 #define HWC_x18(level) \
@@ -84,7 +84,7 @@
 	level "   a particular processor implementation.\n"
 #define EXC_0x22(level) \
 	"Illegal instruction combination\n" \
-	level " - See section for multi-issue rules in the ADSP-BF53x Blackfin\n" \
+	level " - See section for multi-issue rules in the Blackfin\n" \
 	level "   Processor Instruction Set Reference.\n"
 #define EXC_0x23(level) \
 	"Data access CPLB protection violation\n" \
@@ -108,9 +108,7 @@
 	level "   bits in the Watchpoint Instruction Address Control register (WPIACTL) is set.\n"
 #define EXC_0x2A(level) \
 	"Instruction fetch misaligned address violation\n" \
-	level " - Attempted misaligned instruction cache fetch. On a misaligned instruction fetch\n" \
-	level "   exception, the return address provided in RETX is the destination address which is\n" \
-	level "   misaligned, rather than the address of the offending instruction.\n"
+	level " - Attempted misaligned instruction cache fetch.\n"
 #define EXC_0x2B(level) \
 	"CPLB protection violation\n" \
 	level " - Illegal instruction fetch access (memory protection violation).\n"

@@ -37,6 +37,7 @@
 #include <linux/firmware.h>
 #include <linux/wireless.h>
 #include <linux/workqueue.h>
+#include <linux/sched.h>
 #include <linux/skbuff.h>
 #include <linux/dma-mapping.h>
 #include <net/dst.h>
@@ -576,42 +577,11 @@ static void b43legacy_set_slot_time(struct b43legacy_wldev *dev,
 static void b43legacy_short_slot_timing_enable(struct b43legacy_wldev *dev)
 {
 	b43legacy_set_slot_time(dev, 9);
-	dev->short_slot = 1;
 }
 
 static void b43legacy_short_slot_timing_disable(struct b43legacy_wldev *dev)
 {
 	b43legacy_set_slot_time(dev, 20);
-	dev->short_slot = 0;
-}
-
-/* Enable a Generic IRQ. "mask" is the mask of which IRQs to enable.
- * Returns the _previously_ enabled IRQ mask.
- */
-static inline u32 b43legacy_interrupt_enable(struct b43legacy_wldev *dev,
-					     u32 mask)
-{
-	u32 old_mask;
-
-	old_mask = b43legacy_read32(dev, B43legacy_MMIO_GEN_IRQ_MASK);
-	b43legacy_write32(dev, B43legacy_MMIO_GEN_IRQ_MASK, old_mask |
-			  mask);
-
-	return old_mask;
-}
-
-/* Disable a Generic IRQ. "mask" is the mask of which IRQs to disable.
- * Returns the _previously_ enabled IRQ mask.
- */
-static inline u32 b43legacy_interrupt_disable(struct b43legacy_wldev *dev,
-					      u32 mask)
-{
-	u32 old_mask;
-
-	old_mask = b43legacy_read32(dev, B43legacy_MMIO_GEN_IRQ_MASK);
-	b43legacy_write32(dev, B43legacy_MMIO_GEN_IRQ_MASK, old_mask & ~mask);
-
-	return old_mask;
 }
 
 /* Synchronize IRQ top- and bottom-half.
@@ -888,13 +858,13 @@ generate_new:
 
 static void handle_irq_tbtt_indication(struct b43legacy_wldev *dev)
 {
-	if (b43legacy_is_mode(dev->wl, IEEE80211_IF_TYPE_AP)) {
+	if (b43legacy_is_mode(dev->wl, NL80211_IFTYPE_AP)) {
 		/* TODO: PS TBTT */
 	} else {
 		if (1/*FIXME: the last PSpoll frame was sent successfully */)
 			b43legacy_power_saving_ctl_bits(dev, -1, -1);
 	}
-	if (b43legacy_is_mode(dev->wl, IEEE80211_IF_TYPE_IBSS))
+	if (b43legacy_is_mode(dev->wl, NL80211_IFTYPE_ADHOC))
 		dev->dfq_valid = 1;
 }
 
@@ -957,22 +927,53 @@ static void b43legacy_write_template_common(struct b43legacy_wldev *dev,
 			      size + sizeof(struct b43legacy_plcp_hdr6));
 }
 
+/* Convert a b43legacy antenna number value to the PHY TX control value. */
+static u16 b43legacy_antenna_to_phyctl(int antenna)
+{
+	switch (antenna) {
+	case B43legacy_ANTENNA0:
+		return B43legacy_TX4_PHY_ANT0;
+	case B43legacy_ANTENNA1:
+		return B43legacy_TX4_PHY_ANT1;
+	}
+	return B43legacy_TX4_PHY_ANTLAST;
+}
+
 static void b43legacy_write_beacon_template(struct b43legacy_wldev *dev,
 					    u16 ram_offset,
-					    u16 shm_size_offset, u8 rate)
+					    u16 shm_size_offset)
 {
 
 	unsigned int i, len, variable_len;
 	const struct ieee80211_mgmt *bcn;
 	const u8 *ie;
 	bool tim_found = 0;
+	unsigned int rate;
+	u16 ctl;
+	int antenna;
+	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(dev->wl->current_beacon);
 
 	bcn = (const struct ieee80211_mgmt *)(dev->wl->current_beacon->data);
 	len = min((size_t)dev->wl->current_beacon->len,
 		  0x200 - sizeof(struct b43legacy_plcp_hdr6));
+	rate = ieee80211_get_tx_rate(dev->wl->hw, info)->hw_value;
 
 	b43legacy_write_template_common(dev, (const u8 *)bcn, len, ram_offset,
 					shm_size_offset, rate);
+
+	/* Write the PHY TX control parameters. */
+	antenna = B43legacy_ANTENNA_DEFAULT;
+	antenna = b43legacy_antenna_to_phyctl(antenna);
+	ctl = b43legacy_shm_read16(dev, B43legacy_SHM_SHARED,
+				   B43legacy_SHM_SH_BEACPHYCTL);
+	/* We can't send beacons with short preamble. Would get PHY errors. */
+	ctl &= ~B43legacy_TX4_PHY_SHORTPRMBL;
+	ctl &= ~B43legacy_TX4_PHY_ANT;
+	ctl &= ~B43legacy_TX4_PHY_ENC;
+	ctl |= antenna;
+	ctl |= B43legacy_TX4_PHY_ENC_CCK;
+	b43legacy_shm_write16(dev, B43legacy_SHM_SHARED,
+			      B43legacy_SHM_SH_BEACPHYCTL, ctl);
 
 	/* Find the position of the TIM and the DTIM_period value
 	 * and write them to SHM. */
@@ -1015,7 +1016,8 @@ static void b43legacy_write_beacon_template(struct b43legacy_wldev *dev,
 		b43legacywarn(dev->wl, "Did not find a valid TIM IE in the "
 			      "beacon template packet. AP or IBSS operation "
 			      "may be broken.\n");
-	}
+	} else
+		b43legacydbg(dev->wl, "Updated beacon template\n");
 }
 
 static void b43legacy_write_probe_resp_plcp(struct b43legacy_wldev *dev,
@@ -1027,7 +1029,7 @@ static void b43legacy_write_probe_resp_plcp(struct b43legacy_wldev *dev,
 	__le16 dur;
 
 	plcp.data = 0;
-	b43legacy_generate_plcp_hdr(&plcp, size + FCS_LEN, rate->bitrate);
+	b43legacy_generate_plcp_hdr(&plcp, size + FCS_LEN, rate->hw_value);
 	dur = ieee80211_generic_frame_duration(dev->wl->hw,
 					       dev->wl->vif,
 					       size,
@@ -1131,8 +1133,101 @@ static void b43legacy_write_probe_resp_template(struct b43legacy_wldev *dev,
 		   0x200 - sizeof(struct b43legacy_plcp_hdr6));
 	b43legacy_write_template_common(dev, probe_resp_data,
 					size, ram_offset,
-					shm_size_offset, rate->bitrate);
+					shm_size_offset, rate->hw_value);
 	kfree(probe_resp_data);
+}
+
+static void b43legacy_upload_beacon0(struct b43legacy_wldev *dev)
+{
+	struct b43legacy_wl *wl = dev->wl;
+
+	if (wl->beacon0_uploaded)
+		return;
+	b43legacy_write_beacon_template(dev, 0x68, 0x18);
+	/* FIXME: Probe resp upload doesn't really belong here,
+	 *        but we don't use that feature anyway. */
+	b43legacy_write_probe_resp_template(dev, 0x268, 0x4A,
+				      &__b43legacy_ratetable[3]);
+	wl->beacon0_uploaded = 1;
+}
+
+static void b43legacy_upload_beacon1(struct b43legacy_wldev *dev)
+{
+	struct b43legacy_wl *wl = dev->wl;
+
+	if (wl->beacon1_uploaded)
+		return;
+	b43legacy_write_beacon_template(dev, 0x468, 0x1A);
+	wl->beacon1_uploaded = 1;
+}
+
+static void handle_irq_beacon(struct b43legacy_wldev *dev)
+{
+	struct b43legacy_wl *wl = dev->wl;
+	u32 cmd, beacon0_valid, beacon1_valid;
+
+	if (!b43legacy_is_mode(wl, NL80211_IFTYPE_AP))
+		return;
+
+	/* This is the bottom half of the asynchronous beacon update. */
+
+	/* Ignore interrupt in the future. */
+	dev->irq_mask &= ~B43legacy_IRQ_BEACON;
+
+	cmd = b43legacy_read32(dev, B43legacy_MMIO_MACCMD);
+	beacon0_valid = (cmd & B43legacy_MACCMD_BEACON0_VALID);
+	beacon1_valid = (cmd & B43legacy_MACCMD_BEACON1_VALID);
+
+	/* Schedule interrupt manually, if busy. */
+	if (beacon0_valid && beacon1_valid) {
+		b43legacy_write32(dev, B43legacy_MMIO_GEN_IRQ_REASON, B43legacy_IRQ_BEACON);
+		dev->irq_mask |= B43legacy_IRQ_BEACON;
+		return;
+	}
+
+	if (unlikely(wl->beacon_templates_virgin)) {
+		/* We never uploaded a beacon before.
+		 * Upload both templates now, but only mark one valid. */
+		wl->beacon_templates_virgin = 0;
+		b43legacy_upload_beacon0(dev);
+		b43legacy_upload_beacon1(dev);
+		cmd = b43legacy_read32(dev, B43legacy_MMIO_MACCMD);
+		cmd |= B43legacy_MACCMD_BEACON0_VALID;
+		b43legacy_write32(dev, B43legacy_MMIO_MACCMD, cmd);
+	} else {
+		if (!beacon0_valid) {
+			b43legacy_upload_beacon0(dev);
+			cmd = b43legacy_read32(dev, B43legacy_MMIO_MACCMD);
+			cmd |= B43legacy_MACCMD_BEACON0_VALID;
+			b43legacy_write32(dev, B43legacy_MMIO_MACCMD, cmd);
+		} else if (!beacon1_valid) {
+			b43legacy_upload_beacon1(dev);
+			cmd = b43legacy_read32(dev, B43legacy_MMIO_MACCMD);
+			cmd |= B43legacy_MACCMD_BEACON1_VALID;
+			b43legacy_write32(dev, B43legacy_MMIO_MACCMD, cmd);
+		}
+	}
+}
+
+static void b43legacy_beacon_update_trigger_work(struct work_struct *work)
+{
+	struct b43legacy_wl *wl = container_of(work, struct b43legacy_wl,
+					 beacon_update_trigger);
+	struct b43legacy_wldev *dev;
+
+	mutex_lock(&wl->mutex);
+	dev = wl->current_dev;
+	if (likely(dev && (b43legacy_status(dev) >= B43legacy_STAT_INITIALIZED))) {
+		spin_lock_irq(&wl->irq_lock);
+		/* Update beacon right away or defer to IRQ. */
+		handle_irq_beacon(dev);
+		/* The handler might have updated the IRQ mask. */
+		b43legacy_write32(dev, B43legacy_MMIO_GEN_IRQ_MASK,
+				  dev->irq_mask);
+		mmiowb();
+		spin_unlock_irq(&wl->irq_lock);
+	}
+	mutex_unlock(&wl->mutex);
 }
 
 /* Asynchronously update the packet templates in template RAM.
@@ -1158,77 +1253,24 @@ static void b43legacy_update_templates(struct b43legacy_wl *wl)
 	wl->current_beacon = beacon;
 	wl->beacon0_uploaded = 0;
 	wl->beacon1_uploaded = 0;
-}
-
-static void b43legacy_set_ssid(struct b43legacy_wldev *dev,
-			       const u8 *ssid, u8 ssid_len)
-{
-	u32 tmp;
-	u16 i;
-	u16 len;
-
-	len = min((u16)ssid_len, (u16)0x100);
-	for (i = 0; i < len; i += sizeof(u32)) {
-		tmp = (u32)(ssid[i + 0]);
-		if (i + 1 < len)
-			tmp |= (u32)(ssid[i + 1]) << 8;
-		if (i + 2 < len)
-			tmp |= (u32)(ssid[i + 2]) << 16;
-		if (i + 3 < len)
-			tmp |= (u32)(ssid[i + 3]) << 24;
-		b43legacy_shm_write32(dev, B43legacy_SHM_SHARED,
-				      0x380 + i, tmp);
-	}
-	b43legacy_shm_write16(dev, B43legacy_SHM_SHARED,
-			      0x48, len);
+	ieee80211_queue_work(wl->hw, &wl->beacon_update_trigger);
 }
 
 static void b43legacy_set_beacon_int(struct b43legacy_wldev *dev,
 				     u16 beacon_int)
 {
 	b43legacy_time_lock(dev);
-	if (dev->dev->id.revision >= 3)
-		b43legacy_write32(dev, 0x188, (beacon_int << 16));
-	else {
+	if (dev->dev->id.revision >= 3) {
+		b43legacy_write32(dev, B43legacy_MMIO_TSF_CFP_REP,
+				 (beacon_int << 16));
+		b43legacy_write32(dev, B43legacy_MMIO_TSF_CFP_START,
+				 (beacon_int << 10));
+	} else {
 		b43legacy_write16(dev, 0x606, (beacon_int >> 6));
 		b43legacy_write16(dev, 0x610, beacon_int);
 	}
 	b43legacy_time_unlock(dev);
-}
-
-static void handle_irq_beacon(struct b43legacy_wldev *dev)
-{
-	struct b43legacy_wl *wl = dev->wl;
-	u32 cmd;
-
-	if (!b43legacy_is_mode(wl, IEEE80211_IF_TYPE_AP))
-		return;
-
-	/* This is the bottom half of the asynchronous beacon update. */
-
-	cmd = b43legacy_read32(dev, B43legacy_MMIO_MACCMD);
-	if (!(cmd & B43legacy_MACCMD_BEACON0_VALID)) {
-		if (!wl->beacon0_uploaded) {
-			b43legacy_write_beacon_template(dev, 0x68,
-							B43legacy_SHM_SH_BTL0,
-							B43legacy_CCK_RATE_1MB);
-			b43legacy_write_probe_resp_template(dev, 0x268,
-							    B43legacy_SHM_SH_PRTLEN,
-							    &__b43legacy_ratetable[3]);
-			wl->beacon0_uploaded = 1;
-		}
-		cmd |= B43legacy_MACCMD_BEACON0_VALID;
-	}
-	if (!(cmd & B43legacy_MACCMD_BEACON1_VALID)) {
-		if (!wl->beacon1_uploaded) {
-			b43legacy_write_beacon_template(dev, 0x468,
-							B43legacy_SHM_SH_BTL1,
-							B43legacy_CCK_RATE_1MB);
-			wl->beacon1_uploaded = 1;
-		}
-		cmd |= B43legacy_MACCMD_BEACON1_VALID;
-	}
-	b43legacy_write32(dev, B43legacy_MMIO_MACCMD, cmd);
+	b43legacydbg(dev->wl, "Set beacon interval to %u\n", beacon_int);
 }
 
 static void handle_irq_ucode_debug(struct b43legacy_wldev *dev)
@@ -1327,7 +1369,7 @@ static void b43legacy_interrupt_tasklet(struct b43legacy_wldev *dev)
 	if (reason & B43legacy_IRQ_TX_OK)
 		handle_irq_transmit_status(dev);
 
-	b43legacy_interrupt_enable(dev, dev->irq_savedstate);
+	b43legacy_write32(dev, B43legacy_MMIO_GEN_IRQ_MASK, dev->irq_mask);
 	mmiowb();
 	spin_unlock_irqrestore(&dev->wl->irq_lock, flags);
 }
@@ -1379,18 +1421,18 @@ static irqreturn_t b43legacy_interrupt_handler(int irq, void *dev_id)
 	struct b43legacy_wldev *dev = dev_id;
 	u32 reason;
 
-	if (!dev)
-		return IRQ_NONE;
+	B43legacy_WARN_ON(!dev);
 
 	spin_lock(&dev->wl->irq_lock);
 
-	if (b43legacy_status(dev) < B43legacy_STAT_STARTED)
+	if (unlikely(b43legacy_status(dev) < B43legacy_STAT_STARTED))
+		/* This can only happen on shared IRQ lines. */
 		goto out;
 	reason = b43legacy_read32(dev, B43legacy_MMIO_GEN_IRQ_REASON);
 	if (reason == 0xffffffff) /* shared IRQ */
 		goto out;
 	ret = IRQ_HANDLED;
-	reason &= b43legacy_read32(dev, B43legacy_MMIO_GEN_IRQ_MASK);
+	reason &= dev->irq_mask;
 	if (!reason)
 		goto out;
 
@@ -1414,10 +1456,9 @@ static irqreturn_t b43legacy_interrupt_handler(int irq, void *dev_id)
 					      & 0x0000DC00;
 
 	b43legacy_interrupt_ack(dev, reason);
-	/* disable all IRQs. They are enabled again in the bottom half. */
-	dev->irq_savedstate = b43legacy_interrupt_disable(dev,
-							  B43legacy_IRQ_ALL);
-	/* save the reason code and call our bottom half. */
+	/* Disable all IRQs. They are enabled again in the bottom half. */
+	b43legacy_write32(dev, B43legacy_MMIO_GEN_IRQ_MASK, 0);
+	/* Save the reason code and call our bottom half. */
 	dev->irq_reason = reason;
 	tasklet_schedule(&dev->isr_tasklet);
 out:
@@ -1877,7 +1918,8 @@ void b43legacy_mac_enable(struct b43legacy_wldev *dev)
 
 		/* Re-enable IRQs. */
 		spin_lock_irq(&dev->wl->irq_lock);
-		b43legacy_interrupt_enable(dev, dev->irq_savedstate);
+		b43legacy_write32(dev, B43legacy_MMIO_GEN_IRQ_MASK,
+				  dev->irq_mask);
 		spin_unlock_irq(&dev->wl->irq_lock);
 	}
 }
@@ -1896,10 +1938,9 @@ void b43legacy_mac_suspend(struct b43legacy_wldev *dev)
 		/* Mask IRQs before suspending MAC. Otherwise
 		 * the MAC stays busy and won't suspend. */
 		spin_lock_irq(&dev->wl->irq_lock);
-		tmp = b43legacy_interrupt_disable(dev, B43legacy_IRQ_ALL);
+		b43legacy_write32(dev, B43legacy_MMIO_GEN_IRQ_MASK, 0);
 		spin_unlock_irq(&dev->wl->irq_lock);
 		b43legacy_synchronize_irq(dev);
-		dev->irq_savedstate = tmp;
 
 		b43legacy_power_saving_ctl_bits(dev, -1, 1);
 		b43legacy_write32(dev, B43legacy_MMIO_MACCTL,
@@ -1936,9 +1977,9 @@ static void b43legacy_adjust_opmode(struct b43legacy_wldev *dev)
 	ctl &= ~B43legacy_MACCTL_BEACPROMISC;
 	ctl |= B43legacy_MACCTL_INFRA;
 
-	if (b43legacy_is_mode(wl, IEEE80211_IF_TYPE_AP))
+	if (b43legacy_is_mode(wl, NL80211_IFTYPE_AP))
 		ctl |= B43legacy_MACCTL_AP;
-	else if (b43legacy_is_mode(wl, IEEE80211_IF_TYPE_IBSS))
+	else if (b43legacy_is_mode(wl, NL80211_IFTYPE_ADHOC))
 		ctl &= ~B43legacy_MACCTL_INFRA;
 
 	if (wl->filter_flags & FIF_CONTROL)
@@ -2260,7 +2301,7 @@ out_requeue:
 		delay = msecs_to_jiffies(50);
 	else
 		delay = round_jiffies_relative(HZ * 15);
-	queue_delayed_work(wl->hw->workqueue, &dev->periodic_work, delay);
+	ieee80211_queue_delayed_work(wl->hw, &dev->periodic_work, delay);
 out:
 	mutex_unlock(&wl->mutex);
 }
@@ -2271,7 +2312,7 @@ static void b43legacy_periodic_tasks_setup(struct b43legacy_wldev *dev)
 
 	dev->periodic_state = 0;
 	INIT_DELAYED_WORK(work, b43legacy_periodic_work_handler);
-	queue_delayed_work(dev->wl->hw->workqueue, work, 0);
+	ieee80211_queue_delayed_work(dev->wl->hw, work, 0);
 }
 
 /* Validate access to the chip (SHM) */
@@ -2322,6 +2363,7 @@ static void b43legacy_security_init(struct b43legacy_wldev *dev)
 				  dev->max_nr_keys - 8);
 }
 
+#ifdef CONFIG_B43LEGACY_HWRNG
 static int b43legacy_rng_read(struct hwrng *rng, u32 *data)
 {
 	struct b43legacy_wl *wl = (struct b43legacy_wl *)rng->priv;
@@ -2337,17 +2379,21 @@ static int b43legacy_rng_read(struct hwrng *rng, u32 *data)
 
 	return (sizeof(u16));
 }
+#endif
 
 static void b43legacy_rng_exit(struct b43legacy_wl *wl)
 {
+#ifdef CONFIG_B43LEGACY_HWRNG
 	if (wl->rng_initialized)
 		hwrng_unregister(&wl->rng);
+#endif
 }
 
 static int b43legacy_rng_init(struct b43legacy_wl *wl)
 {
-	int err;
+	int err = 0;
 
+#ifdef CONFIG_B43LEGACY_HWRNG
 	snprintf(wl->rng_name, ARRAY_SIZE(wl->rng_name),
 		 "%s_%s", KBUILD_MODNAME, wiphy_name(wl->hw->wiphy));
 	wl->rng.name = wl->rng_name;
@@ -2361,6 +2407,7 @@ static int b43legacy_rng_init(struct b43legacy_wl *wl)
 		       "number generator (%d)\n", err);
 	}
 
+#endif
 	return err;
 }
 
@@ -2490,7 +2537,7 @@ static void b43legacy_put_phy_into_reset(struct b43legacy_wldev *dev)
 static int b43legacy_switch_phymode(struct b43legacy_wl *wl,
 				      unsigned int new_mode)
 {
-	struct b43legacy_wldev *up_dev;
+	struct b43legacy_wldev *uninitialized_var(up_dev);
 	struct b43legacy_wldev *down_dev;
 	int err;
 	bool gmode = 0;
@@ -2556,39 +2603,47 @@ init_failure:
 	return err;
 }
 
-static int b43legacy_antenna_from_ieee80211(u8 antenna)
+/* Write the short and long frame retry limit values. */
+static void b43legacy_set_retry_limits(struct b43legacy_wldev *dev,
+				       unsigned int short_retry,
+				       unsigned int long_retry)
 {
-	switch (antenna) {
-	case 0: /* default/diversity */
-		return B43legacy_ANTENNA_DEFAULT;
-	case 1: /* Antenna 0 */
-		return B43legacy_ANTENNA0;
-	case 2: /* Antenna 1 */
-		return B43legacy_ANTENNA1;
-	default:
-		return B43legacy_ANTENNA_DEFAULT;
-	}
+	/* The retry limit is a 4-bit counter. Enforce this to avoid overflowing
+	 * the chip-internal counter. */
+	short_retry = min(short_retry, (unsigned int)0xF);
+	long_retry = min(long_retry, (unsigned int)0xF);
+
+	b43legacy_shm_write16(dev, B43legacy_SHM_WIRELESS, 0x0006, short_retry);
+	b43legacy_shm_write16(dev, B43legacy_SHM_WIRELESS, 0x0007, long_retry);
 }
 
 static int b43legacy_op_dev_config(struct ieee80211_hw *hw,
-				   struct ieee80211_conf *conf)
+				   u32 changed)
 {
 	struct b43legacy_wl *wl = hw_to_b43legacy_wl(hw);
 	struct b43legacy_wldev *dev;
 	struct b43legacy_phy *phy;
+	struct ieee80211_conf *conf = &hw->conf;
 	unsigned long flags;
 	unsigned int new_phymode = 0xFFFF;
 	int antenna_tx;
 	int antenna_rx;
 	int err = 0;
-	u32 savedirqs;
 
-	antenna_tx = b43legacy_antenna_from_ieee80211(conf->antenna_sel_tx);
-	antenna_rx = b43legacy_antenna_from_ieee80211(conf->antenna_sel_rx);
+	antenna_tx = B43legacy_ANTENNA_DEFAULT;
+	antenna_rx = B43legacy_ANTENNA_DEFAULT;
 
 	mutex_lock(&wl->mutex);
 	dev = wl->current_dev;
 	phy = &dev->phy;
+
+	if (changed & IEEE80211_CONF_CHANGE_RETRY_LIMITS)
+		b43legacy_set_retry_limits(dev,
+					   conf->short_frame_max_tx_count,
+					   conf->long_frame_max_tx_count);
+	changed &= ~IEEE80211_CONF_CHANGE_RETRY_LIMITS;
+	if (!changed)
+		goto out_unlock_mutex;
 
 	/* Switch the PHY mode (if necessary). */
 	switch (conf->channel->band) {
@@ -2613,7 +2668,7 @@ static int b43legacy_op_dev_config(struct ieee80211_hw *hw,
 		spin_unlock_irqrestore(&wl->irq_lock, flags);
 		goto out_unlock_mutex;
 	}
-	savedirqs = b43legacy_interrupt_disable(dev, B43legacy_IRQ_ALL);
+	b43legacy_write32(dev, B43legacy_MMIO_GEN_IRQ_MASK, 0);
 	spin_unlock_irqrestore(&wl->irq_lock, flags);
 	b43legacy_synchronize_irq(dev);
 
@@ -2621,16 +2676,6 @@ static int b43legacy_op_dev_config(struct ieee80211_hw *hw,
 	 * The firmware takes care of races with the TX handler. */
 	if (conf->channel->hw_value != phy->channel)
 		b43legacy_radio_selectchannel(dev, conf->channel->hw_value, 0);
-
-	/* Enable/Disable ShortSlot timing. */
-	if ((!!(conf->flags & IEEE80211_CONF_SHORT_SLOT_TIME))
-	     != dev->short_slot) {
-		B43legacy_WARN_ON(phy->type != B43legacy_PHYTYPE_G);
-		if (conf->flags & IEEE80211_CONF_SHORT_SLOT_TIME)
-			b43legacy_short_slot_timing_enable(dev);
-		else
-			b43legacy_short_slot_timing_disable(dev);
-	}
 
 	dev->wl->radiotap_enabled = !!(conf->flags & IEEE80211_CONF_RADIOTAP);
 
@@ -2645,13 +2690,8 @@ static int b43legacy_op_dev_config(struct ieee80211_hw *hw,
 	/* Antennas for RX and management frame TX. */
 	b43legacy_mgmtframe_txantenna(dev, antenna_tx);
 
-	/* Update templates for AP mode. */
-	if (b43legacy_is_mode(wl, IEEE80211_IF_TYPE_AP))
-		b43legacy_set_beacon_int(dev, conf->beacon_int);
-
-
-	if (!!conf->radio_enabled != phy->radio_on) {
-		if (conf->radio_enabled) {
+	if (wl->radio_enabled != phy->radio_on) {
+		if (wl->radio_enabled) {
 			b43legacy_radio_turn_on(dev);
 			b43legacyinfo(dev->wl, "Radio turned on by software\n");
 			if (!dev->radio_hw_enable)
@@ -2667,7 +2707,7 @@ static int b43legacy_op_dev_config(struct ieee80211_hw *hw,
 	}
 
 	spin_lock_irqsave(&wl->irq_lock, flags);
-	b43legacy_interrupt_enable(dev, savedirqs);
+	b43legacy_write32(dev, B43legacy_MMIO_GEN_IRQ_MASK, dev->irq_mask);
 	mmiowb();
 	spin_unlock_irqrestore(&wl->irq_lock, flags);
 out_unlock_mutex:
@@ -2676,11 +2716,128 @@ out_unlock_mutex:
 	return err;
 }
 
+static void b43legacy_update_basic_rates(struct b43legacy_wldev *dev, u32 brates)
+{
+	struct ieee80211_supported_band *sband =
+		dev->wl->hw->wiphy->bands[IEEE80211_BAND_2GHZ];
+	struct ieee80211_rate *rate;
+	int i;
+	u16 basic, direct, offset, basic_offset, rateptr;
+
+	for (i = 0; i < sband->n_bitrates; i++) {
+		rate = &sband->bitrates[i];
+
+		if (b43legacy_is_cck_rate(rate->hw_value)) {
+			direct = B43legacy_SHM_SH_CCKDIRECT;
+			basic = B43legacy_SHM_SH_CCKBASIC;
+			offset = b43legacy_plcp_get_ratecode_cck(rate->hw_value);
+			offset &= 0xF;
+		} else {
+			direct = B43legacy_SHM_SH_OFDMDIRECT;
+			basic = B43legacy_SHM_SH_OFDMBASIC;
+			offset = b43legacy_plcp_get_ratecode_ofdm(rate->hw_value);
+			offset &= 0xF;
+		}
+
+		rate = ieee80211_get_response_rate(sband, brates, rate->bitrate);
+
+		if (b43legacy_is_cck_rate(rate->hw_value)) {
+			basic_offset = b43legacy_plcp_get_ratecode_cck(rate->hw_value);
+			basic_offset &= 0xF;
+		} else {
+			basic_offset = b43legacy_plcp_get_ratecode_ofdm(rate->hw_value);
+			basic_offset &= 0xF;
+		}
+
+		/*
+		 * Get the pointer that we need to point to
+		 * from the direct map
+		 */
+		rateptr = b43legacy_shm_read16(dev, B43legacy_SHM_SHARED,
+					       direct + 2 * basic_offset);
+		/* and write it to the basic map */
+		b43legacy_shm_write16(dev, B43legacy_SHM_SHARED,
+				      basic + 2 * offset, rateptr);
+	}
+}
+
+static void b43legacy_op_bss_info_changed(struct ieee80211_hw *hw,
+				    struct ieee80211_vif *vif,
+				    struct ieee80211_bss_conf *conf,
+				    u32 changed)
+{
+	struct b43legacy_wl *wl = hw_to_b43legacy_wl(hw);
+	struct b43legacy_wldev *dev;
+	struct b43legacy_phy *phy;
+	unsigned long flags;
+
+	mutex_lock(&wl->mutex);
+	B43legacy_WARN_ON(wl->vif != vif);
+
+	dev = wl->current_dev;
+	phy = &dev->phy;
+
+	/* Disable IRQs while reconfiguring the device.
+	 * This makes it possible to drop the spinlock throughout
+	 * the reconfiguration process. */
+	spin_lock_irqsave(&wl->irq_lock, flags);
+	if (b43legacy_status(dev) < B43legacy_STAT_STARTED) {
+		spin_unlock_irqrestore(&wl->irq_lock, flags);
+		goto out_unlock_mutex;
+	}
+	b43legacy_write32(dev, B43legacy_MMIO_GEN_IRQ_MASK, 0);
+
+	if (changed & BSS_CHANGED_BSSID) {
+		b43legacy_synchronize_irq(dev);
+
+		if (conf->bssid)
+			memcpy(wl->bssid, conf->bssid, ETH_ALEN);
+		else
+			memset(wl->bssid, 0, ETH_ALEN);
+	}
+
+	if (b43legacy_status(dev) >= B43legacy_STAT_INITIALIZED) {
+		if (changed & BSS_CHANGED_BEACON &&
+		    (b43legacy_is_mode(wl, NL80211_IFTYPE_AP) ||
+		     b43legacy_is_mode(wl, NL80211_IFTYPE_ADHOC)))
+			b43legacy_update_templates(wl);
+
+		if (changed & BSS_CHANGED_BSSID)
+			b43legacy_write_mac_bssid_templates(dev);
+	}
+	spin_unlock_irqrestore(&wl->irq_lock, flags);
+
+	b43legacy_mac_suspend(dev);
+
+	if (changed & BSS_CHANGED_BEACON_INT &&
+	    (b43legacy_is_mode(wl, NL80211_IFTYPE_AP) ||
+	     b43legacy_is_mode(wl, NL80211_IFTYPE_ADHOC)))
+		b43legacy_set_beacon_int(dev, conf->beacon_int);
+
+	if (changed & BSS_CHANGED_BASIC_RATES)
+		b43legacy_update_basic_rates(dev, conf->basic_rates);
+
+	if (changed & BSS_CHANGED_ERP_SLOT) {
+		if (conf->use_short_slot)
+			b43legacy_short_slot_timing_enable(dev);
+		else
+			b43legacy_short_slot_timing_disable(dev);
+	}
+
+	b43legacy_mac_enable(dev);
+
+	spin_lock_irqsave(&wl->irq_lock, flags);
+	b43legacy_write32(dev, B43legacy_MMIO_GEN_IRQ_MASK, dev->irq_mask);
+	/* XXX: why? */
+	mmiowb();
+	spin_unlock_irqrestore(&wl->irq_lock, flags);
+ out_unlock_mutex:
+	mutex_unlock(&wl->mutex);
+}
+
 static void b43legacy_op_configure_filter(struct ieee80211_hw *hw,
 					  unsigned int changed,
-					  unsigned int *fflags,
-					  int mc_count,
-					  struct dev_addr_list *mc_list)
+					  unsigned int *fflags,u64 multicast)
 {
 	struct b43legacy_wl *wl = hw_to_b43legacy_wl(hw);
 	struct b43legacy_wldev *dev = wl->current_dev;
@@ -2715,41 +2872,6 @@ static void b43legacy_op_configure_filter(struct ieee80211_hw *hw,
 	spin_unlock_irqrestore(&wl->irq_lock, flags);
 }
 
-static int b43legacy_op_config_interface(struct ieee80211_hw *hw,
-					 struct ieee80211_vif *vif,
-					 struct ieee80211_if_conf *conf)
-{
-	struct b43legacy_wl *wl = hw_to_b43legacy_wl(hw);
-	struct b43legacy_wldev *dev = wl->current_dev;
-	unsigned long flags;
-
-	if (!dev)
-		return -ENODEV;
-	mutex_lock(&wl->mutex);
-	spin_lock_irqsave(&wl->irq_lock, flags);
-	B43legacy_WARN_ON(wl->vif != vif);
-	if (conf->bssid)
-		memcpy(wl->bssid, conf->bssid, ETH_ALEN);
-	else
-		memset(wl->bssid, 0, ETH_ALEN);
-	if (b43legacy_status(dev) >= B43legacy_STAT_INITIALIZED) {
-		if (b43legacy_is_mode(wl, IEEE80211_IF_TYPE_AP)) {
-			B43legacy_WARN_ON(vif->type != IEEE80211_IF_TYPE_AP);
-			b43legacy_set_ssid(dev, conf->ssid, conf->ssid_len);
-			if (conf->changed & IEEE80211_IFCC_BEACON)
-				b43legacy_update_templates(wl);
-		} else if (b43legacy_is_mode(wl, IEEE80211_IF_TYPE_IBSS)) {
-			if (conf->changed & IEEE80211_IFCC_BEACON)
-				b43legacy_update_templates(wl);
-		}
-		b43legacy_write_mac_bssid_templates(dev);
-	}
-	spin_unlock_irqrestore(&wl->irq_lock, flags);
-	mutex_unlock(&wl->mutex);
-
-	return 0;
-}
-
 /* Locking: wl->mutex */
 static void b43legacy_wireless_core_stop(struct b43legacy_wldev *dev)
 {
@@ -2763,8 +2885,7 @@ static void b43legacy_wireless_core_stop(struct b43legacy_wldev *dev)
 	 * setting the status to INITIALIZED, as the interrupt handler
 	 * won't care about IRQs then. */
 	spin_lock_irqsave(&wl->irq_lock, flags);
-	dev->irq_savedstate = b43legacy_interrupt_disable(dev,
-							  B43legacy_IRQ_ALL);
+	b43legacy_write32(dev, B43legacy_MMIO_GEN_IRQ_MASK, 0);
 	b43legacy_read32(dev, B43legacy_MMIO_GEN_IRQ_MASK); /* flush */
 	spin_unlock_irqrestore(&wl->irq_lock, flags);
 	b43legacy_synchronize_irq(dev);
@@ -2804,7 +2925,7 @@ static int b43legacy_wireless_core_start(struct b43legacy_wldev *dev)
 
 	/* Start data flow (TX/RX) */
 	b43legacy_mac_enable(dev);
-	b43legacy_interrupt_enable(dev, dev->irq_savedstate);
+	b43legacy_write32(dev, B43legacy_MMIO_GEN_IRQ_MASK, dev->irq_mask);
 
 	/* Start maintenance work */
 	b43legacy_periodic_tasks_setup(dev);
@@ -2967,7 +3088,7 @@ static void setup_struct_wldev_for_init(struct b43legacy_wldev *dev)
 	/* IRQ related flags */
 	dev->irq_reason = 0;
 	memset(dev->dma_reason, 0, sizeof(dev->dma_reason));
-	dev->irq_savedstate = B43legacy_IRQ_MASKTEMPLATE;
+	dev->irq_mask = B43legacy_IRQ_MASKTEMPLATE;
 
 	dev->mac_suspended = 1;
 
@@ -2986,15 +3107,19 @@ static void b43legacy_imcfglo_timeouts_workaround(struct b43legacy_wldev *dev)
 	    bus->pcicore.dev->id.revision <= 5) {
 		/* IMCFGLO timeouts workaround. */
 		tmp = ssb_read32(dev->dev, SSB_IMCFGLO);
-		tmp &= ~SSB_IMCFGLO_REQTO;
-		tmp &= ~SSB_IMCFGLO_SERTO;
 		switch (bus->bustype) {
 		case SSB_BUSTYPE_PCI:
 		case SSB_BUSTYPE_PCMCIA:
+			tmp &= ~SSB_IMCFGLO_REQTO;
+			tmp &= ~SSB_IMCFGLO_SERTO;
 			tmp |= 0x32;
 			break;
 		case SSB_BUSTYPE_SSB:
+			tmp &= ~SSB_IMCFGLO_REQTO;
+			tmp &= ~SSB_IMCFGLO_SERTO;
 			tmp |= 0x53;
+			break;
+		default:
 			break;
 		}
 		ssb_write32(dev->dev, SSB_IMCFGLO, tmp);
@@ -3002,25 +3127,11 @@ static void b43legacy_imcfglo_timeouts_workaround(struct b43legacy_wldev *dev)
 #endif /* CONFIG_SSB_DRIVER_PCICORE */
 }
 
-/* Write the short and long frame retry limit values. */
-static void b43legacy_set_retry_limits(struct b43legacy_wldev *dev,
-				       unsigned int short_retry,
-				       unsigned int long_retry)
-{
-	/* The retry limit is a 4-bit counter. Enforce this to avoid overflowing
-	 * the chip-internal counter. */
-	short_retry = min(short_retry, (unsigned int)0xF);
-	long_retry = min(long_retry, (unsigned int)0xF);
-
-	b43legacy_shm_write16(dev, B43legacy_SHM_WIRELESS, 0x0006, short_retry);
-	b43legacy_shm_write16(dev, B43legacy_SHM_WIRELESS, 0x0007, long_retry);
-}
-
 static void b43legacy_set_synth_pu_delay(struct b43legacy_wldev *dev,
 					  bool idle) {
 	u16 pu_delay = 1050;
 
-	if (b43legacy_is_mode(dev->wl, IEEE80211_IF_TYPE_IBSS) || idle)
+	if (b43legacy_is_mode(dev->wl, NL80211_IFTYPE_ADHOC) || idle)
 		pu_delay = 500;
 	if ((dev->phy.radio_ver == 0x2050) && (dev->phy.radio_rev == 8))
 		pu_delay = max(pu_delay, (u16)2400);
@@ -3035,7 +3146,7 @@ static void b43legacy_set_pretbtt(struct b43legacy_wldev *dev)
 	u16 pretbtt;
 
 	/* The time value is in microseconds. */
-	if (b43legacy_is_mode(dev->wl, IEEE80211_IF_TYPE_IBSS))
+	if (b43legacy_is_mode(dev->wl, NL80211_IFTYPE_ADHOC))
 		pretbtt = 2;
 	else
 		pretbtt = 250;
@@ -3259,10 +3370,10 @@ static int b43legacy_op_add_interface(struct ieee80211_hw *hw,
 
 	/* TODO: allow WDS/AP devices to coexist */
 
-	if (conf->type != IEEE80211_IF_TYPE_AP &&
-	    conf->type != IEEE80211_IF_TYPE_STA &&
-	    conf->type != IEEE80211_IF_TYPE_WDS &&
-	    conf->type != IEEE80211_IF_TYPE_IBSS)
+	if (conf->type != NL80211_IFTYPE_AP &&
+	    conf->type != NL80211_IFTYPE_STATION &&
+	    conf->type != NL80211_IFTYPE_WDS &&
+	    conf->type != NL80211_IFTYPE_ADHOC)
 		return -EOPNOTSUPP;
 
 	mutex_lock(&wl->mutex);
@@ -3323,11 +3434,6 @@ static int b43legacy_op_start(struct ieee80211_hw *hw)
 	struct b43legacy_wldev *dev = wl->current_dev;
 	int did_init = 0;
 	int err = 0;
-	bool do_rfkill_exit = 0;
-
-	/* First register RFkill.
-	 * LEDs that are registered later depend on it. */
-	b43legacy_rfkill_init(dev);
 
 	/* Kill all old instance specific information to make sure
 	 * the card won't use it in the short timeframe between start
@@ -3335,15 +3441,17 @@ static int b43legacy_op_start(struct ieee80211_hw *hw)
 	memset(wl->bssid, 0, ETH_ALEN);
 	memset(wl->mac_addr, 0, ETH_ALEN);
 	wl->filter_flags = 0;
+	wl->beacon0_uploaded = 0;
+	wl->beacon1_uploaded = 0;
+	wl->beacon_templates_virgin = 1;
+	wl->radio_enabled = 1;
 
 	mutex_lock(&wl->mutex);
 
 	if (b43legacy_status(dev) < B43legacy_STAT_INITIALIZED) {
 		err = b43legacy_wireless_core_init(dev);
-		if (err) {
-			do_rfkill_exit = 1;
+		if (err)
 			goto out_mutex_unlock;
-		}
 		did_init = 1;
 	}
 
@@ -3352,16 +3460,14 @@ static int b43legacy_op_start(struct ieee80211_hw *hw)
 		if (err) {
 			if (did_init)
 				b43legacy_wireless_core_exit(dev);
-			do_rfkill_exit = 1;
 			goto out_mutex_unlock;
 		}
 	}
 
+	wiphy_rfkill_start_polling(hw->wiphy);
+
 out_mutex_unlock:
 	mutex_unlock(&wl->mutex);
-
-	if (do_rfkill_exit)
-		b43legacy_rfkill_exit(dev);
 
 	return err;
 }
@@ -3371,39 +3477,18 @@ static void b43legacy_op_stop(struct ieee80211_hw *hw)
 	struct b43legacy_wl *wl = hw_to_b43legacy_wl(hw);
 	struct b43legacy_wldev *dev = wl->current_dev;
 
-	b43legacy_rfkill_exit(dev);
+	cancel_work_sync(&(wl->beacon_update_trigger));
 
 	mutex_lock(&wl->mutex);
 	if (b43legacy_status(dev) >= B43legacy_STAT_STARTED)
 		b43legacy_wireless_core_stop(dev);
 	b43legacy_wireless_core_exit(dev);
+	wl->radio_enabled = 0;
 	mutex_unlock(&wl->mutex);
-}
-
-static int b43legacy_op_set_retry_limit(struct ieee80211_hw *hw,
-					u32 short_retry_limit,
-					u32 long_retry_limit)
-{
-	struct b43legacy_wl *wl = hw_to_b43legacy_wl(hw);
-	struct b43legacy_wldev *dev;
-	int err = 0;
-
-	mutex_lock(&wl->mutex);
-	dev = wl->current_dev;
-	if (unlikely(!dev ||
-		     (b43legacy_status(dev) < B43legacy_STAT_INITIALIZED))) {
-		err = -ENODEV;
-		goto out_unlock;
-	}
-	b43legacy_set_retry_limits(dev, short_retry_limit, long_retry_limit);
-out_unlock:
-	mutex_unlock(&wl->mutex);
-
-	return err;
 }
 
 static int b43legacy_op_beacon_set_tim(struct ieee80211_hw *hw,
-				       int aid, int set)
+				       struct ieee80211_sta *sta, bool set)
 {
 	struct b43legacy_wl *wl = hw_to_b43legacy_wl(hw);
 	unsigned long flags;
@@ -3421,14 +3506,14 @@ static const struct ieee80211_ops b43legacy_hw_ops = {
 	.add_interface		= b43legacy_op_add_interface,
 	.remove_interface	= b43legacy_op_remove_interface,
 	.config			= b43legacy_op_dev_config,
-	.config_interface	= b43legacy_op_config_interface,
+	.bss_info_changed	= b43legacy_op_bss_info_changed,
 	.configure_filter	= b43legacy_op_configure_filter,
 	.get_stats		= b43legacy_op_get_stats,
 	.get_tx_stats		= b43legacy_op_get_tx_stats,
 	.start			= b43legacy_op_start,
 	.stop			= b43legacy_op_stop,
-	.set_retry_limit	= b43legacy_op_set_retry_limit,
 	.set_tim		= b43legacy_op_beacon_set_tim,
+	.rfkill_poll		= b43legacy_rfkill_poll,
 };
 
 /* Hard-reset the chip. Do not call this directly.
@@ -3540,6 +3625,7 @@ static int b43legacy_wireless_core_attach(struct b43legacy_wldev *dev)
 		have_bphy = 1;
 
 	dev->phy.gmode = (have_gphy || have_bphy);
+	dev->phy.radio_on = 1;
 	tmp = dev->phy.gmode ? B43legacy_TMSLOW_GMODE : 0;
 	b43legacy_wireless_core_reset(dev, tmp);
 
@@ -3704,7 +3790,13 @@ static int b43legacy_wireless_init(struct ssb_device *dev)
 	hw->flags = IEEE80211_HW_RX_INCLUDES_FCS |
 		    IEEE80211_HW_SIGNAL_DBM |
 		    IEEE80211_HW_NOISE_DBM;
+	hw->wiphy->interface_modes =
+		BIT(NL80211_IFTYPE_AP) |
+		BIT(NL80211_IFTYPE_STATION) |
+		BIT(NL80211_IFTYPE_WDS) |
+		BIT(NL80211_IFTYPE_ADHOC);
 	hw->queues = 1; /* FIXME: hardware has more queues */
+	hw->max_rates = 2;
 	SET_IEEE80211_DEV(hw, dev->dev);
 	if (is_valid_ether_addr(sprom->et1mac))
 		SET_IEEE80211_PERM_ADDR(hw, sprom->et1mac);
@@ -3719,6 +3811,7 @@ static int b43legacy_wireless_init(struct ssb_device *dev)
 	spin_lock_init(&wl->leds_lock);
 	mutex_init(&wl->mutex);
 	INIT_LIST_HEAD(&wl->devlist);
+	INIT_WORK(&wl->beacon_update_trigger, b43legacy_beacon_update_trigger_work);
 
 	ssb_set_devtypedata(dev, wl);
 	b43legacyinfo(wl, "Broadcom %04X WLAN found\n", dev->bus->chip_id);
@@ -3795,7 +3888,7 @@ void b43legacy_controller_restart(struct b43legacy_wldev *dev,
 	if (b43legacy_status(dev) < B43legacy_STAT_INITIALIZED)
 		return;
 	b43legacyinfo(dev->wl, "Controller RESET (%s) ...\n", reason);
-	queue_work(dev->wl->hw->workqueue, &dev->restart_work);
+	ieee80211_queue_work(dev->wl->hw, &dev->restart_work);
 }
 
 #ifdef CONFIG_PM

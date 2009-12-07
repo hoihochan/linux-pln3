@@ -15,10 +15,12 @@
  *
  */
 
+#include <linux/mISDNif.h>
+#include "core.h"
 #include "fsm.h"
 #include "layer2.h"
 
-static int *debug;
+static u_int *debug;
 
 static
 struct Fsm l2fsm = {NULL, 0, 0, NULL, NULL};
@@ -97,7 +99,7 @@ l2m_debug(struct FsmInst *fi, char *fmt, ...)
 	if (!(*debug & DEBUG_L2_FSM))
 		return;
 	va_start(va, fmt);
-	printk(KERN_DEBUG "l2 (tei %d): ", l2->tei);
+	printk(KERN_DEBUG "l2 (sapi %d tei %d): ", l2->sapi, l2->tei);
 	vprintk(fmt, va);
 	printk("\n");
 	va_end(va);
@@ -465,7 +467,7 @@ IsRNR(u_char *data, struct layer2 *l2)
 	    data[0] == RNR : (data[0] & 0xf) == RNR;
 }
 
-int
+static int
 iframe_error(struct layer2 *l2, struct sk_buff *skb)
 {
 	u_int	i;
@@ -483,7 +485,7 @@ iframe_error(struct layer2 *l2, struct sk_buff *skb)
 	return 0;
 }
 
-int
+static int
 super_error(struct layer2 *l2, struct sk_buff *skb)
 {
 	if (skb->len != l2addrsize(l2) +
@@ -492,7 +494,7 @@ super_error(struct layer2 *l2, struct sk_buff *skb)
 	return 0;
 }
 
-int
+static int
 unnum_error(struct layer2 *l2, struct sk_buff *skb, int wantrsp)
 {
 	int rsp = (*skb->data & 0x2) >> 1;
@@ -505,7 +507,7 @@ unnum_error(struct layer2 *l2, struct sk_buff *skb, int wantrsp)
 	return 0;
 }
 
-int
+static int
 UI_error(struct layer2 *l2, struct sk_buff *skb)
 {
 	int rsp = *skb->data & 0x2;
@@ -518,7 +520,7 @@ UI_error(struct layer2 *l2, struct sk_buff *skb)
 	return 0;
 }
 
-int
+static int
 FRMR_error(struct layer2 *l2, struct sk_buff *skb)
 {
 	u_int	headers = l2addrsize(l2) + 1;
@@ -1065,7 +1067,7 @@ l2_st6_dm_release(struct FsmInst *fi, int event, void *arg)
 	}
 }
 
-void
+static void
 enquiry_cr(struct layer2 *l2, u_char typ, u_char cr, u_char pf)
 {
 	struct sk_buff *skb;
@@ -1830,8 +1832,6 @@ static struct FsmNode L2FnList[] =
 	{ST_L2_8, EV_L1_DEACTIVATE, l2_persistant_da},
 };
 
-#define L2_FN_COUNT (sizeof(L2FnList)/sizeof(struct FsmNode))
-
 static int
 ph_data_indication(struct layer2 *l2, struct mISDNhead *hh, struct sk_buff *skb)
 {
@@ -1857,20 +1857,18 @@ ph_data_indication(struct layer2 *l2, struct mISDNhead *hh, struct sk_buff *skb)
 		psapi >>= 2;
 		ptei >>= 1;
 		if (psapi != l2->sapi) {
-			/* not our bussiness
-			 * printk(KERN_DEBUG "%s: sapi %d/%d sapi mismatch\n",
-			 *  __func__,
-			 *	psapi, l2->sapi);
-			 */
+			/* not our bussiness */
+			if (*debug & DEBUG_L2)
+				printk(KERN_DEBUG "%s: sapi %d/%d mismatch\n",
+					__func__, psapi, l2->sapi);
 			dev_kfree_skb(skb);
 			return 0;
 		}
 		if ((ptei != l2->tei) && (ptei != GROUP_TEI)) {
-			/* not our bussiness
-			 * printk(KERN_DEBUG "%s: tei %d/%d sapi %d mismatch\n",
-			 *  __func__,
-			 *	ptei, l2->tei, psapi);
-			 */
+			/* not our bussiness */
+			if (*debug & DEBUG_L2)
+				printk(KERN_DEBUG "%s: tei %d/%d mismatch\n",
+					__func__, ptei, l2->tei);
 			dev_kfree_skb(skb);
 			return 0;
 		}
@@ -1925,8 +1923,8 @@ l2_send(struct mISDNchannel *ch, struct sk_buff *skb)
 	int 			ret = -EINVAL;
 
 	if (*debug & DEBUG_L2_RECV)
-		printk(KERN_DEBUG "%s: prim(%x) id(%x) tei(%d)\n",
-		    __func__, hh->prim, hh->id, l2->tei);
+		printk(KERN_DEBUG "%s: prim(%x) id(%x) sapi(%d) tei(%d)\n",
+		    __func__, hh->prim, hh->id, l2->sapi, l2->tei);
 	switch (hh->prim) {
 	case PH_DATA_IND:
 		ret = ph_data_indication(l2, hh, skb);
@@ -2066,7 +2064,8 @@ l2_ctrl(struct mISDNchannel *ch, u_int cmd, void *arg)
 }
 
 struct layer2 *
-create_l2(struct mISDNchannel *ch, u_int protocol, u_long options, u_long arg)
+create_l2(struct mISDNchannel *ch, u_int protocol, u_long options, int tei,
+		int sapi)
 {
 	struct layer2		*l2;
 	struct channel_req	rq;
@@ -2087,7 +2086,7 @@ create_l2(struct mISDNchannel *ch, u_int protocol, u_long options, u_long arg)
 		test_and_set_bit(FLG_LAPD, &l2->flag);
 		test_and_set_bit(FLG_LAPD_NET, &l2->flag);
 		test_and_set_bit(FLG_MOD128, &l2->flag);
-		l2->sapi = 0;
+		l2->sapi = sapi;
 		l2->maxlen = MAX_DFRAME_LEN;
 		if (test_bit(OPTION_L2_PMX, &options))
 			l2->window = 7;
@@ -2097,7 +2096,7 @@ create_l2(struct mISDNchannel *ch, u_int protocol, u_long options, u_long arg)
 			test_and_set_bit(FLG_PTP, &l2->flag);
 		if (test_bit(OPTION_L2_FIXEDTEI, &options))
 			test_and_set_bit(FLG_FIXED_TEI, &l2->flag);
-		l2->tei = (u_int)arg;
+		l2->tei = tei;
 		l2->T200 = 1000;
 		l2->N200 = 3;
 		l2->T203 = 10000;
@@ -2112,7 +2111,7 @@ create_l2(struct mISDNchannel *ch, u_int protocol, u_long options, u_long arg)
 		test_and_set_bit(FLG_LAPD, &l2->flag);
 		test_and_set_bit(FLG_MOD128, &l2->flag);
 		test_and_set_bit(FLG_ORIG, &l2->flag);
-		l2->sapi = 0;
+		l2->sapi = sapi;
 		l2->maxlen = MAX_DFRAME_LEN;
 		if (test_bit(OPTION_L2_PMX, &options))
 			l2->window = 7;
@@ -2122,7 +2121,7 @@ create_l2(struct mISDNchannel *ch, u_int protocol, u_long options, u_long arg)
 			test_and_set_bit(FLG_PTP, &l2->flag);
 		if (test_bit(OPTION_L2_FIXEDTEI, &options))
 			test_and_set_bit(FLG_FIXED_TEI, &l2->flag);
-		l2->tei = (u_int)arg;
+		l2->tei = tei;
 		l2->T200 = 1000;
 		l2->N200 = 3;
 		l2->T203 = 10000;
@@ -2178,7 +2177,7 @@ x75create(struct channel_req *crq)
 
 	if (crq->protocol != ISDN_P_B_X75SLP)
 		return -EPROTONOSUPPORT;
-	l2 = create_l2(crq->ch, crq->protocol, 0, 0);
+	l2 = create_l2(crq->ch, crq->protocol, 0, 0, 0);
 	if (!l2)
 		return -ENOMEM;
 	crq->ch = &l2->ch;

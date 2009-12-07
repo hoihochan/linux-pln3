@@ -11,11 +11,14 @@
 #include <linux/interrupt.h>
 #include <linux/seq_file.h>
 #include <linux/debugfs.h>
+#include <linux/pfn.h>
+#include <linux/percpu.h>
 
 #include <asm/e820.h>
 #include <asm/processor.h>
 #include <asm/tlbflush.h>
 #include <asm/sections.h>
+#include <asm/setup.h>
 #include <asm/uaccess.h>
 #include <asm/pgalloc.h>
 #include <asm/proto.h>
@@ -25,14 +28,28 @@
  * The current flushing context - we pass it instead of 5 arguments:
  */
 struct cpa_data {
-	unsigned long	vaddr;
+	unsigned long	*vaddr;
 	pgprot_t	mask_set;
 	pgprot_t	mask_clr;
 	int		numpages;
-	int		flushtlb;
+	int		flags;
 	unsigned long	pfn;
 	unsigned	force_split : 1;
+	int		curpage;
+	struct page	**pages;
 };
+
+/*
+ * Serialize cpa() (for !DEBUG_PAGEALLOC which uses large identity mappings)
+ * using cpa_lock. So that we don't allow any other cpu, with stale large tlb
+ * entries change the page attribute in parallel to some other cpu
+ * splitting a large page entry along with changing the attribute.
+ */
+static DEFINE_SPINLOCK(cpa_lock);
+
+#define CPA_FLUSHTLB 1
+#define CPA_ARRAY 2
+#define CPA_PAGES_ARRAY 4
 
 #ifdef CONFIG_PROC_FS
 static unsigned long direct_pages_count[PG_LEVEL_NUM];
@@ -53,23 +70,22 @@ static void split_page_count(int level)
 	direct_pages_count[level - 1] += PTRS_PER_PTE;
 }
 
-int arch_report_meminfo(char *page)
+void arch_report_meminfo(struct seq_file *m)
 {
-	int n = sprintf(page, "DirectMap4k:  %8lu kB\n",
+	seq_printf(m, "DirectMap4k:    %8lu kB\n",
 			direct_pages_count[PG_LEVEL_4K] << 2);
 #if defined(CONFIG_X86_64) || defined(CONFIG_X86_PAE)
-	n += sprintf(page + n, "DirectMap2M:  %8lu kB\n",
+	seq_printf(m, "DirectMap2M:    %8lu kB\n",
 			direct_pages_count[PG_LEVEL_2M] << 11);
 #else
-	n += sprintf(page + n, "DirectMap4M:  %8lu kB\n",
+	seq_printf(m, "DirectMap4M:    %8lu kB\n",
 			direct_pages_count[PG_LEVEL_2M] << 12);
 #endif
 #ifdef CONFIG_X86_64
 	if (direct_gbpages)
-		n += sprintf(page + n, "DirectMap1G:  %8lu kB\n",
+		seq_printf(m, "DirectMap1G:    %8lu kB\n",
 			direct_pages_count[PG_LEVEL_1G] << 20);
 #endif
-	return n;
 }
 #else
 static inline void split_page_count(int level) { }
@@ -84,7 +100,7 @@ static inline unsigned long highmap_start_pfn(void)
 
 static inline unsigned long highmap_end_pfn(void)
 {
-	return __pa(round_up((unsigned long)_end, PMD_SIZE)) >> PAGE_SHIFT;
+	return __pa(roundup(_brk_end, PMD_SIZE)) >> PAGE_SHIFT;
 }
 
 #endif
@@ -128,6 +144,7 @@ void clflush_cache_range(void *vaddr, unsigned int size)
 
 	mb();
 }
+EXPORT_SYMBOL_GPL(clflush_cache_range);
 
 static void __cpa_flush_all(void *arg)
 {
@@ -139,7 +156,7 @@ static void __cpa_flush_all(void *arg)
 	 */
 	__flush_tlb_all();
 
-	if (cache && boot_cpu_data.x86_model >= 4)
+	if (cache && boot_cpu_data.x86 >= 4)
 		wbinvd();
 }
 
@@ -187,6 +204,44 @@ static void cpa_flush_range(unsigned long start, int numpages, int cache)
 		 */
 		if (pte && (pte_val(*pte) & _PAGE_PRESENT))
 			clflush_cache_range((void *) addr, PAGE_SIZE);
+	}
+}
+
+static void cpa_flush_array(unsigned long *start, int numpages, int cache,
+			    int in_flags, struct page **pages)
+{
+	unsigned int i, level;
+	unsigned long do_wbinvd = cache && numpages >= 1024; /* 4M threshold */
+
+	BUG_ON(irqs_disabled());
+
+	on_each_cpu(__cpa_flush_all, (void *) do_wbinvd, 1);
+
+	if (!cache || do_wbinvd)
+		return;
+
+	/*
+	 * We only need to flush on one CPU,
+	 * clflush is a MESI-coherent instruction that
+	 * will cause all other CPUs to flush the same
+	 * cachelines:
+	 */
+	for (i = 0; i < numpages; i++) {
+		unsigned long addr;
+		pte_t *pte;
+
+		if (in_flags & CPA_PAGES_ARRAY)
+			addr = (unsigned long)page_address(pages[i]);
+		else
+			addr = start[i];
+
+		pte = lookup_address(addr, &level);
+
+		/*
+		 * Only flush present addresses:
+		 */
+		if (pte && (pte_val(*pte) & _PAGE_PRESENT))
+			clflush_cache_range((void *)addr, PAGE_SIZE);
 	}
 }
 
@@ -398,7 +453,7 @@ try_preserve_large_page(pte_t *kpte, unsigned long address,
 		 */
 		new_pte = pfn_pte(pte_pfn(old_pte), canon_pgprot(new_prot));
 		__set_pmd_pte(kpte, address, new_pte);
-		cpa->flushtlb = 1;
+		cpa->flags |= CPA_FLUSHTLB;
 		do_split = 0;
 	}
 
@@ -406,84 +461,6 @@ out_unlock:
 	spin_unlock_irqrestore(&pgd_lock, flags);
 
 	return do_split;
-}
-
-static LIST_HEAD(page_pool);
-static unsigned long pool_size, pool_pages, pool_low;
-static unsigned long pool_used, pool_failed;
-
-static void cpa_fill_pool(struct page **ret)
-{
-	gfp_t gfp = GFP_KERNEL;
-	unsigned long flags;
-	struct page *p;
-
-	/*
-	 * Avoid recursion (on debug-pagealloc) and also signal
-	 * our priority to get to these pagetables:
-	 */
-	if (current->flags & PF_MEMALLOC)
-		return;
-	current->flags |= PF_MEMALLOC;
-
-	/*
-	 * Allocate atomically from atomic contexts:
-	 */
-	if (in_atomic() || irqs_disabled() || debug_pagealloc)
-		gfp =  GFP_ATOMIC | __GFP_NORETRY | __GFP_NOWARN;
-
-	while (pool_pages < pool_size || (ret && !*ret)) {
-		p = alloc_pages(gfp, 0);
-		if (!p) {
-			pool_failed++;
-			break;
-		}
-		/*
-		 * If the call site needs a page right now, provide it:
-		 */
-		if (ret && !*ret) {
-			*ret = p;
-			continue;
-		}
-		spin_lock_irqsave(&pgd_lock, flags);
-		list_add(&p->lru, &page_pool);
-		pool_pages++;
-		spin_unlock_irqrestore(&pgd_lock, flags);
-	}
-
-	current->flags &= ~PF_MEMALLOC;
-}
-
-#define SHIFT_MB		(20 - PAGE_SHIFT)
-#define ROUND_MB_GB		((1 << 10) - 1)
-#define SHIFT_MB_GB		10
-#define POOL_PAGES_PER_GB	16
-
-void __init cpa_init(void)
-{
-	struct sysinfo si;
-	unsigned long gb;
-
-	si_meminfo(&si);
-	/*
-	 * Calculate the number of pool pages:
-	 *
-	 * Convert totalram (nr of pages) to MiB and round to the next
-	 * GiB. Shift MiB to Gib and multiply the result by
-	 * POOL_PAGES_PER_GB:
-	 */
-	if (debug_pagealloc) {
-		gb = ((si.totalram >> SHIFT_MB) + ROUND_MB_GB) >> SHIFT_MB_GB;
-		pool_size = POOL_PAGES_PER_GB * gb;
-	} else {
-		pool_size = 1;
-	}
-	pool_low = pool_size;
-
-	cpa_fill_pool(NULL);
-	printk(KERN_DEBUG
-	       "CPA: page pool initialized %lu of %lu pages preallocated\n",
-	       pool_pages, pool_size);
 }
 
 static int split_large_page(pte_t *kpte, unsigned long address)
@@ -494,28 +471,15 @@ static int split_large_page(pte_t *kpte, unsigned long address)
 	pgprot_t ref_prot;
 	struct page *base;
 
-	/*
-	 * Get a page from the pool. The pool list is protected by the
-	 * pgd_lock, which we have to take anyway for the split
-	 * operation:
-	 */
+	if (!debug_pagealloc)
+		spin_unlock(&cpa_lock);
+	base = alloc_pages(GFP_KERNEL | __GFP_NOTRACK, 0);
+	if (!debug_pagealloc)
+		spin_lock(&cpa_lock);
+	if (!base)
+		return -ENOMEM;
+
 	spin_lock_irqsave(&pgd_lock, flags);
-	if (list_empty(&page_pool)) {
-		spin_unlock_irqrestore(&pgd_lock, flags);
-		base = NULL;
-		cpa_fill_pool(&base);
-		if (!base)
-			return -ENOMEM;
-		spin_lock_irqsave(&pgd_lock, flags);
-	} else {
-		base = list_first_entry(&page_pool, struct page, lru);
-		list_del(&base->lru);
-		pool_pages--;
-
-		if (pool_pages < pool_low)
-			pool_low = pool_pages;
-	}
-
 	/*
 	 * Check for races, another CPU might have split this page
 	 * up for us already:
@@ -527,6 +491,13 @@ static int split_large_page(pte_t *kpte, unsigned long address)
 	pbase = (pte_t *)page_address(base);
 	paravirt_alloc_pte(&init_mm, page_to_pfn(base));
 	ref_prot = pte_pgprot(pte_clrhuge(*kpte));
+	/*
+	 * If we ever want to utilize the PAT bit, we need to
+	 * update this function to make sure it's converted from
+	 * bit 12 to bit 7 when we cross from the 2MB level to
+	 * the 4K level:
+	 */
+	WARN_ON_ONCE(pgprot_val(ref_prot) & _PAGE_PAT_LARGE);
 
 #ifdef CONFIG_X86_64
 	if (level == PG_LEVEL_1G) {
@@ -553,18 +524,13 @@ static int split_large_page(pte_t *kpte, unsigned long address)
 #endif
 
 	/*
-	 * Install the new, split up pagetable. Important details here:
+	 * Install the new, split up pagetable.
 	 *
-	 * On Intel the NX bit of all levels must be cleared to make a
-	 * page executable. See section 4.13.2 of Intel 64 and IA-32
-	 * Architectures Software Developer's Manual).
-	 *
-	 * Mark the entry present. The current mapping might be
-	 * set to not present, which we preserved above.
+	 * We use the standard kernel pagetable protections for the new
+	 * pagetable protections, the actual ptes set above control the
+	 * primary protection behavior:
 	 */
-	ref_prot = pte_pgprot(pte_mkexec(pte_clrhuge(*kpte)));
-	pgprot_val(ref_prot) |= _PAGE_PRESENT;
-	__set_pmd_pte(kpte, address, mk_pte(base, ref_prot));
+	__set_pmd_pte(kpte, address, mk_pte(base, __pgprot(_KERNPG_TABLE)));
 
 	/*
 	 * Intel Atom errata AAH41 workaround.
@@ -583,11 +549,8 @@ out_unlock:
 	 * If we dropped out via the lookup_address check under
 	 * pgd_lock then stick the page back into the pool:
 	 */
-	if (base) {
-		list_add(&base->lru, &page_pool);
-		pool_pages++;
-	} else
-		pool_used++;
+	if (base)
+		__free_page(base);
 	spin_unlock_irqrestore(&pgd_lock, flags);
 
 	return 0;
@@ -617,26 +580,28 @@ static int __cpa_process_fault(struct cpa_data *cpa, unsigned long vaddr,
 	} else {
 		WARN(1, KERN_WARNING "CPA: called for zero pte. "
 			"vaddr = %lx cpa->vaddr = %lx\n", vaddr,
-			cpa->vaddr);
+			*cpa->vaddr);
 
-		return -EINVAL;
+		return -EFAULT;
 	}
 }
 
 static int __change_page_attr(struct cpa_data *cpa, int primary)
 {
-	unsigned long address = cpa->vaddr;
+	unsigned long address;
 	int do_split, err;
 	unsigned int level;
 	pte_t *kpte, old_pte;
 
-	/*
-	 * If we're called with lazy mmu updates enabled, the
-	 * in-memory pte state may be stale.  Flush pending updates to
-	 * bring them up to date.
-	 */
-	arch_flush_lazy_mmu_mode();
-
+	if (cpa->flags & CPA_PAGES_ARRAY) {
+		struct page *page = cpa->pages[cpa->curpage];
+		if (unlikely(PageHighMem(page)))
+			return 0;
+		address = (unsigned long)page_address(page);
+	} else if (cpa->flags & CPA_ARRAY)
+		address = cpa->vaddr[cpa->curpage];
+	else
+		address = *cpa->vaddr;
 repeat:
 	kpte = lookup_address(address, &level);
 	if (!kpte)
@@ -668,7 +633,7 @@ repeat:
 		 */
 		if (pte_val(old_pte) != pte_val(new_pte)) {
 			set_pte_atomic(kpte, new_pte);
-			cpa->flushtlb = 1;
+			cpa->flags |= CPA_FLUSHTLB;
 		}
 		cpa->numpages = 1;
 		return 0;
@@ -692,7 +657,25 @@ repeat:
 	 */
 	err = split_large_page(kpte, address);
 	if (!err) {
-		cpa->flushtlb = 1;
+		/*
+	 	 * Do a global flush tlb after splitting the large page
+	 	 * and before we do the actual change page attribute in the PTE.
+	 	 *
+	 	 * With out this, we violate the TLB application note, that says
+	 	 * "The TLBs may contain both ordinary and large-page
+		 *  translations for a 4-KByte range of linear addresses. This
+		 *  may occur if software modifies the paging structures so that
+		 *  the page size used for the address range changes. If the two
+		 *  translations differ with respect to page frame or attributes
+		 *  (e.g., permissions), processor behavior is undefined and may
+		 *  be implementation-specific."
+	 	 *
+	 	 * We do this global tlb flush inside the cpa_lock, so that we
+		 * don't allow any other cpu, with stale tlb entries change the
+		 * page attribute in parallel, that also falls into the
+		 * just split large page entry.
+	 	 */
+		flush_tlb_all();
 		goto repeat;
 	}
 
@@ -704,7 +687,9 @@ static int __change_page_attr_set_clr(struct cpa_data *cpa, int checkalias);
 static int cpa_process_alias(struct cpa_data *cpa)
 {
 	struct cpa_data alias_cpa;
-	int ret = 0;
+	unsigned long laddr = (unsigned long)__va(cpa->pfn << PAGE_SHIFT);
+	unsigned long vaddr;
+	int ret;
 
 	if (cpa->pfn >= max_pfn_mapped)
 		return 0;
@@ -717,42 +702,51 @@ static int cpa_process_alias(struct cpa_data *cpa)
 	 * No need to redo, when the primary call touched the direct
 	 * mapping already:
 	 */
-	if (!(within(cpa->vaddr, PAGE_OFFSET,
+	if (cpa->flags & CPA_PAGES_ARRAY) {
+		struct page *page = cpa->pages[cpa->curpage];
+		if (unlikely(PageHighMem(page)))
+			return 0;
+		vaddr = (unsigned long)page_address(page);
+	} else if (cpa->flags & CPA_ARRAY)
+		vaddr = cpa->vaddr[cpa->curpage];
+	else
+		vaddr = *cpa->vaddr;
+
+	if (!(within(vaddr, PAGE_OFFSET,
 		    PAGE_OFFSET + (max_pfn_mapped << PAGE_SHIFT)))) {
 
 		alias_cpa = *cpa;
-		alias_cpa.vaddr = (unsigned long) __va(cpa->pfn << PAGE_SHIFT);
+		alias_cpa.vaddr = &laddr;
+		alias_cpa.flags &= ~(CPA_PAGES_ARRAY | CPA_ARRAY);
 
 		ret = __change_page_attr_set_clr(&alias_cpa, 0);
+		if (ret)
+			return ret;
 	}
 
 #ifdef CONFIG_X86_64
-	if (ret)
-		return ret;
 	/*
-	 * No need to redo, when the primary call touched the high
-	 * mapping already:
-	 */
-	if (within(cpa->vaddr, (unsigned long) _text, (unsigned long) _end))
-		return 0;
-
-	/*
-	 * If the physical address is inside the kernel map, we need
+	 * If the primary call didn't touch the high mapping already
+	 * and the physical address is inside the kernel map, we need
 	 * to touch the high mapped kernel as well:
 	 */
-	if (!within(cpa->pfn, highmap_start_pfn(), highmap_end_pfn()))
-		return 0;
+	if (!within(vaddr, (unsigned long)_text, _brk_end) &&
+	    within(cpa->pfn, highmap_start_pfn(), highmap_end_pfn())) {
+		unsigned long temp_cpa_vaddr = (cpa->pfn << PAGE_SHIFT) +
+					       __START_KERNEL_map - phys_base;
+		alias_cpa = *cpa;
+		alias_cpa.vaddr = &temp_cpa_vaddr;
+		alias_cpa.flags &= ~(CPA_PAGES_ARRAY | CPA_ARRAY);
 
-	alias_cpa = *cpa;
-	alias_cpa.vaddr =
-		(cpa->pfn << PAGE_SHIFT) + __START_KERNEL_map - phys_base;
-
-	/*
-	 * The high mapping range is imprecise, so ignore the return value.
-	 */
-	__change_page_attr_set_clr(&alias_cpa, 0);
+		/*
+		 * The high mapping range is imprecise, so ignore the
+		 * return value.
+		 */
+		__change_page_attr_set_clr(&alias_cpa, 0);
+	}
 #endif
-	return ret;
+
+	return 0;
 }
 
 static int __change_page_attr_set_clr(struct cpa_data *cpa, int checkalias)
@@ -765,8 +759,15 @@ static int __change_page_attr_set_clr(struct cpa_data *cpa, int checkalias)
 		 * preservation check.
 		 */
 		cpa->numpages = numpages;
+		/* for array changes, we can't use large page */
+		if (cpa->flags & (CPA_ARRAY | CPA_PAGES_ARRAY))
+			cpa->numpages = 1;
 
+		if (!debug_pagealloc)
+			spin_lock(&cpa_lock);
 		ret = __change_page_attr(cpa, checkalias);
+		if (!debug_pagealloc)
+			spin_unlock(&cpa_lock);
 		if (ret)
 			return ret;
 
@@ -783,7 +784,11 @@ static int __change_page_attr_set_clr(struct cpa_data *cpa, int checkalias)
 		 */
 		BUG_ON(cpa->numpages > numpages);
 		numpages -= cpa->numpages;
-		cpa->vaddr += cpa->numpages * PAGE_SIZE;
+		if (cpa->flags & (CPA_PAGES_ARRAY | CPA_ARRAY))
+			cpa->curpage++;
+		else
+			*cpa->vaddr += cpa->numpages * PAGE_SIZE;
+
 	}
 	return 0;
 }
@@ -794,12 +799,14 @@ static inline int cache_attr(pgprot_t attr)
 		(_PAGE_PAT | _PAGE_PAT_LARGE | _PAGE_PWT | _PAGE_PCD);
 }
 
-static int change_page_attr_set_clr(unsigned long addr, int numpages,
+static int change_page_attr_set_clr(unsigned long *addr, int numpages,
 				    pgprot_t mask_set, pgprot_t mask_clr,
-				    int force_split)
+				    int force_split, int in_flag,
+				    struct page **pages)
 {
 	struct cpa_data cpa;
 	int ret, cache, checkalias;
+	unsigned long baddr = 0;
 
 	/*
 	 * Check, if we are requested to change a not supported
@@ -811,20 +818,49 @@ static int change_page_attr_set_clr(unsigned long addr, int numpages,
 		return 0;
 
 	/* Ensure we are PAGE_SIZE aligned */
-	if (addr & ~PAGE_MASK) {
-		addr &= PAGE_MASK;
+	if (in_flag & CPA_ARRAY) {
+		int i;
+		for (i = 0; i < numpages; i++) {
+			if (addr[i] & ~PAGE_MASK) {
+				addr[i] &= PAGE_MASK;
+				WARN_ON_ONCE(1);
+			}
+		}
+	} else if (!(in_flag & CPA_PAGES_ARRAY)) {
 		/*
-		 * People should not be passing in unaligned addresses:
+		 * in_flag of CPA_PAGES_ARRAY implies it is aligned.
+		 * No need to cehck in that case
 		 */
-		WARN_ON_ONCE(1);
+		if (*addr & ~PAGE_MASK) {
+			*addr &= PAGE_MASK;
+			/*
+			 * People should not be passing in unaligned addresses:
+			 */
+			WARN_ON_ONCE(1);
+		}
+		/*
+		 * Save address for cache flush. *addr is modified in the call
+		 * to __change_page_attr_set_clr() below.
+		 */
+		baddr = *addr;
 	}
 
+	/* Must avoid aliasing mappings in the highmem code */
+	kmap_flush_unused();
+
+	vm_unmap_aliases();
+
 	cpa.vaddr = addr;
+	cpa.pages = pages;
 	cpa.numpages = numpages;
 	cpa.mask_set = mask_set;
 	cpa.mask_clr = mask_clr;
-	cpa.flushtlb = 0;
+	cpa.flags = 0;
+	cpa.curpage = 0;
 	cpa.force_split = force_split;
+
+	if (in_flag & (CPA_ARRAY | CPA_PAGES_ARRAY))
+		cpa.flags |= in_flag;
 
 	/* No alias checking for _NX bit modifications */
 	checkalias = (pgprot_val(mask_set) | pgprot_val(mask_clr)) != _PAGE_NX;
@@ -834,7 +870,7 @@ static int change_page_attr_set_clr(unsigned long addr, int numpages,
 	/*
 	 * Check whether we really changed something:
 	 */
-	if (!cpa.flushtlb)
+	if (!(cpa.flags & CPA_FLUSHTLB))
 		goto out;
 
 	/*
@@ -849,34 +885,45 @@ static int change_page_attr_set_clr(unsigned long addr, int numpages,
 	 * error case we fall back to cpa_flush_all (which uses
 	 * wbindv):
 	 */
-	if (!ret && cpu_has_clflush)
-		cpa_flush_range(addr, numpages, cache);
-	else
+	if (!ret && cpu_has_clflush) {
+		if (cpa.flags & (CPA_PAGES_ARRAY | CPA_ARRAY)) {
+			cpa_flush_array(addr, numpages, cache,
+					cpa.flags, pages);
+		} else
+			cpa_flush_range(baddr, numpages, cache);
+	} else
 		cpa_flush_all(cache);
 
-	/*
-	 * If we've been called with lazy mmu updates enabled, then
-	 * make sure that everything gets flushed out before we
-	 * return.
-	 */
-	arch_flush_lazy_mmu_mode();
-
 out:
-	cpa_fill_pool(NULL);
-
 	return ret;
 }
 
-static inline int change_page_attr_set(unsigned long addr, int numpages,
-				       pgprot_t mask)
+static inline int change_page_attr_set(unsigned long *addr, int numpages,
+				       pgprot_t mask, int array)
 {
-	return change_page_attr_set_clr(addr, numpages, mask, __pgprot(0), 0);
+	return change_page_attr_set_clr(addr, numpages, mask, __pgprot(0), 0,
+		(array ? CPA_ARRAY : 0), NULL);
 }
 
-static inline int change_page_attr_clear(unsigned long addr, int numpages,
+static inline int change_page_attr_clear(unsigned long *addr, int numpages,
+					 pgprot_t mask, int array)
+{
+	return change_page_attr_set_clr(addr, numpages, __pgprot(0), mask, 0,
+		(array ? CPA_ARRAY : 0), NULL);
+}
+
+static inline int cpa_set_pages_array(struct page **pages, int numpages,
+				       pgprot_t mask)
+{
+	return change_page_attr_set_clr(NULL, numpages, mask, __pgprot(0), 0,
+		CPA_PAGES_ARRAY, pages);
+}
+
+static inline int cpa_clear_pages_array(struct page **pages, int numpages,
 					 pgprot_t mask)
 {
-	return change_page_attr_set_clr(addr, numpages, __pgprot(0), mask, 0);
+	return change_page_attr_set_clr(NULL, numpages, __pgprot(0), mask, 0,
+		CPA_PAGES_ARRAY, pages);
 }
 
 int _set_memory_uc(unsigned long addr, int numpages)
@@ -884,87 +931,175 @@ int _set_memory_uc(unsigned long addr, int numpages)
 	/*
 	 * for now UC MINUS. see comments in ioremap_nocache()
 	 */
-	return change_page_attr_set(addr, numpages,
-				    __pgprot(_PAGE_CACHE_UC_MINUS));
+	return change_page_attr_set(&addr, numpages,
+				    __pgprot(_PAGE_CACHE_UC_MINUS), 0);
 }
 
 int set_memory_uc(unsigned long addr, int numpages)
 {
+	int ret;
+
 	/*
 	 * for now UC MINUS. see comments in ioremap_nocache()
 	 */
-	if (reserve_memtype(__pa(addr), __pa(addr) + numpages * PAGE_SIZE,
-			    _PAGE_CACHE_UC_MINUS, NULL))
-		return -EINVAL;
+	ret = reserve_memtype(__pa(addr), __pa(addr) + numpages * PAGE_SIZE,
+			    _PAGE_CACHE_UC_MINUS, NULL);
+	if (ret)
+		goto out_err;
 
-	return _set_memory_uc(addr, numpages);
+	ret = _set_memory_uc(addr, numpages);
+	if (ret)
+		goto out_free;
+
+	return 0;
+
+out_free:
+	free_memtype(__pa(addr), __pa(addr) + numpages * PAGE_SIZE);
+out_err:
+	return ret;
 }
 EXPORT_SYMBOL(set_memory_uc);
 
+int set_memory_array_uc(unsigned long *addr, int addrinarray)
+{
+	int i, j;
+	int ret;
+
+	/*
+	 * for now UC MINUS. see comments in ioremap_nocache()
+	 */
+	for (i = 0; i < addrinarray; i++) {
+		ret = reserve_memtype(__pa(addr[i]), __pa(addr[i]) + PAGE_SIZE,
+					_PAGE_CACHE_UC_MINUS, NULL);
+		if (ret)
+			goto out_free;
+	}
+
+	ret = change_page_attr_set(addr, addrinarray,
+				    __pgprot(_PAGE_CACHE_UC_MINUS), 1);
+	if (ret)
+		goto out_free;
+
+	return 0;
+
+out_free:
+	for (j = 0; j < i; j++)
+		free_memtype(__pa(addr[j]), __pa(addr[j]) + PAGE_SIZE);
+
+	return ret;
+}
+EXPORT_SYMBOL(set_memory_array_uc);
+
 int _set_memory_wc(unsigned long addr, int numpages)
 {
-	return change_page_attr_set(addr, numpages,
-				    __pgprot(_PAGE_CACHE_WC));
+	int ret;
+	unsigned long addr_copy = addr;
+
+	ret = change_page_attr_set(&addr, numpages,
+				    __pgprot(_PAGE_CACHE_UC_MINUS), 0);
+	if (!ret) {
+		ret = change_page_attr_set_clr(&addr_copy, numpages,
+					       __pgprot(_PAGE_CACHE_WC),
+					       __pgprot(_PAGE_CACHE_MASK),
+					       0, 0, NULL);
+	}
+	return ret;
 }
 
 int set_memory_wc(unsigned long addr, int numpages)
 {
+	int ret;
+
 	if (!pat_enabled)
 		return set_memory_uc(addr, numpages);
 
-	if (reserve_memtype(__pa(addr), __pa(addr) + numpages * PAGE_SIZE,
-		_PAGE_CACHE_WC, NULL))
-		return -EINVAL;
+	ret = reserve_memtype(__pa(addr), __pa(addr) + numpages * PAGE_SIZE,
+		_PAGE_CACHE_WC, NULL);
+	if (ret)
+		goto out_err;
 
-	return _set_memory_wc(addr, numpages);
+	ret = _set_memory_wc(addr, numpages);
+	if (ret)
+		goto out_free;
+
+	return 0;
+
+out_free:
+	free_memtype(__pa(addr), __pa(addr) + numpages * PAGE_SIZE);
+out_err:
+	return ret;
 }
 EXPORT_SYMBOL(set_memory_wc);
 
 int _set_memory_wb(unsigned long addr, int numpages)
 {
-	return change_page_attr_clear(addr, numpages,
-				      __pgprot(_PAGE_CACHE_MASK));
+	return change_page_attr_clear(&addr, numpages,
+				      __pgprot(_PAGE_CACHE_MASK), 0);
 }
 
 int set_memory_wb(unsigned long addr, int numpages)
 {
-	free_memtype(__pa(addr), __pa(addr) + numpages * PAGE_SIZE);
+	int ret;
 
-	return _set_memory_wb(addr, numpages);
+	ret = _set_memory_wb(addr, numpages);
+	if (ret)
+		return ret;
+
+	free_memtype(__pa(addr), __pa(addr) + numpages * PAGE_SIZE);
+	return 0;
 }
 EXPORT_SYMBOL(set_memory_wb);
 
+int set_memory_array_wb(unsigned long *addr, int addrinarray)
+{
+	int i;
+	int ret;
+
+	ret = change_page_attr_clear(addr, addrinarray,
+				      __pgprot(_PAGE_CACHE_MASK), 1);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < addrinarray; i++)
+		free_memtype(__pa(addr[i]), __pa(addr[i]) + PAGE_SIZE);
+
+	return 0;
+}
+EXPORT_SYMBOL(set_memory_array_wb);
+
 int set_memory_x(unsigned long addr, int numpages)
 {
-	return change_page_attr_clear(addr, numpages, __pgprot(_PAGE_NX));
+	return change_page_attr_clear(&addr, numpages, __pgprot(_PAGE_NX), 0);
 }
 EXPORT_SYMBOL(set_memory_x);
 
 int set_memory_nx(unsigned long addr, int numpages)
 {
-	return change_page_attr_set(addr, numpages, __pgprot(_PAGE_NX));
+	return change_page_attr_set(&addr, numpages, __pgprot(_PAGE_NX), 0);
 }
 EXPORT_SYMBOL(set_memory_nx);
 
 int set_memory_ro(unsigned long addr, int numpages)
 {
-	return change_page_attr_clear(addr, numpages, __pgprot(_PAGE_RW));
+	return change_page_attr_clear(&addr, numpages, __pgprot(_PAGE_RW), 0);
 }
+EXPORT_SYMBOL_GPL(set_memory_ro);
 
 int set_memory_rw(unsigned long addr, int numpages)
 {
-	return change_page_attr_set(addr, numpages, __pgprot(_PAGE_RW));
+	return change_page_attr_set(&addr, numpages, __pgprot(_PAGE_RW), 0);
 }
+EXPORT_SYMBOL_GPL(set_memory_rw);
 
 int set_memory_np(unsigned long addr, int numpages)
 {
-	return change_page_attr_clear(addr, numpages, __pgprot(_PAGE_PRESENT));
+	return change_page_attr_clear(&addr, numpages, __pgprot(_PAGE_PRESENT), 0);
 }
 
 int set_memory_4k(unsigned long addr, int numpages)
 {
-	return change_page_attr_set_clr(addr, numpages, __pgprot(0),
-					__pgprot(0), 1);
+	return change_page_attr_set_clr(&addr, numpages, __pgprot(0),
+					__pgprot(0), 1, 0, NULL);
 }
 
 int set_pages_uc(struct page *page, int numpages)
@@ -975,6 +1110,39 @@ int set_pages_uc(struct page *page, int numpages)
 }
 EXPORT_SYMBOL(set_pages_uc);
 
+int set_pages_array_uc(struct page **pages, int addrinarray)
+{
+	unsigned long start;
+	unsigned long end;
+	int i;
+	int free_idx;
+
+	for (i = 0; i < addrinarray; i++) {
+		if (PageHighMem(pages[i]))
+			continue;
+		start = page_to_pfn(pages[i]) << PAGE_SHIFT;
+		end = start + PAGE_SIZE;
+		if (reserve_memtype(start, end, _PAGE_CACHE_UC_MINUS, NULL))
+			goto err_out;
+	}
+
+	if (cpa_set_pages_array(pages, addrinarray,
+			__pgprot(_PAGE_CACHE_UC_MINUS)) == 0) {
+		return 0; /* Success */
+	}
+err_out:
+	free_idx = i;
+	for (i = 0; i < free_idx; i++) {
+		if (PageHighMem(pages[i]))
+			continue;
+		start = page_to_pfn(pages[i]) << PAGE_SHIFT;
+		end = start + PAGE_SIZE;
+		free_memtype(start, end);
+	}
+	return -EINVAL;
+}
+EXPORT_SYMBOL(set_pages_array_uc);
+
 int set_pages_wb(struct page *page, int numpages)
 {
 	unsigned long addr = (unsigned long)page_address(page);
@@ -982,6 +1150,30 @@ int set_pages_wb(struct page *page, int numpages)
 	return set_memory_wb(addr, numpages);
 }
 EXPORT_SYMBOL(set_pages_wb);
+
+int set_pages_array_wb(struct page **pages, int addrinarray)
+{
+	int retval;
+	unsigned long start;
+	unsigned long end;
+	int i;
+
+	retval = cpa_clear_pages_array(pages, addrinarray,
+			__pgprot(_PAGE_CACHE_MASK));
+	if (retval)
+		return retval;
+
+	for (i = 0; i < addrinarray; i++) {
+		if (PageHighMem(pages[i]))
+			continue;
+		start = page_to_pfn(pages[i]) << PAGE_SHIFT;
+		end = start + PAGE_SIZE;
+		free_memtype(start, end);
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL(set_pages_array_wb);
 
 int set_pages_x(struct page *page, int numpages)
 {
@@ -1017,22 +1209,38 @@ int set_pages_rw(struct page *page, int numpages)
 
 static int __set_pages_p(struct page *page, int numpages)
 {
-	struct cpa_data cpa = { .vaddr = (unsigned long) page_address(page),
+	unsigned long tempaddr = (unsigned long) page_address(page);
+	struct cpa_data cpa = { .vaddr = &tempaddr,
 				.numpages = numpages,
 				.mask_set = __pgprot(_PAGE_PRESENT | _PAGE_RW),
-				.mask_clr = __pgprot(0)};
+				.mask_clr = __pgprot(0),
+				.flags = 0};
 
-	return __change_page_attr_set_clr(&cpa, 1);
+	/*
+	 * No alias checking needed for setting present flag. otherwise,
+	 * we may need to break large pages for 64-bit kernel text
+	 * mappings (this adds to complexity if we want to do this from
+	 * atomic context especially). Let's keep it simple!
+	 */
+	return __change_page_attr_set_clr(&cpa, 0);
 }
 
 static int __set_pages_np(struct page *page, int numpages)
 {
-	struct cpa_data cpa = { .vaddr = (unsigned long) page_address(page),
+	unsigned long tempaddr = (unsigned long) page_address(page);
+	struct cpa_data cpa = { .vaddr = &tempaddr,
 				.numpages = numpages,
 				.mask_set = __pgprot(0),
-				.mask_clr = __pgprot(_PAGE_PRESENT | _PAGE_RW)};
+				.mask_clr = __pgprot(_PAGE_PRESENT | _PAGE_RW),
+				.flags = 0};
 
-	return __change_page_attr_set_clr(&cpa, 1);
+	/*
+	 * No alias checking needed for setting not present flag. otherwise,
+	 * we may need to break large pages for 64-bit kernel text
+	 * mappings (this adds to complexity if we want to do this from
+	 * atomic context especially). Let's keep it simple!
+	 */
+	return __change_page_attr_set_clr(&cpa, 0);
 }
 
 void kernel_map_pages(struct page *page, int numpages, int enable)
@@ -1052,11 +1260,8 @@ void kernel_map_pages(struct page *page, int numpages, int enable)
 
 	/*
 	 * The return value is ignored as the calls cannot fail.
-	 * Large pages are kept enabled at boot time, and are
-	 * split up quickly with DEBUG_PAGEALLOC. If a splitup
-	 * fails here (due to temporary memory shortage) no damage
-	 * is done because we just keep the largepage intact up
-	 * to the next attempt when it will likely be split up:
+	 * Large pages for identity mappings are not used at boot time
+	 * and hence no memory allocations during large page split.
 	 */
 	if (enable)
 		__set_pages_p(page, numpages);
@@ -1068,52 +1273,7 @@ void kernel_map_pages(struct page *page, int numpages, int enable)
 	 * but that can deadlock->flush only current cpu:
 	 */
 	__flush_tlb_all();
-
-	/*
-	 * Try to refill the page pool here. We can do this only after
-	 * the tlb flush.
-	 */
-	cpa_fill_pool(NULL);
 }
-
-#ifdef CONFIG_DEBUG_FS
-static int dpa_show(struct seq_file *m, void *v)
-{
-	seq_puts(m, "DEBUG_PAGEALLOC\n");
-	seq_printf(m, "pool_size     : %lu\n", pool_size);
-	seq_printf(m, "pool_pages    : %lu\n", pool_pages);
-	seq_printf(m, "pool_low      : %lu\n", pool_low);
-	seq_printf(m, "pool_used     : %lu\n", pool_used);
-	seq_printf(m, "pool_failed   : %lu\n", pool_failed);
-
-	return 0;
-}
-
-static int dpa_open(struct inode *inode, struct file *filp)
-{
-	return single_open(filp, dpa_show, NULL);
-}
-
-static const struct file_operations dpa_fops = {
-	.open		= dpa_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-};
-
-static int __init debug_pagealloc_proc_init(void)
-{
-	struct dentry *de;
-
-	de = debugfs_create_file("debug_pagealloc", 0600, NULL, NULL,
-				 &dpa_fops);
-	if (!de)
-		return -ENOMEM;
-
-	return 0;
-}
-__initcall(debug_pagealloc_proc_init);
-#endif
 
 #ifdef CONFIG_HIBERNATION
 

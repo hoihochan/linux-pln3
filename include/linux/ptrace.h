@@ -81,7 +81,6 @@
 
 
 extern long arch_ptrace(struct task_struct *child, long request, long addr, long data);
-extern struct task_struct *ptrace_get_task_struct(pid_t pid);
 extern int ptrace_traceme(void);
 extern int ptrace_readdata(struct task_struct *tsk, unsigned long src, char __user *dst, int len);
 extern int ptrace_writedata(struct task_struct *tsk, char __user *src, unsigned long dst, int len);
@@ -94,7 +93,7 @@ extern void ptrace_notify(int exit_code);
 extern void __ptrace_link(struct task_struct *child,
 			  struct task_struct *new_parent);
 extern void __ptrace_unlink(struct task_struct *child);
-extern void ptrace_untrace(struct task_struct *child);
+extern void exit_ptrace(struct task_struct *tracer);
 #define PTRACE_MODE_READ   1
 #define PTRACE_MODE_ATTACH 2
 /* Returns 0 on success, -errno on denial. */
@@ -312,6 +311,18 @@ static inline void user_enable_block_step(struct task_struct *task)
  * indicated by arch_ptrace_stop_needed().
  */
 #define arch_ptrace_stop(code, info)		do { } while (0)
+#endif
+
+#ifndef arch_ptrace_untrace
+/*
+ * Do machine-specific work before untracing child.
+ *
+ * This is called for a normal detach as well as from ptrace_exit()
+ * when the tracing task dies.
+ *
+ * Called with write_lock(&tasklist_lock) held.
+ */
+#define arch_ptrace_untrace(task)		do { } while (0)
 #endif
 
 extern int task_current_syscall(struct task_struct *target, long *callno,

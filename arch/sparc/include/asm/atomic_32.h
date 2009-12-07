@@ -13,9 +13,9 @@
 
 #include <linux/types.h>
 
-typedef struct { volatile int counter; } atomic_t;
-
 #ifdef __KERNEL__
+
+#include <asm/system.h>
 
 #define ATOMIC_INIT(i)  { (i) }
 
@@ -161,5 +161,5 @@ static inline int __atomic24_sub(int i, atomic24_t *v)
 
 #endif /* !(__KERNEL__) */
 
-#include <asm-generic/atomic.h>
+#include <asm-generic/atomic-long.h>
 #endif /* !(__ARCH_SPARC_ATOMIC__) */

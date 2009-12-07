@@ -64,21 +64,23 @@ static int current_device   = -1;
 
 static DEFINE_SPINLOCK(z2ram_lock);
 
-static struct block_device_operations z2_fops;
 static struct gendisk *z2ram_gendisk;
 
 static void do_z2_request(struct request_queue *q)
 {
 	struct request *req;
-	while ((req = elv_next_request(q)) != NULL) {
-		unsigned long start = req->sector << 9;
-		unsigned long len  = req->current_nr_sectors << 9;
+
+	req = blk_fetch_request(q);
+	while (req) {
+		unsigned long start = blk_rq_pos(req) << 9;
+		unsigned long len  = blk_rq_cur_bytes(req);
+		int err = 0;
 
 		if (start + len > z2ram_size) {
 			printk( KERN_ERR DEVICE_NAME ": bad access: block=%lu, count=%u\n",
-				req->sector, req->current_nr_sectors);
-			end_request(req, 0);
-			continue;
+				blk_rq_pos(req), blk_rq_cur_sectors(req));
+			err = -EIO;
+			goto done;
 		}
 		while (len) {
 			unsigned long addr = start & Z2RAM_CHUNKMASK;
@@ -93,7 +95,9 @@ static void do_z2_request(struct request_queue *q)
 			start += size;
 			len -= size;
 		}
-		end_request(req, 1);
+	done:
+		if (!__blk_end_request_cur(req, err))
+			req = blk_fetch_request(q);
 	}
 }
 
@@ -137,8 +141,7 @@ get_chipram( void )
     return;
 }
 
-static int
-z2_open( struct inode *inode, struct file *filp )
+static int z2_open(struct block_device *bdev, fmode_t mode)
 {
     int device;
     int max_z2_map = ( Z2RAM_SIZE / Z2RAM_CHUNKSIZE ) *
@@ -147,7 +150,7 @@ z2_open( struct inode *inode, struct file *filp )
 	sizeof( z2ram_map[0] );
     int rc = -ENOMEM;
 
-    device = iminor(inode);
+    device = MINOR(bdev->bd_dev);
 
     if ( current_device != -1 && current_device != device )
     {
@@ -299,7 +302,7 @@ err_out:
 }
 
 static int
-z2_release( struct inode *inode, struct file *filp )
+z2_release(struct gendisk *disk, fmode_t mode)
 {
     if ( current_device == -1 )
 	return 0;     
@@ -311,7 +314,7 @@ z2_release( struct inode *inode, struct file *filp )
     return 0;
 }
 
-static struct block_device_operations z2_fops =
+static const struct block_device_operations z2_fops =
 {
 	.owner		= THIS_MODULE,
 	.open		= z2_open,
@@ -370,7 +373,7 @@ err:
 static void __exit z2_exit(void)
 {
     int i, j;
-    blk_unregister_region(MKDEV(Z2RAM_MAJOR, 0), 256);
+    blk_unregister_region(MKDEV(Z2RAM_MAJOR, 0), Z2MINOR_COUNT);
     unregister_blkdev(Z2RAM_MAJOR, DEVICE_NAME);
     del_gendisk(z2ram_gendisk);
     put_disk(z2ram_gendisk);

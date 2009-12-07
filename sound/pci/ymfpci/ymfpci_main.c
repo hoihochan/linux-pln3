@@ -259,8 +259,10 @@ static int snd_ymfpci_voice_alloc(struct snd_ymfpci *chip,
 	unsigned long flags;
 	int result;
 	
-	snd_assert(rvoice != NULL, return -EINVAL);
-	snd_assert(!pair || type == YMFPCI_PCM, return -EINVAL);
+	if (snd_BUG_ON(!rvoice))
+		return -EINVAL;
+	if (snd_BUG_ON(pair && type != YMFPCI_PCM))
+		return -EINVAL;
 	
 	spin_lock_irqsave(&chip->voice_lock, flags);
 	for (;;) {
@@ -278,7 +280,8 @@ static int snd_ymfpci_voice_free(struct snd_ymfpci *chip, struct snd_ymfpci_voic
 {
 	unsigned long flags;
 	
-	snd_assert(pvoice != NULL, return -EINVAL);
+	if (snd_BUG_ON(!pvoice))
+		return -EINVAL;
 	snd_ymfpci_hw_stop(chip);
 	spin_lock_irqsave(&chip->voice_lock, flags);
 	if (pvoice->number == chip->src441_used) {
@@ -315,7 +318,12 @@ static void snd_ymfpci_pcm_interrupt(struct snd_ymfpci *chip, struct snd_ymfpci_
 		ypcm->period_pos += delta;
 		ypcm->last_pos = pos;
 		if (ypcm->period_pos >= ypcm->period_size) {
-			// printk("done - active_bank = 0x%x, start = 0x%x\n", chip->active_bank, voice->bank[chip->active_bank].start);
+			/*
+			printk(KERN_DEBUG
+			       "done - active_bank = 0x%x, start = 0x%x\n",
+			       chip->active_bank,
+			       voice->bank[chip->active_bank].start);
+			*/
 			ypcm->period_pos %= ypcm->period_size;
 			spin_unlock(&chip->reg_lock);
 			snd_pcm_period_elapsed(ypcm->substream);
@@ -363,7 +371,12 @@ static void snd_ymfpci_pcm_capture_interrupt(struct snd_pcm_substream *substream
 		ypcm->last_pos = pos;
 		if (ypcm->period_pos >= ypcm->period_size) {
 			ypcm->period_pos %= ypcm->period_size;
-			// printk("done - active_bank = 0x%x, start = 0x%x\n", chip->active_bank, voice->bank[chip->active_bank].start);
+			/*
+			printk(KERN_DEBUG
+			       "done - active_bank = 0x%x, start = 0x%x\n",
+			       chip->active_bank,
+			       voice->bank[chip->active_bank].start);
+			*/
 			spin_unlock(&chip->reg_lock);
 			snd_pcm_period_elapsed(substream);
 			spin_lock(&chip->reg_lock);
@@ -494,7 +507,8 @@ static void snd_ymfpci_pcm_init_voice(struct snd_ymfpci_pcm *ypcm, unsigned int 
 	u8 use_left, use_right;
 	unsigned long flags;
 
-	snd_assert(voice != NULL, return);
+	if (snd_BUG_ON(!voice))
+		return;
 	if (runtime->channels == 1) {
 		use_left = 1;
 		use_right = 1;
@@ -820,7 +834,7 @@ static irqreturn_t snd_ymfpci_interrupt(int irq, void *dev_id)
 	status = snd_ymfpci_readw(chip, YDSXGR_INTFLAG);
 	if (status & 1) {
 		if (chip->timer)
-			snd_timer_interrupt(chip->timer, chip->timer->sticks);
+			snd_timer_interrupt(chip->timer, chip->timer_ticks);
 	}
 	snd_ymfpci_writew(chip, YDSXGR_INTFLAG, status);
 
@@ -1813,7 +1827,8 @@ int __devinit snd_ymfpci_mixer(struct snd_ymfpci *chip, int rear_switch)
 	}
 
 	/* add S/PDIF control */
-	snd_assert(chip->pcm_spdif != NULL, return -EIO);
+	if (snd_BUG_ON(!chip->pcm_spdif))
+		return -ENXIO;
 	if ((err = snd_ctl_add(chip->card, kctl = snd_ctl_new1(&snd_ymfpci_spdif_default, chip))) < 0)
 		return err;
 	kctl->id.device = chip->pcm_spdif->device;
@@ -1870,8 +1885,18 @@ static int snd_ymfpci_timer_start(struct snd_timer *timer)
 	unsigned int count;
 
 	chip = snd_timer_chip(timer);
-	count = (timer->sticks << 1) - 1;
 	spin_lock_irqsave(&chip->reg_lock, flags);
+	if (timer->sticks > 1) {
+		chip->timer_ticks = timer->sticks;
+		count = timer->sticks - 1;
+	} else {
+		/*
+		 * Divisor 1 is not allowed; fake it by using divisor 2 and
+		 * counting two ticks for each interrupt.
+		 */
+		chip->timer_ticks = 2;
+		count = 2 - 1;
+	}
 	snd_ymfpci_writew(chip, YDSXGR_TIMERCOUNT, count);
 	snd_ymfpci_writeb(chip, YDSXGR_TIMERCTRL, 0x03);
 	spin_unlock_irqrestore(&chip->reg_lock, flags);
@@ -1894,14 +1919,14 @@ static int snd_ymfpci_timer_precise_resolution(struct snd_timer *timer,
 					       unsigned long *num, unsigned long *den)
 {
 	*num = 1;
-	*den = 48000;
+	*den = 96000;
 	return 0;
 }
 
 static struct snd_timer_hardware snd_ymfpci_timer_hw = {
 	.flags = SNDRV_TIMER_HW_AUTO,
-	.resolution = 20833, /* 1/fs = 20.8333...us */
-	.ticks = 0x8000,
+	.resolution = 10417, /* 1 / 96 kHz = 10.41666...us */
+	.ticks = 0x10000,
 	.start = snd_ymfpci_timer_start,
 	.stop = snd_ymfpci_timer_stop,
 	.precise_resolution = snd_ymfpci_timer_precise_resolution,
@@ -2133,7 +2158,8 @@ static int __devinit snd_ymfpci_memalloc(struct snd_ymfpci *chip)
 	chip->work_base = ptr;
 	chip->work_base_addr = ptr_addr;
 	
-	snd_assert(ptr + chip->work_size == chip->work_ptr.area + chip->work_ptr.bytes, );
+	snd_BUG_ON(ptr + chip->work_size !=
+		   chip->work_ptr.area + chip->work_ptr.bytes);
 
 	snd_ymfpci_writel(chip, YDSXGR_PLAYCTRLBASE, chip->bank_base_playback_addr);
 	snd_ymfpci_writel(chip, YDSXGR_RECCTRLBASE, chip->bank_base_capture_addr);
@@ -2168,7 +2194,8 @@ static int snd_ymfpci_free(struct snd_ymfpci *chip)
 {
 	u16 ctrl;
 
-	snd_assert(chip != NULL, return -EINVAL);
+	if (snd_BUG_ON(!chip))
+		return -EINVAL;
 
 	if (chip->res_reg_area) {	/* don't touch busy hardware */
 		snd_ymfpci_writel(chip, YDSXGR_NATIVEDACOUTVOL, 0);

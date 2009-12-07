@@ -1,8 +1,9 @@
 /*
  * Firmware replacement code.
  *
- * Work around broken BIOSes that don't set an aperture or only set the
- * aperture in the AGP bridge.
+ * Work around broken BIOSes that don't set an aperture, only set the
+ * aperture in the AGP bridge, or set too small aperture.
+ *
  * If all fails map the aperture over some low memory.  This is cheaper than
  * doing bounce buffering. The memory is lost. This is done at early boot
  * because only the bootmem allocator can allocate 32+MB.
@@ -19,6 +20,7 @@
 #include <linux/bitops.h>
 #include <linux/ioport.h>
 #include <linux/suspend.h>
+#include <linux/kmemleak.h>
 #include <asm/e820.h>
 #include <asm/io.h>
 #include <asm/iommu.h>
@@ -93,6 +95,11 @@ static u32 __init allocate_aperture(void)
 	 * code for safe
 	 */
 	p = __alloc_bootmem_nopanic(aper_size, aper_size, 512ULL<<20);
+	/*
+	 * Kmemleak should not scan this block as it may not be mapped via the
+	 * kernel direct mapping.
+	 */
+	kmemleak_ignore(p);
 	if (!p || __pa(p)+aper_size > 0xffffffff) {
 		printk(KERN_ERR
 			"Cannot allocate aperture memory hole (%p,%uK)\n",
@@ -455,11 +462,11 @@ out:
 		   force_iommu ||
 		   valid_agp ||
 		   fallback_aper_force) {
-		printk(KERN_ERR
+		printk(KERN_INFO
 			"Your BIOS doesn't leave a aperture memory hole\n");
-		printk(KERN_ERR
+		printk(KERN_INFO
 			"Please enable the IOMMU option in the BIOS setup\n");
-		printk(KERN_ERR
+		printk(KERN_INFO
 			"This costs you %d MB of RAM\n",
 				32 << fallback_aper_order);
 

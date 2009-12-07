@@ -35,9 +35,7 @@
 #include <asm/prom.h>
 #include <asm/smp.h>
 #include <asm/paca.h>
-#include <asm/time.h>
 #include <asm/machdep.h>
-#include "xics.h"
 #include <asm/cputable.h>
 #include <asm/firmware.h>
 #include <asm/system.h>
@@ -49,6 +47,7 @@
 
 #include "plpar_wrappers.h"
 #include "pseries.h"
+#include "xics.h"
 
 
 /*
@@ -56,8 +55,6 @@
  * interface by prom_hold_cpus and is spinning on secondary_hold_spinloop.
  */
 static cpumask_t of_spin_map;
-
-extern void generic_secondary_smp_init(unsigned long);
 
 /**
  * smp_startup_cpu() - start the given cpu
@@ -105,36 +102,6 @@ static inline int __devinit smp_startup_cpu(unsigned int lcpu)
 }
 
 #ifdef CONFIG_XICS
-static inline void smp_xics_do_message(int cpu, int msg)
-{
-	set_bit(msg, &xics_ipi_message[cpu].value);
-	mb();
-	xics_cause_IPI(cpu);
-}
-
-static void smp_xics_message_pass(int target, int msg)
-{
-	unsigned int i;
-
-	if (target < NR_CPUS) {
-		smp_xics_do_message(target, msg);
-	} else {
-		for_each_online_cpu(i) {
-			if (target == MSG_ALL_BUT_SELF
-			    && i == smp_processor_id())
-				continue;
-			smp_xics_do_message(i, msg);
-		}
-	}
-}
-
-static int __init smp_xics_probe(void)
-{
-	xics_request_IPIs();
-
-	return cpus_weight(cpu_possible_map);
-}
-
 static void __devinit smp_xics_setup_cpu(int cpu)
 {
 	if (cpu != boot_cpuid)
@@ -147,31 +114,6 @@ static void __devinit smp_xics_setup_cpu(int cpu)
 
 }
 #endif /* CONFIG_XICS */
-
-static DEFINE_SPINLOCK(timebase_lock);
-static unsigned long timebase = 0;
-
-static void __devinit pSeries_give_timebase(void)
-{
-	spin_lock(&timebase_lock);
-	rtas_call(rtas_token("freeze-time-base"), 0, 1, NULL);
-	timebase = get_tb();
-	spin_unlock(&timebase_lock);
-
-	while (timebase)
-		barrier();
-	rtas_call(rtas_token("thaw-time-base"), 0, 1, NULL);
-}
-
-static void __devinit pSeries_take_timebase(void)
-{
-	while (!timebase)
-		barrier();
-	spin_lock(&timebase_lock);
-	set_tb(timebase >> 32, timebase & 0xffffffff);
-	timebase = 0;
-	spin_unlock(&timebase_lock);
-}
 
 static void __devinit smp_pSeries_kick_cpu(int nr)
 {
@@ -239,8 +181,8 @@ static void __init smp_init_pseries(void)
 
 	/* Non-lpar has additional take/give timebase */
 	if (rtas_token("freeze-time-base") != RTAS_UNKNOWN_SERVICE) {
-		smp_ops->give_timebase = pSeries_give_timebase;
-		smp_ops->take_timebase = pSeries_take_timebase;
+		smp_ops->give_timebase = rtas_give_timebase;
+		smp_ops->take_timebase = rtas_take_timebase;
 	}
 
 	pr_debug(" <- smp_init_pSeries()\n");

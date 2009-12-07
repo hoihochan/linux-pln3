@@ -78,7 +78,7 @@ config SPI_AU1550
 	  will be called au1550_spi.
 
 config SPI_BITBANG
-	tristate "Bitbanging SPI master"
+	tristate "Utilities for Bitbanging SPI masters"
 	help
 	  With a few GPIO pins, your system can bitbang the SPI protocol.
 	  Select this to get SPI support through I/O pins (GPIO, parallel
@@ -100,11 +100,28 @@ config SPI_BUTTERFLY
 	  inexpensive battery powered microcontroller evaluation board.
 	  This same cable can be used to flash new firmware.
 
-config SPI_IMX
-	tristate "Freescale iMX SPI controller"
-	depends on ARCH_IMX && EXPERIMENTAL
+config SPI_GPIO
+	tristate "GPIO-based bitbanging SPI Master"
+	depends on GENERIC_GPIO
+	select SPI_BITBANG
 	help
-	  This enables using the Freescale iMX SPI controller in master
+	  This simple GPIO bitbanging SPI master uses the arch-neutral GPIO
+	  interface to manage MOSI, MISO, SCK, and chipselect signals.  SPI
+	  slaves connected to a bus using this driver are configured as usual,
+	  except that the spi_board_info.controller_data holds the GPIO number
+	  for the chipselect used by this controller driver.
+
+	  Note that this driver often won't achieve even 1 Mbit/sec speeds,
+	  making it unusually slow for SPI.  If your platform can inline
+	  GPIO operations, you should be able to leverage that for better
+	  speed with a custom version of this driver; see the source code.
+
+config SPI_IMX
+	tristate "Freescale i.MX SPI controllers"
+	depends on ARCH_MXC
+	select SPI_BITBANG
+	help
+	  This enables using the Freescale i.MX SPI controllers in master
 	  mode.
 
 config SPI_LM70_LLP
@@ -123,17 +140,15 @@ config SPI_MPC52xx_PSC
 	  This enables using the Freescale MPC52xx Programmable Serial
 	  Controller in master SPI mode.
 
-config SPI_MPC83xx
-	tristate "Freescale MPC83xx/QUICC Engine SPI controller"
-	depends on (PPC_83xx || QUICC_ENGINE) && EXPERIMENTAL
+config SPI_MPC8xxx
+	tristate "Freescale MPC8xxx SPI controller"
+	depends on FSL_SOC
 	help
-	  This enables using the Freescale MPC83xx and QUICC Engine SPI
-	  controllers in master mode.
+	  This enables using the Freescale MPC8xxx SPI controllers in master
+	  mode.
 
-	  Note, this driver uniquely supports the SPI controller on the MPC83xx
-	  family of PowerPC processors, plus processors with QUICC Engine
-	  technology. This driver uses a simple set of shift registers for data
-	  (opposed to the CPM based descriptor model).
+	  This driver uses a simple set of shift registers for data (opposed
+	  to the CPM based descriptor model).
 
 config SPI_OMAP_UWIRE
 	tristate "OMAP1 MicroWire"
@@ -154,6 +169,25 @@ config SPI_ORION
 	depends on PLAT_ORION && EXPERIMENTAL
 	help
 	  This enables using the SPI master controller on the Orion chips.
+
+config SPI_PL022
+	tristate "ARM AMBA PL022 SSP controller (EXPERIMENTAL)"
+	depends on ARM_AMBA && EXPERIMENTAL
+	default y if MACH_U300
+	default y if ARCH_REALVIEW
+	default y if INTEGRATOR_IMPD1
+	default y if ARCH_VERSATILE
+	help
+	  This selects the ARM(R) AMBA(R) PrimeCell PL022 SSP
+	  controller. If you have an embedded system with an AMBA(R)
+	  bus and a PL022 controller, say Y or M here.
+
+config SPI_PPC4xx
+	tristate "PPC4xx SPI Controller"
+	depends on PPC32 && 4xx && SPI_MASTER
+	select SPI_BITBANG
+	help
+	  This selects a driver for the PPC4xx SPI Controller.
 
 config SPI_PXA2XX
 	tristate "PXA2xx SSP SPI master"
@@ -188,6 +222,12 @@ config SPI_SH_SCI
 	help
 	  SPI driver for SuperH SCI blocks.
 
+config SPI_STMP3XXX
+	tristate "Freescale STMP37xx/378x SPI/SSP controller"
+	depends on ARCH_STMP3XXX && SPI_MASTER
+	help
+	  SPI driver for Freescale STMP37xx/378x SoC SSP interface
+
 config SPI_TXX9
 	tristate "Toshiba TXx9 SPI controller"
 	depends on GENERIC_GPIO && CPU_TX49XX
@@ -196,7 +236,7 @@ config SPI_TXX9
 
 config SPI_XILINX
 	tristate "Xilinx SPI controller"
-	depends on XILINX_VIRTEX && EXPERIMENTAL
+	depends on (XILINX_VIRTEX || MICROBLAZE) && EXPERIMENTAL
 	select SPI_BITBANG
 	help
 	  This exposes the SPI controller IP from the Xilinx EDK.
@@ -213,17 +253,6 @@ config SPI_XILINX
 # being probably the most widely used ones.
 #
 comment "SPI Protocol Masters"
-
-config SPI_AT25
-	tristate "SPI EEPROMs from most vendors"
-	depends on SYSFS
-	help
-	  Enable this driver to get read/write support to most SPI EEPROMs,
-	  after you configure the board init code to know about each eeprom
-	  on your target board.
-
-	  This driver can also be built as a module.  If so, the module
-	  will be called at25.
 
 config SPI_SPIDEV
 	tristate "User mode SPI device driver support"

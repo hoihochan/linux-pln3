@@ -25,13 +25,16 @@ SECTIONS
 	. = ALIGN(16);
 	.text		: {
 		*(.text .stub .text.* .gnu.linkonce.t.* __ftr_alt_*)
-	}
+	}		      	      			:text
 	PROVIDE(__etext = .);
 	PROVIDE(_etext = .);
 	PROVIDE(etext = .);
 
 	. = ALIGN(8);
 	__ftr_fixup	: { *(__ftr_fixup) }
+
+	. = ALIGN(8);
+	__mmu_ftr_fixup	: { *(__mmu_ftr_fixup) }
 
 	. = ALIGN(8);
 	__lwsync_fixup	: { *(__lwsync_fixup) }
@@ -53,7 +56,7 @@ SECTIONS
 	.fixup		: { *(.fixup) }
 
 	.dynamic	: { *(.dynamic) }		:text	:dynamic
-	.got		: { *(.got) }
+	.got		: { *(.got) }			:text
 	.plt		: { *(.plt) }
 
 	_end = .;

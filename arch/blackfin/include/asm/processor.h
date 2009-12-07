@@ -1,3 +1,9 @@
+/*
+ * Copyright 2004-2009 Analog Devices Inc.
+ *
+ * Licensed under the GPL-2 or later.
+ */
+
 #ifndef __ASM_BFIN_PROCESSOR_H
 #define __ASM_BFIN_PROCESSOR_H
 
@@ -7,9 +13,8 @@
  */
 #define current_text_addr() ({ __label__ _l; _l: &&_l;})
 
+#include <asm/ptrace.h>
 #include <asm/blackfin.h>
-#include <asm/segment.h>
-#include <linux/compiler.h>
 
 static inline unsigned long rdusp(void)
 {
@@ -22,6 +27,14 @@ static inline unsigned long rdusp(void)
 static inline void wrusp(unsigned long usp)
 {
 	__asm__ __volatile__("usp = %0;\n\t"::"da"(usp));
+}
+
+static inline unsigned long __get_SP(void)
+{
+	unsigned long sp;
+
+	__asm__ __volatile__("%0 = sp;\n\t" : "=da"(sp));
+	return sp;
 }
 
 /*
@@ -51,25 +64,8 @@ struct thread_struct {
 	PS_S, 0, 0						\
 }
 
-/*
- * Do necessary setup to start up a newly executed thread.
- *
- * pass the data segment into user programs if it exists,
- * it can't hurt anything as far as I can tell
- */
-#define start_thread(_regs, _pc, _usp)					\
-do {									\
-	set_fs(USER_DS);						\
-	(_regs)->pc = (_pc);						\
-	if (current->mm)						\
-		(_regs)->p5 = current->mm->start_data;			\
-	task_thread_info(current)->l1_task_info.stack_start		\
-		= (void *)current->mm->context.stack_start;		\
-	task_thread_info(current)->l1_task_info.lowest_sp = (void *)(_usp); \
-	memcpy(L1_SCRATCH_TASK_INFO, &task_thread_info(current)->l1_task_info, \
-		sizeof(*L1_SCRATCH_TASK_INFO));				\
-	wrusp(_usp);							\
-} while(0)
+extern void start_thread(struct pt_regs *regs, unsigned long new_ip,
+					       unsigned long new_sp);
 
 /* Forward declaration, a strange C thing */
 struct task_struct;
@@ -106,32 +102,36 @@ unsigned long get_wchan(struct task_struct *p);
 	eip; })
 #define	KSTK_ESP(tsk)	((tsk) == current ? rdusp() : (tsk)->thread.usp)
 
-#define cpu_relax()    	barrier()
+#define cpu_relax()    	smp_mb()
+
 
 /* Get the Silicon Revision of the chip */
 static inline uint32_t __pure bfin_revid(void)
 {
-	/* stored in the upper 4 bits */
-	uint32_t revid = bfin_read_CHIPID() >> 28;
+	/* Always use CHIPID, to work around ANOMALY_05000234 */
+	uint32_t revid = (bfin_read_CHIPID() & CHIPID_VERSION) >> 28;
 
-#ifdef CONFIG_BF52x
-	/* ANOMALY_05000357
+#ifdef _BOOTROM_GET_DXE_ADDRESS_TWI
+	/*
+	 * ANOMALY_05000364
 	 * Incorrect Revision Number in DSPID Register
 	 */
-	if (revid == 0)
-		switch (bfin_read16(_BOOTROM_GET_DXE_ADDRESS_TWI)) {
-		case 0x0010:
-			revid = 0;
-			break;
-		case 0x2796:
-			revid = 1;
-			break;
-		default:
-			revid = 0xFFFF;
-			break;
-		}
+	if (ANOMALY_05000364 &&
+	    bfin_read16(_BOOTROM_GET_DXE_ADDRESS_TWI) == 0x2796)
+		revid = 1;
 #endif
+
 	return revid;
+}
+
+static inline uint16_t __pure bfin_cpuid(void)
+{
+	return (bfin_read_CHIPID() & CHIPID_FAMILY) >> 12;
+}
+
+static inline uint32_t __pure bfin_dspid(void)
+{
+	return bfin_read_DSPID();
 }
 
 static inline uint32_t __pure bfin_compiled_revid(void)
@@ -148,6 +148,8 @@ static inline uint32_t __pure bfin_compiled_revid(void)
 	return 4;
 #elif defined(CONFIG_BF_REV_0_5)
 	return 5;
+#elif defined(CONFIG_BF_REV_0_6)
+	return 6;
 #elif defined(CONFIG_BF_REV_ANY)
 	return 0xffff;
 #else

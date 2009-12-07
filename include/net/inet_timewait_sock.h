@@ -16,6 +16,7 @@
 #define _INET_TIMEWAIT_SOCK_
 
 
+#include <linux/kmemcheck.h>
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/timer.h>
@@ -110,7 +111,7 @@ struct inet_timewait_sock {
 #define tw_state		__tw_common.skc_state
 #define tw_reuse		__tw_common.skc_reuse
 #define tw_bound_dev_if		__tw_common.skc_bound_dev_if
-#define tw_node			__tw_common.skc_node
+#define tw_node			__tw_common.skc_nulls_node
 #define tw_bind_node		__tw_common.skc_bind_node
 #define tw_refcnt		__tw_common.skc_refcnt
 #define tw_hash			__tw_common.skc_hash
@@ -127,19 +128,22 @@ struct inet_timewait_sock {
 	__be32			tw_rcv_saddr;
 	__be16			tw_dport;
 	__u16			tw_num;
+	kmemcheck_bitfield_begin(flags);
 	/* And these are ours. */
-	__u8			tw_ipv6only:1;
-	/* 15 bits hole, try to pack */
-	__u16			tw_ipv6_offset;
+	unsigned int		tw_ipv6only     : 1,
+				tw_transparent  : 1,
+				tw_pad		: 14,	/* 14 bits hole */
+				tw_ipv6_offset  : 16;
+	kmemcheck_bitfield_end(flags);
 	unsigned long		tw_ttd;
 	struct inet_bind_bucket	*tw_tb;
 	struct hlist_node	tw_death_node;
 };
 
-static inline void inet_twsk_add_node(struct inet_timewait_sock *tw,
-				      struct hlist_head *list)
+static inline void inet_twsk_add_node_rcu(struct inet_timewait_sock *tw,
+				      struct hlist_nulls_head *list)
 {
-	hlist_add_head(&tw->tw_node, list);
+	hlist_nulls_add_head_rcu(&tw->tw_node, list);
 }
 
 static inline void inet_twsk_add_bind_node(struct inet_timewait_sock *tw,
@@ -174,7 +178,7 @@ static inline int inet_twsk_del_dead_node(struct inet_timewait_sock *tw)
 }
 
 #define inet_twsk_for_each(tw, node, head) \
-	hlist_for_each_entry(tw, node, head, tw_node)
+	hlist_nulls_for_each_entry(tw, node, head, tw_node)
 
 #define inet_twsk_for_each_inmate(tw, node, jail) \
 	hlist_for_each_entry(tw, node, jail, tw_death_node)

@@ -242,12 +242,12 @@ static struct tty_struct *pmz_receive_chars(struct uart_pmac_port *uap)
 	}
 
 	/* Sanity check, make sure the old bug is no longer happening */
-	if (uap->port.info == NULL || uap->port.info->port.tty == NULL) {
+	if (uap->port.state == NULL || uap->port.state->port.tty == NULL) {
 		WARN_ON(1);
 		(void)read_zsdata(uap);
 		return NULL;
 	}
-	tty = uap->port.info->port.tty;
+	tty = uap->port.state->port.tty;
 
 	while (1) {
 		error = 0;
@@ -369,7 +369,7 @@ static void pmz_status_handle(struct uart_pmac_port *uap)
 			uart_handle_cts_change(&uap->port,
 					       !(status & CTS));
 
-		wake_up_interruptible(&uap->port.info->delta_msr_wait);
+		wake_up_interruptible(&uap->port.state->port.delta_msr_wait);
 	}
 
 	if (status & BRK_ABRT)
@@ -420,9 +420,9 @@ static void pmz_transmit_chars(struct uart_pmac_port *uap)
 		return;
 	}
 
-	if (uap->port.info == NULL)
+	if (uap->port.state == NULL)
 		goto ack_tx_int;
-	xmit = &uap->port.info->xmit;
+	xmit = &uap->port.state->xmit;
 	if (uart_circ_empty(xmit)) {
 		uart_write_wakeup(&uap->port);
 		goto ack_tx_int;
@@ -655,7 +655,7 @@ static void pmz_start_tx(struct uart_port *port)
 		port->icount.tx++;
 		port->x_char = 0;
 	} else {
-		struct circ_buf *xmit = &port->info->xmit;
+		struct circ_buf *xmit = &port->state->xmit;
 
 		write_zsdata(uap, xmit->buf[xmit->tail]);
 		zssync(uap);
@@ -1383,6 +1383,29 @@ static int pmz_verify_port(struct uart_port *port, struct serial_struct *ser)
 	return -EINVAL;
 }
 
+#ifdef CONFIG_CONSOLE_POLL
+
+static int pmz_poll_get_char(struct uart_port *port)
+{
+	struct uart_pmac_port *uap = (struct uart_pmac_port *)port;
+
+	while ((read_zsreg(uap, R0) & Rx_CH_AV) == 0)
+		udelay(5);
+	return read_zsdata(uap);
+}
+
+static void pmz_poll_put_char(struct uart_port *port, unsigned char c)
+{
+	struct uart_pmac_port *uap = (struct uart_pmac_port *)port;
+
+	/* Wait for the transmit buffer to empty. */
+	while ((read_zsreg(uap, R0) & Tx_BUF_EMP) == 0)
+		udelay(5);
+	write_zsdata(uap, c);
+}
+
+#endif
+
 static struct uart_ops pmz_pops = {
 	.tx_empty	=	pmz_tx_empty,
 	.set_mctrl	=	pmz_set_mctrl,
@@ -1400,6 +1423,10 @@ static struct uart_ops pmz_pops = {
 	.request_port	=	pmz_request_port,
 	.config_port	=	pmz_config_port,
 	.verify_port	=	pmz_verify_port,
+#ifdef CONFIG_CONSOLE_POLL
+	.poll_get_char	=	pmz_poll_get_char,
+	.poll_put_char	=	pmz_poll_put_char,
+#endif
 };
 
 /*
@@ -1511,6 +1538,21 @@ no_dma:
 	uap->port.type = PORT_PMAC_ZILOG;
 	uap->port.flags = 0;
 
+	/*
+	 * Fixup for the port on Gatwick for which the device-tree has
+	 * missing interrupts. Normally, the macio_dev would contain
+	 * fixed up interrupt info, but we use the device-tree directly
+	 * here due to early probing so we need the fixup too.
+	 */
+	if (uap->port.irq == NO_IRQ &&
+	    np->parent && np->parent->parent &&
+	    of_device_is_compatible(np->parent->parent, "gatwick")) {
+		/* IRQs on gatwick are offset by 64 */
+		uap->port.irq = irq_create_mapping(NULL, 64 + 15);
+		uap->tx_dma_irq = irq_create_mapping(NULL, 64 + 4);
+		uap->rx_dma_irq = irq_create_mapping(NULL, 64 + 5);
+	}
+
 	/* Setup some valid baud rate information in the register
 	 * shadows so we don't write crap there before baud rate is
 	 * first initialized.
@@ -1603,7 +1645,7 @@ static int pmz_suspend(struct macio_dev *mdev, pm_message_t pm_state)
 	state = pmz_uart_reg.state + uap->port.line;
 
 	mutex_lock(&pmz_irq_mutex);
-	mutex_lock(&state->mutex);
+	mutex_lock(&state->port.mutex);
 
 	spin_lock_irqsave(&uap->port.lock, flags);
 
@@ -1634,7 +1676,7 @@ static int pmz_suspend(struct macio_dev *mdev, pm_message_t pm_state)
 	/* Shut the chip down */
 	pmz_set_scc_power(uap, 0);
 
-	mutex_unlock(&state->mutex);
+	mutex_unlock(&state->port.mutex);
 	mutex_unlock(&pmz_irq_mutex);
 
 	pmz_debug("suspend, switching complete\n");
@@ -1663,7 +1705,7 @@ static int pmz_resume(struct macio_dev *mdev)
 	state = pmz_uart_reg.state + uap->port.line;
 
 	mutex_lock(&pmz_irq_mutex);
-	mutex_lock(&state->mutex);
+	mutex_lock(&state->port.mutex);
 
 	spin_lock_irqsave(&uap->port.lock, flags);
 	if (!ZS_IS_OPEN(uap) && !ZS_IS_CONS(uap)) {
@@ -1695,7 +1737,7 @@ static int pmz_resume(struct macio_dev *mdev)
 	}
 
  bail:
-	mutex_unlock(&state->mutex);
+	mutex_unlock(&state->port.mutex);
 	mutex_unlock(&pmz_irq_mutex);
 
 	/* Right now, we deal with delay by blocking here, I'll be

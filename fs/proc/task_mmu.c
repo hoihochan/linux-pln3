@@ -205,6 +205,7 @@ static void show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
 	struct file *file = vma->vm_file;
 	int flags = vma->vm_flags;
 	unsigned long ino = 0;
+	unsigned long long pgoff = 0;
 	dev_t dev = 0;
 	int len;
 
@@ -212,6 +213,7 @@ static void show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
 		struct inode *inode = vma->vm_file->f_path.dentry->d_inode;
 		dev = inode->i_sb->s_dev;
 		ino = inode->i_ino;
+		pgoff = ((loff_t)vma->vm_pgoff) << PAGE_SHIFT;
 	}
 
 	seq_printf(m, "%08lx-%08lx %c%c%c%c %08llx %02x:%02x %lu %n",
@@ -221,7 +223,7 @@ static void show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
 			flags & VM_WRITE ? 'w' : '-',
 			flags & VM_EXEC ? 'x' : '-',
 			flags & VM_MAYSHARE ? 's' : 'p',
-			((loff_t)vma->vm_pgoff) << PAGE_SHIFT,
+			pgoff,
 			MAJOR(dev), MINOR(dev), ino, &len);
 
 	/*
@@ -241,6 +243,25 @@ static void show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
 				} else if (vma->vm_start <= mm->start_stack &&
 					   vma->vm_end >= mm->start_stack) {
 					name = "[stack]";
+				} else {
+					unsigned long stack_start;
+					struct proc_maps_private *pmp;
+
+					pmp = m->private;
+					stack_start = pmp->task->stack_start;
+
+					if (vma->vm_start <= stack_start &&
+					    vma->vm_end >= stack_start) {
+						pad_len_spaces(m, len);
+						seq_printf(m,
+						 "[threadstack:%08lx]",
+#ifdef CONFIG_STACK_GROWSUP
+						 vma->vm_end - stack_start
+#else
+						 stack_start - vma->vm_start
+#endif
+						);
+					}
 				}
 			} else {
 				name = "[vdso]";
@@ -259,9 +280,6 @@ static int show_map(struct seq_file *m, void *v)
 	struct vm_area_struct *vma = v;
 	struct proc_maps_private *priv = m->private;
 	struct task_struct *task = priv->task;
-
-	if (maps_protect && !ptrace_may_access(task, PTRACE_MODE_READ))
-		return -EACCES;
 
 	show_map_vma(m, vma);
 
@@ -384,9 +402,6 @@ static int show_smap(struct seq_file *m, void *v)
 		.private = &mss,
 	};
 
-	if (maps_protect && !ptrace_may_access(task, PTRACE_MODE_READ))
-		return -EACCES;
-
 	memset(&mss, 0, sizeof mss);
 	mss.vma = vma;
 	if (vma->vm_mm && !is_vm_hugetlb_page(vma))
@@ -403,7 +418,9 @@ static int show_smap(struct seq_file *m, void *v)
 		   "Private_Clean:  %8lu kB\n"
 		   "Private_Dirty:  %8lu kB\n"
 		   "Referenced:     %8lu kB\n"
-		   "Swap:           %8lu kB\n",
+		   "Swap:           %8lu kB\n"
+		   "KernelPageSize: %8lu kB\n"
+		   "MMUPageSize:    %8lu kB\n",
 		   (vma->vm_end - vma->vm_start) >> 10,
 		   mss.resident >> 10,
 		   (unsigned long)(mss.pss >> (10 + PSS_SHIFT)),
@@ -412,7 +429,9 @@ static int show_smap(struct seq_file *m, void *v)
 		   mss.private_clean >> 10,
 		   mss.private_dirty >> 10,
 		   mss.referenced >> 10,
-		   mss.swap >> 10);
+		   mss.swap >> 10,
+		   vma_kernel_pagesize(vma) >> 10,
+		   vma_mmu_pagesize(vma) >> 10);
 
 	if (m->count < m->size)  /* vma is copied successfully */
 		m->version = (vma != get_gate_vma(task)) ? vma->vm_start : 0;
@@ -465,23 +484,28 @@ static int clear_refs_pte_range(pmd_t *pmd, unsigned long addr,
 	return 0;
 }
 
+#define CLEAR_REFS_ALL 1
+#define CLEAR_REFS_ANON 2
+#define CLEAR_REFS_MAPPED 3
+
 static ssize_t clear_refs_write(struct file *file, const char __user *buf,
 				size_t count, loff_t *ppos)
 {
 	struct task_struct *task;
-	char buffer[PROC_NUMBUF], *end;
+	char buffer[PROC_NUMBUF];
 	struct mm_struct *mm;
 	struct vm_area_struct *vma;
+	long type;
 
 	memset(buffer, 0, sizeof(buffer));
 	if (count > sizeof(buffer) - 1)
 		count = sizeof(buffer) - 1;
 	if (copy_from_user(buffer, buf, count))
 		return -EFAULT;
-	if (!simple_strtol(buffer, &end, 0))
+	if (strict_strtol(strstrip(buffer), 10, &type))
 		return -EINVAL;
-	if (*end == '\n')
-		end++;
+	if (type < CLEAR_REFS_ALL || type > CLEAR_REFS_MAPPED)
+		return -EINVAL;
 	task = get_proc_task(file->f_path.dentry->d_inode);
 	if (!task)
 		return -ESRCH;
@@ -494,18 +518,31 @@ static ssize_t clear_refs_write(struct file *file, const char __user *buf,
 		down_read(&mm->mmap_sem);
 		for (vma = mm->mmap; vma; vma = vma->vm_next) {
 			clear_refs_walk.private = vma;
-			if (!is_vm_hugetlb_page(vma))
-				walk_page_range(vma->vm_start, vma->vm_end,
-						&clear_refs_walk);
+			if (is_vm_hugetlb_page(vma))
+				continue;
+			/*
+			 * Writing 1 to /proc/pid/clear_refs affects all pages.
+			 *
+			 * Writing 2 to /proc/pid/clear_refs only affects
+			 * Anonymous pages.
+			 *
+			 * Writing 3 to /proc/pid/clear_refs only affects file
+			 * mapped pages.
+			 */
+			if (type == CLEAR_REFS_ANON && vma->vm_file)
+				continue;
+			if (type == CLEAR_REFS_MAPPED && !vma->vm_file)
+				continue;
+			walk_page_range(vma->vm_start, vma->vm_end,
+					&clear_refs_walk);
 		}
 		flush_tlb_mm(mm);
 		up_read(&mm->mmap_sem);
 		mmput(mm);
 	}
 	put_task_struct(task);
-	if (end - buffer == 0)
-		return -EIO;
-	return end - buffer;
+
+	return count;
 }
 
 const struct file_operations proc_clear_refs_operations = {
@@ -700,8 +737,8 @@ static ssize_t pagemap_read(struct file *file, char __user *buf,
 		goto out_pages;
 	}
 
-	pm.out = (u64 *)buf;
-	pm.end = (u64 *)(buf + count);
+	pm.out = (u64 __user *)buf;
+	pm.end = (u64 __user *)(buf + count);
 
 	pagemap_walk.pmd_entry = pagemap_pte_range;
 	pagemap_walk.pte_hole = pagemap_pte_hole;
@@ -727,9 +764,9 @@ static ssize_t pagemap_read(struct file *file, char __user *buf,
 	if (ret == PM_END_OF_BUFFER)
 		ret = 0;
 	/* don't need mmap_sem for these, but this looks cleaner */
-	*ppos += (char *)pm.out - buf;
+	*ppos += (char __user *)pm.out - buf;
 	if (!ret)
-		ret = (char *)pm.out - buf;
+		ret = (char __user *)pm.out - buf;
 
 out_pages:
 	for (; pagecount; pagecount--) {
@@ -757,22 +794,11 @@ const struct file_operations proc_pagemap_operations = {
 #ifdef CONFIG_NUMA
 extern int show_numa_map(struct seq_file *m, void *v);
 
-static int show_numa_map_checked(struct seq_file *m, void *v)
-{
-	struct proc_maps_private *priv = m->private;
-	struct task_struct *task = priv->task;
-
-	if (maps_protect && !ptrace_may_access(task, PTRACE_MODE_READ))
-		return -EACCES;
-
-	return show_numa_map(m, v);
-}
-
 static const struct seq_operations proc_pid_numa_maps_op = {
         .start  = m_start,
         .next   = m_next,
         .stop   = m_stop,
-        .show   = show_numa_map_checked
+        .show   = show_numa_map,
 };
 
 static int numa_maps_open(struct inode *inode, struct file *file)

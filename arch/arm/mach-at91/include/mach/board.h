@@ -37,6 +37,8 @@
 #include <linux/leds.h>
 #include <linux/spi/spi.h>
 #include <linux/usb/atmel_usba_udc.h>
+#include <linux/atmel-mci.h>
+#include <sound/atmel-ac97c.h>
 
  /* USB Device */
 struct at91_udc_data {
@@ -56,10 +58,14 @@ struct at91_cf_data {
 	u8	vcc_pin;		/* power switching */
 	u8	rst_pin;		/* card reset */
 	u8	chipselect;		/* EBI Chip Select number */
+	u8	flags;
+#define AT91_CF_TRUE_IDE	0x01
+#define AT91_IDE_SWAP_A0_A2	0x02
 };
 extern void __init at91_add_device_cf(struct at91_cf_data *data);
 
  /* MMC / SD */
+  /* at91_mci platform config */
 struct at91_mmc_data {
 	u8		det_pin;	/* card detect IRQ */
 	unsigned	slot_b:1;	/* uses Slot B */
@@ -69,6 +75,9 @@ struct at91_mmc_data {
 };
 extern void __init at91_add_device_mmc(short mmc_id, struct at91_mmc_data *data);
 
+  /* atmel-mci platform config */
+extern void __init at91_add_device_mci(short mmc_id, struct mci_platform_data *data);
+
  /* Ethernet (EMAC & MACB) */
 struct at91_eth_data {
 	u32		phy_mask;
@@ -77,22 +86,25 @@ struct at91_eth_data {
 };
 extern void __init at91_add_device_eth(struct at91_eth_data *data);
 
-#if defined(CONFIG_ARCH_AT91SAM9260) || defined(CONFIG_ARCH_AT91SAM9263) || defined(CONFIG_ARCH_AT91SAM9G20) || defined(CONFIG_ARCH_AT91CAP9)
+#if defined(CONFIG_ARCH_AT91SAM9260) || defined(CONFIG_ARCH_AT91SAM9263) || defined(CONFIG_ARCH_AT91SAM9G20) || defined(CONFIG_ARCH_AT91CAP9) \
+	|| defined(CONFIG_ARCH_AT91SAM9G45)
 #define eth_platform_data	at91_eth_data
 #endif
 
  /* USB Host */
 struct at91_usbh_data {
 	u8		ports;		/* number of ports on root hub */
-	u8		vbus_pin[];	/* port power-control pin */
+	u8		vbus_pin[2];	/* port power-control pin */
 };
 extern void __init at91_add_device_usbh(struct at91_usbh_data *data);
+extern void __init at91_add_device_usbh_ohci(struct at91_usbh_data *data);
 
  /* NAND / SmartMedia */
 struct atmel_nand_data {
 	u8		enable_pin;	/* chip enable */
 	u8		det_pin;	/* card detect */
 	u8		rdy_pin;	/* ready/busy */
+	u8              rdy_pin_active_low;     /* rdy_pin value is inverted */
 	u8		ale;		/* address line number connected to ALE */
 	u8		cle;		/* address line number connected to CLE */
 	u8		bus_width_16;	/* buswidth is 16 bit */
@@ -101,7 +113,11 @@ struct atmel_nand_data {
 extern void __init at91_add_device_nand(struct atmel_nand_data *data);
 
  /* I2C*/
+#if defined(CONFIG_ARCH_AT91SAM9G45)
+extern void __init at91_add_device_i2c(short i2c_id, struct i2c_board_info *devices, int nr_devices);
+#else
 extern void __init at91_add_device_i2c(struct i2c_board_info *devices, int nr_devices);
+#endif
 
  /* SPI */
 extern void __init at91_add_device_spi(struct spi_board_info *devices, int nr_devices);
@@ -133,6 +149,16 @@ struct atmel_uart_data {
 extern void __init at91_add_device_serial(void);
 
 /*
+ * PWM
+ */
+#define AT91_PWM0	0
+#define AT91_PWM1	1
+#define AT91_PWM2	2
+#define AT91_PWM3	3
+
+extern void __init at91_add_device_pwm(u32 mask);
+
+/*
  * SSC -- accessed through ssc_request(id).  Drivers don't bind to SSC
  * platform devices.  Their SSC ID is part of their configuration data,
  * along with information about which SSC signals they should use.
@@ -154,17 +180,24 @@ struct atmel_lcdfb_info;
 extern void __init at91_add_device_lcdc(struct atmel_lcdfb_info *data);
 
  /* AC97 */
-struct atmel_ac97_data {
-	u8		reset_pin;	/* reset */
-};
-extern void __init at91_add_device_ac97(struct atmel_ac97_data *data);
+extern void __init at91_add_device_ac97(struct ac97c_platform_data *data);
 
  /* ISI */
 extern void __init at91_add_device_isi(void);
 
+ /* Touchscreen Controller */
+extern void __init at91_add_device_tsadcc(void);
+
+/* CAN */
+struct at91_can_data {
+	void (*transceiver_switch)(int on);
+};
+extern void __init at91_add_device_can(struct at91_can_data *data);
+
  /* LEDs */
 extern void __init at91_init_leds(u8 cpu_led, u8 timer_led);
 extern void __init at91_gpio_leds(struct gpio_led *leds, int nr);
+extern void __init at91_pwm_leds(struct gpio_led *leds, int nr);
 
 /* FIXME: this needs a better location, but gets stuff building again */
 extern int at91_suspend_entering_slow_clock(void);

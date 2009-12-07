@@ -161,7 +161,7 @@
 #include "core.h"
 #include "dsp.h"
 
-const char *mISDN_dsp_revision = "2.0";
+static const char *mISDN_dsp_revision = "2.0";
 
 static int debug;
 static int options;
@@ -191,6 +191,8 @@ dsp_rx_off_member(struct dsp *dsp)
 	struct mISDN_ctrl_req	cq;
 	int rx_off = 1;
 
+	memset(&cq, 0, sizeof(cq));
+
 	if (!dsp->features_rx_off)
 		return;
 
@@ -201,13 +203,13 @@ dsp_rx_off_member(struct dsp *dsp)
 	else if (dsp->dtmf.software)
 		rx_off = 0;
 	/* echo in software */
-	else if (dsp->echo && dsp->pcm_slot_tx < 0)
+	else if (dsp->echo.software)
 		rx_off = 0;
 	/* bridge in software */
-	else if (dsp->conf) {
-		if (dsp->conf->software)
-			rx_off = 0;
-	}
+	else if (dsp->conf && dsp->conf->software)
+		rx_off = 0;
+	/* data is not required by user space and not required
+	 * for echo dtmf detection, soft-echo, soft-bridging */
 
 	if (rx_off == dsp->rx_is_off)
 		return;
@@ -249,10 +251,36 @@ dsp_rx_off(struct dsp *dsp)
 	}
 }
 
+/* enable "fill empty" feature */
+static void
+dsp_fill_empty(struct dsp *dsp)
+{
+	struct mISDN_ctrl_req	cq;
+
+	memset(&cq, 0, sizeof(cq));
+
+	if (!dsp->ch.peer) {
+		if (dsp_debug & DEBUG_DSP_CORE)
+			printk(KERN_DEBUG "%s: no peer, no fill_empty\n",
+				__func__);
+		return;
+	}
+	cq.op = MISDN_CTRL_FILL_EMPTY;
+	cq.p1 = 1;
+	if (dsp->ch.peer->ctrl(dsp->ch.peer, CONTROL_CHANNEL, &cq)) {
+		printk(KERN_DEBUG "%s: CONTROL_CHANNEL failed\n",
+			__func__);
+		return;
+	}
+	if (dsp_debug & DEBUG_DSP_CORE)
+		printk(KERN_DEBUG "%s: %s set fill_empty = 1\n",
+			__func__, dsp->name);
+}
+
 static int
 dsp_control_req(struct dsp *dsp, struct mISDNhead *hh, struct sk_buff *skb)
 {
-	struct		sk_buff *nskb;
+	struct sk_buff	*nskb;
 	int ret = 0;
 	int cont;
 	u8 *data;
@@ -273,19 +301,23 @@ dsp_control_req(struct dsp *dsp, struct mISDNhead *hh, struct sk_buff *skb)
 		if (dsp_debug & DEBUG_DSP_CORE)
 			printk(KERN_DEBUG "%s: start dtmf\n", __func__);
 		if (len == sizeof(int)) {
-			printk(KERN_NOTICE "changing DTMF Threshold "
-				"to %d\n", *((int *)data));
+			if (dsp_debug & DEBUG_DSP_CORE)
+				printk(KERN_NOTICE "changing DTMF Threshold "
+					"to %d\n", *((int *)data));
 			dsp->dtmf.treshold = (*(int *)data) * 10000;
 		}
+		dsp->dtmf.enable = 1;
 		/* init goertzel */
 		dsp_dtmf_goertzel_init(dsp);
 
 		/* check dtmf hardware */
 		dsp_dtmf_hardware(dsp);
+		dsp_rx_off(dsp);
 		break;
 	case DTMF_TONE_STOP: /* turn off DTMF */
 		if (dsp_debug & DEBUG_DSP_CORE)
 			printk(KERN_DEBUG "%s: stop dtmf\n", __func__);
+		dsp->dtmf.enable = 0;
 		dsp->dtmf.hardware = 0;
 		dsp->dtmf.software = 0;
 		break;
@@ -385,7 +417,7 @@ tone_off:
 		dsp_rx_off(dsp);
 		break;
 	case DSP_ECHO_ON: /* enable echo */
-		dsp->echo = 1; /* soft echo */
+		dsp->echo.software = 1; /* soft echo */
 		if (dsp_debug & DEBUG_DSP_CORE)
 			printk(KERN_DEBUG "%s: enable cmx-echo\n", __func__);
 		dsp_cmx_hardware(dsp->conf, dsp);
@@ -394,7 +426,8 @@ tone_off:
 			dsp_cmx_debug(dsp);
 		break;
 	case DSP_ECHO_OFF: /* disable echo */
-		dsp->echo = 0;
+		dsp->echo.software = 0;
+		dsp->echo.hardware = 0;
 		if (dsp_debug & DEBUG_DSP_CORE)
 			printk(KERN_DEBUG "%s: disable cmx-echo\n", __func__);
 		dsp_cmx_hardware(dsp->conf, dsp);
@@ -473,7 +506,7 @@ tone_off:
 			break;
 		}
 		dsp->cmx_delay = (*((int *)data)) << 3;
-			/* miliseconds to samples */
+			/* milliseconds to samples */
 		if (dsp->cmx_delay >= (CMX_BUFF_HALF>>1))
 			/* clip to half of maximum usable buffer
 			(half of half buffer) */
@@ -527,7 +560,7 @@ tone_off:
 			dsp->pipeline.inuse = 1;
 			dsp_cmx_hardware(dsp->conf, dsp);
 			ret = dsp_pipeline_build(&dsp->pipeline,
-				len > 0 ? (char *)data : NULL);
+				len > 0 ? data : NULL);
 			dsp_cmx_hardware(dsp->conf, dsp);
 			dsp_rx_off(dsp);
 		}
@@ -593,8 +626,6 @@ get_features(struct mISDNchannel *ch)
 	struct dsp		*dsp = container_of(ch, struct dsp, ch);
 	struct mISDN_ctrl_req	cq;
 
-	if (dsp_options & DSP_OPT_NOHARDWARE)
-		return;
 	if (!ch->peer) {
 		if (dsp_debug & DEBUG_DSP_CORE)
 			printk(KERN_DEBUG "%s: no peer, no features\n",
@@ -610,6 +641,10 @@ get_features(struct mISDNchannel *ch)
 	}
 	if (cq.op & MISDN_CTRL_RX_OFF)
 		dsp->features_rx_off = 1;
+	if (cq.op & MISDN_CTRL_FILL_EMPTY)
+		dsp->features_fill_empty = 1;
+	if (dsp_options & DSP_OPT_NOHARDWARE)
+		return;
 	if ((cq.op & MISDN_CTRL_HW_FEATURES_OP)) {
 		cq.op = MISDN_CTRL_HW_FEATURES;
 		*((u_long *)&cq.p1) = (u_long)&dsp->features;
@@ -626,12 +661,10 @@ get_features(struct mISDNchannel *ch)
 static int
 dsp_function(struct mISDNchannel *ch,  struct sk_buff *skb)
 {
-	struct dsp			*dsp = container_of(ch, struct dsp, ch);
+	struct dsp		*dsp = container_of(ch, struct dsp, ch);
 	struct mISDNhead	*hh;
 	int			ret = 0;
-	u8			*digits;
-	int			cont;
-	struct			sk_buff *nskb;
+	u8			*digits = NULL;
 	u_long			flags;
 
 	hh = mISDN_HEAD_P(skb);
@@ -674,49 +707,55 @@ dsp_function(struct mISDNchannel *ch,  struct sk_buff *skb)
 			break;
 		}
 
+		spin_lock_irqsave(&dsp_lock, flags);
+
 		/* decrypt if enabled */
 		if (dsp->bf_enable)
 			dsp_bf_decrypt(dsp, skb->data, skb->len);
 		/* pipeline */
 		if (dsp->pipeline.inuse)
 			dsp_pipeline_process_rx(&dsp->pipeline, skb->data,
-				skb->len);
+				skb->len, hh->id);
 		/* change volume if requested */
 		if (dsp->rx_volume)
 			dsp_change_volume(skb, dsp->rx_volume);
-
 		/* check if dtmf soft decoding is turned on */
 		if (dsp->dtmf.software) {
 			digits = dsp_dtmf_goertzel_decode(dsp, skb->data,
-				skb->len, (dsp_options&DSP_OPT_ULAW)?1:0);
+				skb->len, (dsp_options&DSP_OPT_ULAW) ? 1 : 0);
+		}
+		/* we need to process receive data if software */
+		if (dsp->conf && dsp->conf->software) {
+			/* process data from card at cmx */
+			dsp_cmx_receive(dsp, skb);
+		}
+
+		spin_unlock_irqrestore(&dsp_lock, flags);
+
+		/* send dtmf result, if any */
+		if (digits) {
 			while (*digits) {
+				int k;
+				struct sk_buff *nskb;
 				if (dsp_debug & DEBUG_DSP_DTMF)
 					printk(KERN_DEBUG "%s: digit"
 					    "(%c) to layer %s\n",
 					    __func__, *digits, dsp->name);
-				cont = DTMF_TONE_VAL | *digits;
+				k = *digits | DTMF_TONE_VAL;
 				nskb = _alloc_mISDN_skb(PH_CONTROL_IND,
-				    MISDN_ID_ANY, sizeof(int), &cont,
-				    GFP_ATOMIC);
+					MISDN_ID_ANY, sizeof(int), &k,
+					GFP_ATOMIC);
 				if (nskb) {
 					if (dsp->up) {
 						if (dsp->up->send(
 						    dsp->up, nskb))
-						dev_kfree_skb(nskb);
+							dev_kfree_skb(nskb);
 					} else
 						dev_kfree_skb(nskb);
 				}
 				digits++;
 			}
 		}
-		/* we need to process receive data if software */
-		spin_lock_irqsave(&dsp_lock, flags);
-		if (dsp->pcm_slot_tx < 0 && dsp->pcm_slot_rx < 0) {
-			/* process data from card at cmx */
-			dsp_cmx_receive(dsp, skb);
-		}
-		spin_unlock_irqrestore(&dsp_lock, flags);
-
 		if (dsp->rx_disabled) {
 			/* if receive is not allowed */
 			break;
@@ -756,7 +795,7 @@ dsp_function(struct mISDNchannel *ch,  struct sk_buff *skb)
 					if (dsp->up) {
 						if (dsp->up->send(
 						    dsp->up, nskb))
-						dev_kfree_skb(nskb);
+							dev_kfree_skb(nskb);
 					} else
 						dev_kfree_skb(nskb);
 				}
@@ -837,11 +876,14 @@ dsp_function(struct mISDNchannel *ch,  struct sk_buff *skb)
 		}
 		if (dsp->hdlc) {
 			/* hdlc */
-			spin_lock_irqsave(&dsp_lock, flags);
-			if (dsp->b_active) {
-				skb_queue_tail(&dsp->sendq, skb);
-				schedule_work(&dsp->workq);
+			if (!dsp->b_active) {
+				ret = -EIO;
+				break;
 			}
+			hh->prim = PH_DATA_REQ;
+			spin_lock_irqsave(&dsp_lock, flags);
+			skb_queue_tail(&dsp->sendq, skb);
+			schedule_work(&dsp->workq);
 			spin_unlock_irqrestore(&dsp_lock, flags);
 			return 0;
 		}
@@ -865,6 +907,9 @@ dsp_function(struct mISDNchannel *ch,  struct sk_buff *skb)
 		if (dsp->dtmf.hardware || dsp->dtmf.software)
 			dsp_dtmf_goertzel_init(dsp);
 		get_features(ch);
+		/* enable fill_empty feature */
+		if (dsp->features_fill_empty)
+			dsp_fill_empty(dsp);
 		/* send ph_activate */
 		hh->prim = PH_ACTIVATE_REQ;
 		if (ch->peer)
@@ -909,7 +954,7 @@ dsp_ctrl(struct mISDNchannel *ch, u_int cmd, void *arg)
 	int		err = 0;
 
 	if (debug & DEBUG_DSP_CTRL)
-	printk(KERN_DEBUG "%s:(%x)\n", __func__, cmd);
+		printk(KERN_DEBUG "%s:(%x)\n", __func__, cmd);
 
 	switch (cmd) {
 	case OPEN_CHANNEL:
@@ -1105,7 +1150,7 @@ static int dsp_init(void)
 	} else {
 		poll = 8;
 		while (poll <= MAX_POLL) {
-			tics = poll * HZ / 8000;
+			tics = (poll * HZ) / 8000;
 			if (tics * 8000 == poll * HZ) {
 				dsp_tics = tics;
 				dsp_poll = poll;
@@ -1132,9 +1177,9 @@ static int dsp_init(void)
 
 	/* init conversion tables */
 	dsp_audio_generate_law_tables();
-	dsp_silence = (dsp_options&DSP_OPT_ULAW)?0xff:0x2a;
-	dsp_audio_law_to_s32 = (dsp_options&DSP_OPT_ULAW)?dsp_audio_ulaw_to_s32:
-		dsp_audio_alaw_to_s32;
+	dsp_silence = (dsp_options&DSP_OPT_ULAW) ? 0xff : 0x2a;
+	dsp_audio_law_to_s32 = (dsp_options&DSP_OPT_ULAW) ?
+		dsp_audio_ulaw_to_s32 : dsp_audio_alaw_to_s32;
 	dsp_audio_generate_s2law_table();
 	dsp_audio_generate_seven();
 	dsp_audio_generate_mix_table();

@@ -27,6 +27,7 @@
 #include <linux/cache.h>
 #include <linux/profile.h>
 #include <linux/bitops.h>
+#include <linux/cpu.h>
 
 #include <asm/hwrpb.h>
 #include <asm/ptrace.h>
@@ -68,11 +69,6 @@ enum ipi_message_type {
 
 /* Set to a secondary's cpuid when it comes online.  */
 static int smp_secondary_alive __devinitdata = 0;
-
-/* Which cpus ids came online.  */
-cpumask_t cpu_online_map;
-
-EXPORT_SYMBOL(cpu_online_map);
 
 int smp_num_probed;		/* Internal processor count */
 int smp_num_cpus = 1;		/* Number that came online.  */
@@ -120,15 +116,16 @@ wait_boot_cpu_to_stop(int cpuid)
 /*
  * Where secondaries begin a life of C.
  */
-void __init
+void __cpuinit
 smp_callin(void)
 {
 	int cpuid = hard_smp_processor_id();
 
-	if (cpu_test_and_set(cpuid, cpu_online_map)) {
+	if (cpu_online(cpuid)) {
 		printk("??, cpu 0x%x already present??\n", cpuid);
 		BUG();
 	}
+	set_cpu_online(cpuid, true);
 
 	/* Turn on machine checks.  */
 	wrmces(7);
@@ -148,6 +145,9 @@ smp_callin(void)
 	/* All kernel threads share the same mm context.  */
 	atomic_inc(&init_mm.mm_count);
 	current->active_mm = &init_mm;
+
+	/* inform the notifiers about the new cpu */
+	notify_cpu_starting(cpuid);
 
 	/* Must have completely accurate bogos.  */
 	local_irq_enable();
@@ -194,7 +194,7 @@ wait_for_txrdy (unsigned long cpumask)
  * Send a message to a secondary's console.  "START" is one such
  * interesting message.  ;-)
  */
-static void __init
+static void __cpuinit
 send_secondary_console_msg(char *str, int cpuid)
 {
 	struct percpu_struct *cpu;
@@ -285,7 +285,7 @@ recv_secondary_console_msg(void)
 /*
  * Convince the console to have a secondary cpu begin execution.
  */
-static int __init
+static int __cpuinit
 secondary_cpu_start(int cpuid, struct task_struct *idle)
 {
 	struct percpu_struct *cpu;
@@ -436,7 +436,8 @@ setup_smp(void)
 				((char *)cpubase + i*hwrpb->processor_size);
 			if ((cpu->flags & 0x1cc) == 0x1cc) {
 				smp_num_probed++;
-				cpu_set(i, cpu_present_map);
+				set_cpu_possible(i, true);
+				set_cpu_present(i, true);
 				cpu->pal_revision = boot_cpu_palrev;
 			}
 
@@ -469,7 +470,8 @@ smp_prepare_cpus(unsigned int max_cpus)
 
 	/* Nothing to do on a UP box, or when told not to.  */
 	if (smp_num_probed == 1 || max_cpus == 0) {
-		cpu_present_map = cpumask_of_cpu(boot_cpuid);
+		init_cpu_possible(cpumask_of(boot_cpuid));
+		init_cpu_present(cpumask_of(boot_cpuid));
 		printk(KERN_INFO "SMP mode deactivated.\n");
 		return;
 	}
@@ -546,16 +548,16 @@ setup_profiling_timer(unsigned int multiplier)
 
 
 static void
-send_ipi_message(cpumask_t to_whom, enum ipi_message_type operation)
+send_ipi_message(const struct cpumask *to_whom, enum ipi_message_type operation)
 {
 	int i;
 
 	mb();
-	for_each_cpu_mask(i, to_whom)
+	for_each_cpu(i, to_whom)
 		set_bit(operation, &ipi_data[i].bits);
 
 	mb();
-	for_each_cpu_mask(i, to_whom)
+	for_each_cpu(i, to_whom)
 		wripir(i);
 }
 
@@ -622,7 +624,7 @@ smp_send_reschedule(int cpu)
 		printk(KERN_WARNING
 		       "smp_send_reschedule: Sending IPI to self.\n");
 #endif
-	send_ipi_message(cpumask_of_cpu(cpu), IPI_RESCHEDULE);
+	send_ipi_message(cpumask_of(cpu), IPI_RESCHEDULE);
 }
 
 void
@@ -634,17 +636,17 @@ smp_send_stop(void)
 	if (hard_smp_processor_id() != boot_cpu_id)
 		printk(KERN_WARNING "smp_send_stop: Not on boot cpu.\n");
 #endif
-	send_ipi_message(to_whom, IPI_CPU_STOP);
+	send_ipi_message(&to_whom, IPI_CPU_STOP);
 }
 
-void arch_send_call_function_ipi(cpumask_t mask)
+void arch_send_call_function_ipi_mask(const struct cpumask *mask)
 {
 	send_ipi_message(mask, IPI_CALL_FUNC);
 }
 
 void arch_send_call_function_single_ipi(int cpu)
 {
-	send_ipi_message(cpumask_of_cpu(cpu), IPI_CALL_FUNC_SINGLE);
+	send_ipi_message(cpumask_of(cpu), IPI_CALL_FUNC_SINGLE);
 }
 
 static void

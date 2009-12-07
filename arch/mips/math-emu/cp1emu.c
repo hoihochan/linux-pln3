@@ -48,7 +48,6 @@
 #include <asm/branch.h>
 
 #include "ieee754.h"
-#include "dsemul.h"
 
 /* Strap kernel emulator for full MIPS IV emulation */
 
@@ -164,33 +163,34 @@ static int isBranchInstr(mips_instruction * i)
 
 /*
  * In the Linux kernel, we support selection of FPR format on the
- * basis of the Status.FR bit.  This does imply that, if a full 32
- * FPRs are desired, there needs to be a flip-flop that can be written
- * to one at that bit position.  In any case, O32 MIPS ABI uses
- * only the even FPRs (Status.FR = 0).
+ * basis of the Status.FR bit.  If an FPU is not present, the FR bit
+ * is hardwired to zero, which would imply a 32-bit FPU even for
+ * 64-bit CPUs.  For 64-bit kernels with no FPU we use TIF_32BIT_REGS
+ * as a proxy for the FR bit so that a 64-bit FPU is emulated.  In any
+ * case, for a 32-bit kernel which uses the O32 MIPS ABI, only the
+ * even FPRs are used (Status.FR = 0).
  */
-
-#define CP0_STATUS_FR_SUPPORT
-
-#ifdef CP0_STATUS_FR_SUPPORT
-#define FR_BIT ST0_FR
+static inline int cop1_64bit(struct pt_regs *xcp)
+{
+	if (cpu_has_fpu)
+		return xcp->cp0_status & ST0_FR;
+#ifdef CONFIG_64BIT
+	return !test_thread_flag(TIF_32BIT_REGS);
 #else
-#define FR_BIT 0
+	return 0;
 #endif
+}
 
-#define SIFROMREG(si, x) ((si) = \
-			(xcp->cp0_status & FR_BIT) || !(x & 1) ? \
-			(int)ctx->fpr[x] : \
-			(int)(ctx->fpr[x & ~1] >> 32 ))
-#define SITOREG(si, x)	(ctx->fpr[x & ~((xcp->cp0_status & FR_BIT) == 0)] = \
-			(xcp->cp0_status & FR_BIT) || !(x & 1) ? \
+#define SIFROMREG(si, x) ((si) = cop1_64bit(xcp) || !(x & 1) ? \
+			(int)ctx->fpr[x] : (int)(ctx->fpr[x & ~1] >> 32))
+
+#define SITOREG(si, x)	(ctx->fpr[x & ~(cop1_64bit(xcp) == 0)] = \
+			cop1_64bit(xcp) || !(x & 1) ? \
 			ctx->fpr[x & ~1] >> 32 << 32 | (u32)(si) : \
 			ctx->fpr[x & ~1] << 32 >> 32 | (u64)(si) << 32)
 
-#define DIFROMREG(di, x) ((di) = \
-			ctx->fpr[x & ~((xcp->cp0_status & FR_BIT) == 0)])
-#define DITOREG(di, x)	(ctx->fpr[x & ~((xcp->cp0_status & FR_BIT) == 0)] \
-			= (di))
+#define DIFROMREG(di, x) ((di) = ctx->fpr[x & ~(cop1_64bit(xcp) == 0)])
+#define DITOREG(di, x)	(ctx->fpr[x & ~(cop1_64bit(xcp) == 0)] = (di))
 
 #define SPFROMREG(sp, x) SIFROMREG((sp).bits, x)
 #define SPTOREG(sp, x)	SITOREG((sp).bits, x)
@@ -346,9 +346,6 @@ static int cop1Emulate(struct pt_regs *xcp, struct mips_fpu_struct *ctx)
 			/* cop control register rd -> gpr[rt] */
 			u32 value;
 
-			if (ir == CP1UNDEF) {
-				return do_dsemulret(xcp);
-			}
 			if (MIPSInst_RD(ir) == FPCREG_CSR) {
 				value = ctx->fcr31;
 				value = (value & ~0x3) | mips_rm[value & 0x3];
@@ -1299,12 +1296,12 @@ static int __init debugfs_fpuemu(void)
 	if (!mips_debugfs_dir)
 		return -ENODEV;
 	dir = debugfs_create_dir("fpuemustats", mips_debugfs_dir);
-	if (IS_ERR(dir))
-		return PTR_ERR(dir);
+	if (!dir)
+		return -ENOMEM;
 	for (i = 0; i < ARRAY_SIZE(vars); i++) {
 		d = debugfs_create_u32(vars[i].name, S_IRUGO, dir, vars[i].v);
-		if (IS_ERR(d))
-			return PTR_ERR(d);
+		if (!d)
+			return -ENOMEM;
 	}
 	return 0;
 }

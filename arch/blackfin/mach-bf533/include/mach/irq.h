@@ -1,31 +1,7 @@
 /*
- * File:         include/asm-blackfin/mach-bf533/defBF532.h
- * Based on:
- * Author:
+ * Copyright 2005-2008 Analog Devices Inc.
  *
- * Created:
- * Description:
- *
- * Rev:
- *
- * Modified:
- *
- * Bugs:         Enter bugs at http://blackfin.uclinux.org/
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; see the file COPYING.
- * If not, write to the Free Software Foundation,
- * 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+ * Licensed under the GPL-2 or later
  */
 
 #ifndef _BF533_IRQ_H_
@@ -90,19 +66,19 @@ Core        Emulation               **
 #define	IRQ_SPORT0_ERROR	10	/*SPORT0 Error Interrupt */
 #define	IRQ_SPORT1_ERROR	11	/*SPORT1 Error Interrupt */
 #define	IRQ_SPI_ERROR		12	/*SPI Error Interrupt */
-#define	IRQ_UART_ERROR		13	/*UART Error Interrupt */
+#define	IRQ_UART0_ERROR		13	/*UART Error Interrupt */
 #define	IRQ_RTC			14	/*RTC Interrupt */
 #define	IRQ_PPI			15	/*DMA0 Interrupt (PPI) */
 #define	IRQ_SPORT0_RX		16	/*DMA1 Interrupt (SPORT0 RX) */
 #define	IRQ_SPORT0_TX		17	/*DMA2 Interrupt (SPORT0 TX) */
 #define	IRQ_SPORT1_RX		18	/*DMA3 Interrupt (SPORT1 RX) */
 #define	IRQ_SPORT1_TX		19	/*DMA4 Interrupt (SPORT1 TX) */
-#define 	IRQ_SPI			20	/*DMA5 Interrupt (SPI) */
-#define	IRQ_UART_RX		21	/*DMA6 Interrupt (UART RX) */
-#define	IRQ_UART_TX		22	/*DMA7 Interrupt (UART TX) */
-#define	IRQ_TMR0		23	/*Timer 0 */
-#define	IRQ_TMR1		24	/*Timer 1 */
-#define	IRQ_TMR2		25	/*Timer 2 */
+#define	IRQ_SPI			20	/*DMA5 Interrupt (SPI) */
+#define	IRQ_UART0_RX		21	/*DMA6 Interrupt (UART RX) */
+#define	IRQ_UART0_TX		22	/*DMA7 Interrupt (UART TX) */
+#define	IRQ_TIMER0		23	/*Timer 0 */
+#define	IRQ_TIMER1		24	/*Timer 1 */
+#define	IRQ_TIMER2		25	/*Timer 2 */
 #define	IRQ_PROG_INTA		26	/*Programmable Flags A (8) */
 #define	IRQ_PROG_INTB		27	/*Programmable Flags B (8) */
 #define	IRQ_MEM_DMA0		28	/*DMA8/9 Interrupt (Memory DMA Stream 0) */

@@ -18,7 +18,8 @@
  *	DMA now uses get_free_page as kmalloc buffers may span a 64K 
  *	boundary.
  *
- *	Modified for SMP safety and SMP locking by Alan Cox <alan@redhat.com>
+ *	Modified for SMP safety and SMP locking by Alan Cox
+ *					<alan@lxorguk.ukuu.org.uk>
  *
  *	Performance
  *
@@ -600,23 +601,17 @@ static void z8530_dma_status(struct z8530_channel *chan)
 	write_zsctrl(chan, RES_H_IUS);
 }
 
-struct z8530_irqhandler z8530_dma_sync=
-{
+static struct z8530_irqhandler z8530_dma_sync = {
 	z8530_dma_rx,
 	z8530_dma_tx,
 	z8530_dma_status
 };
 
-EXPORT_SYMBOL(z8530_dma_sync);
-
-struct z8530_irqhandler z8530_txdma_sync=
-{
+static struct z8530_irqhandler z8530_txdma_sync = {
 	z8530_rx,
 	z8530_dma_tx,
 	z8530_dma_status
 };
-
-EXPORT_SYMBOL(z8530_txdma_sync);
 
 /**
  *	z8530_rx_clear - Handle RX events from a stopped chip
@@ -694,7 +689,6 @@ EXPORT_SYMBOL(z8530_nop);
  *	z8530_interrupt - Handle an interrupt from a Z8530
  *	@irq: 	Interrupt number
  *	@dev_id: The Z8530 device that is interrupting.
- *	@regs: unused
  *
  *	A Z85[2]30 device has stuck its hand in the air for attention.
  *	We scan both the channels on the chip for events and then call
@@ -710,7 +704,7 @@ EXPORT_SYMBOL(z8530_nop);
 irqreturn_t z8530_interrupt(int irq, void *dev_id)
 {
 	struct z8530_dev *dev=dev_id;
-	u8 intr;
+	u8 uninitialized_var(intr);
 	static volatile int locker=0;
 	int work=0;
 	struct z8530_irqhandler *irqs;
@@ -1733,15 +1727,14 @@ static inline int spans_boundary(struct sk_buff *skb)
  *	point.
  */
 
-int z8530_queue_xmit(struct z8530_channel *c, struct sk_buff *skb)
+netdev_tx_t z8530_queue_xmit(struct z8530_channel *c, struct sk_buff *skb)
 {
 	unsigned long flags;
 	
 	netif_stop_queue(c->netdevice);
 	if(c->tx_next_skb)
-	{
-		return 1;
-	}
+		return NETDEV_TX_BUSY;
+
 	
 	/* PC SPECIFIC - DMA limits */
 	
@@ -1773,7 +1766,7 @@ int z8530_queue_xmit(struct z8530_channel *c, struct sk_buff *skb)
 	z8530_tx_begin(c);
 	spin_unlock_irqrestore(c->lock, flags);
 	
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 EXPORT_SYMBOL(z8530_queue_xmit);
@@ -1781,7 +1774,8 @@ EXPORT_SYMBOL(z8530_queue_xmit);
 /*
  *	Module support
  */
-static char banner[] __initdata = KERN_INFO "Generic Z85C30/Z85230 interface driver v0.02\n";
+static const char banner[] __initdata =
+	KERN_INFO "Generic Z85C30/Z85230 interface driver v0.02\n";
 
 static int __init z85230_init_driver(void)
 {

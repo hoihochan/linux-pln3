@@ -1,32 +1,7 @@
 /*
- * file:	include/asm-blackfin/mach-bf548/irq.h
- * based on:	include/asm-blackfin/mach-bf537/irq.h
- * author:	Roy Huang (roy.huang@analog.com)
+ * Copyright 2007-2009 Analog Devices Inc.
  *
- * created:
- * description:
- *	system mmr register map
- * rev:
- *
- * modified:
- *
- *
- * bugs:         enter bugs at http://blackfin.uclinux.org/
- *
- * this program is free software; you can redistribute it and/or modify
- * it under the terms of the gnu general public license as published by
- * the free software foundation; either version 2, or (at your option)
- * any later version.
- *
- * this program is distributed in the hope that it will be useful,
- * but without any warranty; without even the implied warranty of
- * merchantability or fitness for a particular purpose.  see the
- * gnu general public license for more details.
- *
- * you should have received a copy of the gnu general public license
- * along with this program; see the file copying.
- * if not, write to the free software foundation,
- * 59 temple place - suite 330, boston, ma 02111-1307, usa.
+ * Licensed under the GPL-2 or later.
  */
 
 #ifndef _BF548_IRQ_H_
@@ -123,8 +98,8 @@ Events         (highest priority)  EMU         0
 #define IRQ_MXVR_ERROR		BFIN_IRQ(51)	/* MXVR Status (Error) Interrupt */
 #define IRQ_MXVR_MSG		BFIN_IRQ(52)	/* MXVR Message Interrupt */
 #define IRQ_MXVR_PKT		BFIN_IRQ(53)	/* MXVR Packet Interrupt */
-#define IRQ_EPP1_ERROR		BFIN_IRQ(54)	/* EPPI1 Error Interrupt */
-#define IRQ_EPP2_ERROR		BFIN_IRQ(55)	/* EPPI2 Error Interrupt */
+#define IRQ_EPPI1_ERROR		BFIN_IRQ(54)	/* EPPI1 Error Interrupt */
+#define IRQ_EPPI2_ERROR		BFIN_IRQ(55)	/* EPPI2 Error Interrupt */
 #define IRQ_UART3_ERROR		BFIN_IRQ(56)	/* UART3 Status (Error) Interrupt */
 #define IRQ_HOST_ERROR		BFIN_IRQ(57)	/* HOST Status (Error) Interrupt */
 #define IRQ_PIXC_ERROR		BFIN_IRQ(59)	/* PIXC Status (Error) Interrupt */
@@ -158,7 +133,7 @@ Events         (highest priority)  EMU         0
 #define IRQ_PINT2		BFIN_IRQ(94)	/* PINT2 Interrupt */
 #define IRQ_PINT3		BFIN_IRQ(95)	/* PINT3 Interrupt */
 
-#define SYS_IRQS        	IRQ_PINT3
+#define SYS_IRQS		IRQ_PINT3
 
 #define BFIN_PA_IRQ(x)		((x) + SYS_IRQS + 1)
 #define IRQ_PA0			BFIN_PA_IRQ(0)
@@ -361,8 +336,8 @@ Events         (highest priority)  EMU         0
 #define IRQ_UART2_ERR 		IRQ_UART2_ERROR
 #define IRQ_CAN0_ERR  		IRQ_CAN0_ERROR
 #define IRQ_MXVR_ERR  		IRQ_MXVR_ERROR
-#define IRQ_EPP1_ERR  		IRQ_EPP1_ERROR
-#define IRQ_EPP2_ERR  		IRQ_EPP2_ERROR
+#define IRQ_EPPI1_ERR  		IRQ_EPPI1_ERROR
+#define IRQ_EPPI2_ERR  		IRQ_EPPI2_ERROR
 #define IRQ_UART3_ERR 		IRQ_UART3_ERROR
 #define IRQ_HOST_ERR  		IRQ_HOST_ERROR
 #define IRQ_PIXC_ERR  		IRQ_PIXC_ERROR

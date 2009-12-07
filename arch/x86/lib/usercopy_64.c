@@ -15,7 +15,7 @@
 #define __do_strncpy_from_user(dst,src,count,res)			   \
 do {									   \
 	long __d0, __d1, __d2;						   \
-	might_sleep();							   \
+	might_fault();							   \
 	__asm__ __volatile__(						   \
 		"	testq %1,%1\n"					   \
 		"	jz 2f\n"					   \
@@ -64,7 +64,7 @@ EXPORT_SYMBOL(strncpy_from_user);
 unsigned long __clear_user(void __user *addr, unsigned long size)
 {
 	long __d0;
-	might_sleep();
+	might_fault();
 	/* no memory constraint because it doesn't change any memory gcc knows
 	   about */
 	asm volatile(
@@ -127,7 +127,7 @@ EXPORT_SYMBOL(__strnlen_user);
 
 long strnlen_user(const char __user *s, long n)
 {
-	if (!access_ok(VERIFY_READ, s, n))
+	if (!access_ok(VERIFY_READ, s, 1))
 		return 0;
 	return __strnlen_user(s, n);
 }

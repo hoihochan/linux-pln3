@@ -14,6 +14,8 @@
 #include <linux/rwsem.h>
 #include <asm/pgtable.h>
 
+#ifdef __HAVE_ARCH_PTE_SPECIAL
+
 /*
  * The performance critical leaf functions are made noinline otherwise gcc
  * inlines everything into a single function which results in too much
@@ -41,7 +43,7 @@ static noinline int gup_pte_range(pmd_t pmd, unsigned long addr,
 		page = pte_page(pte);
 		if (!page_cache_get_speculative(page))
 			return 0;
-		if (unlikely(pte != *ptep)) {
+		if (unlikely(pte_val(pte) != pte_val(*ptep))) {
 			put_page(page);
 			return 0;
 		}
@@ -92,7 +94,7 @@ static noinline int gup_huge_pte(pte_t *ptep, struct hstate *hstate,
 		*nr -= refs;
 		return 0;
 	}
-	if (unlikely(pte != *ptep)) {
+	if (unlikely(pte_val(pte) != pte_val(*ptep))) {
 		/* Could be optimized better */
 		while (*nr) {
 			put_page(page);
@@ -151,10 +153,13 @@ int get_user_pages_fast(unsigned long start, int nr_pages, int write,
 	unsigned long addr, len, end;
 	unsigned long next;
 	pgd_t *pgdp;
-	int psize, nr = 0;
+	int nr = 0;
+#ifdef CONFIG_PPC64
 	unsigned int shift;
+	int psize;
+#endif
 
-	pr_debug("%s(%lx,%x,%s)\n", __func__, start, nr_pages, write ? "write" : "read");
+	pr_devel("%s(%lx,%x,%s)\n", __func__, start, nr_pages, write ? "write" : "read");
 
 	start &= PAGE_MASK;
 	addr = start;
@@ -165,7 +170,7 @@ int get_user_pages_fast(unsigned long start, int nr_pages, int write,
 					start, len)))
 		goto slow_irqon;
 
-	pr_debug("  aligned: %lx .. %lx\n", start, end);
+	pr_devel("  aligned: %lx .. %lx\n", start, end);
 
 #ifdef CONFIG_HUGETLB_PAGE
 	/* We bail out on slice boundary crossing when hugetlb is
@@ -205,8 +210,13 @@ int get_user_pages_fast(unsigned long start, int nr_pages, int write,
 	 */
 	local_irq_disable();
 
+#ifdef CONFIG_PPC64
+	/* Those bits are related to hugetlbfs implementation and only exist
+	 * on 64-bit for now
+	 */
 	psize = get_slice_psize(mm, addr);
 	shift = mmu_psize_defs[psize].shift;
+#endif /* CONFIG_PPC64 */
 
 #ifdef CONFIG_HUGETLB_PAGE
 	if (unlikely(mmu_huge_psizes[psize])) {
@@ -224,7 +234,7 @@ int get_user_pages_fast(unsigned long start, int nr_pages, int write,
 		do {
 			VM_BUG_ON(shift != mmu_psize_defs[get_slice_psize(mm, a)].shift);
 			ptep = huge_pte_offset(mm, a);
-			pr_debug(" %016lx: huge ptep %p\n", a, ptep);
+			pr_devel(" %016lx: huge ptep %p\n", a, ptep);
 			if (!ptep || !gup_huge_pte(ptep, hstate, &a, end, write, pages,
 						   &nr))
 				goto slow;
@@ -236,8 +246,11 @@ int get_user_pages_fast(unsigned long start, int nr_pages, int write,
 		do {
 			pgd_t pgd = *pgdp;
 
+#ifdef CONFIG_PPC64
 			VM_BUG_ON(shift != mmu_psize_defs[get_slice_psize(mm, addr)].shift);
-			pr_debug("  %016lx: normal pgd %p\n", addr, (void *)pgd);
+#endif
+			pr_devel("  %016lx: normal pgd %p\n", addr,
+				 (void *)pgd_val(pgd));
 			next = pgd_addr_end(addr, end);
 			if (pgd_none(pgd))
 				goto slow;
@@ -256,7 +269,7 @@ int get_user_pages_fast(unsigned long start, int nr_pages, int write,
 slow:
 		local_irq_enable();
 slow_irqon:
-		pr_debug("  slow path ! nr = %d\n", nr);
+		pr_devel("  slow path ! nr = %d\n", nr);
 
 		/* Try to get the remaining pages with get_user_pages */
 		start += nr << PAGE_SHIFT;
@@ -278,3 +291,5 @@ slow_irqon:
 		return ret;
 	}
 }
+
+#endif /* __HAVE_ARCH_PTE_SPECIAL */

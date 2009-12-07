@@ -168,7 +168,7 @@ static void del_br(struct net_bridge *br)
 	unregister_netdevice(br->dev);
 }
 
-static struct net_device *new_bridge_dev(const char *name)
+static struct net_device *new_bridge_dev(struct net *net, const char *name)
 {
 	struct net_bridge *br;
 	struct net_device *dev;
@@ -178,6 +178,7 @@ static struct net_device *new_bridge_dev(const char *name)
 
 	if (!dev)
 		return NULL;
+	dev_net_set(dev, net);
 
 	br = netdev_priv(dev);
 	br->dev = dev;
@@ -255,6 +256,7 @@ static struct net_bridge_port *new_nbp(struct net_bridge *br,
 	p->path_cost = port_cost(dev);
 	p->priority = 0x8000 >> BR_PORT_BITS;
 	p->port_no = index;
+	p->flags = 0;
 	br_init_port(p);
 	p->state = BR_STATE_DISABLED;
 	br_stp_port_timer_init(p);
@@ -262,12 +264,16 @@ static struct net_bridge_port *new_nbp(struct net_bridge *br,
 	return p;
 }
 
-int br_add_bridge(const char *name)
+static struct device_type br_type = {
+	.name	= "bridge",
+};
+
+int br_add_bridge(struct net *net, const char *name)
 {
 	struct net_device *dev;
 	int ret;
 
-	dev = new_bridge_dev(name);
+	dev = new_bridge_dev(net, name);
 	if (!dev)
 		return -ENOMEM;
 
@@ -277,6 +283,8 @@ int br_add_bridge(const char *name)
 		if (ret < 0)
 			goto out_free;
 	}
+
+	SET_NETDEV_DEVTYPE(dev, &br_type);
 
 	ret = register_netdevice(dev);
 	if (ret)
@@ -294,13 +302,13 @@ out_free:
 	goto out;
 }
 
-int br_del_bridge(const char *name)
+int br_del_bridge(struct net *net, const char *name)
 {
 	struct net_device *dev;
 	int ret = 0;
 
 	rtnl_lock();
-	dev = __dev_get_by_name(&init_net, name);
+	dev = __dev_get_by_name(net, name);
 	if (dev == NULL)
 		ret =  -ENXIO; 	/* Could not find device */
 
@@ -346,15 +354,21 @@ int br_min_mtu(const struct net_bridge *br)
 void br_features_recompute(struct net_bridge *br)
 {
 	struct net_bridge_port *p;
-	unsigned long features;
+	unsigned long features, mask;
 
-	features = br->feature_mask;
+	features = mask = br->feature_mask;
+	if (list_empty(&br->port_list))
+		goto done;
+
+	features &= ~NETIF_F_ONE_FOR_ALL;
 
 	list_for_each_entry(p, &br->port_list, list) {
-		features = netdev_compute_features(features, p->dev->features);
+		features = netdev_increment_features(features,
+						     p->dev->features, mask);
 	}
 
-	br->dev->features = features;
+done:
+	br->dev->features = netdev_fix_features(features, NULL);
 }
 
 /* called with RTNL */
@@ -363,12 +377,16 @@ int br_add_if(struct net_bridge *br, struct net_device *dev)
 	struct net_bridge_port *p;
 	int err = 0;
 
-	if (dev->flags & IFF_LOOPBACK || dev->type != ARPHRD_ETHER)
+	/* Don't allow bridging non-ethernet like devices */
+	if ((dev->flags & IFF_LOOPBACK) ||
+	    dev->type != ARPHRD_ETHER || dev->addr_len != ETH_ALEN)
 		return -EINVAL;
 
-	if (dev->hard_start_xmit == br_dev_xmit)
+	/* No bridging of bridges */
+	if (dev->netdev_ops->ndo_start_xmit == br_dev_xmit)
 		return -ELOOP;
 
+	/* Device is already being bridged */
 	if (dev->br_port != NULL)
 		return -EBUSY;
 
@@ -417,7 +435,8 @@ int br_add_if(struct net_bridge *br, struct net_device *dev)
 err2:
 	br_fdb_delete_by_port(br, p, 1);
 err1:
-	kobject_del(&p->kobj);
+	kobject_put(&p->kobj);
+	p = NULL; /* kobject_put frees */
 err0:
 	dev_set_promiscuity(dev, -1);
 put_back:
@@ -444,15 +463,15 @@ int br_del_if(struct net_bridge *br, struct net_device *dev)
 	return 0;
 }
 
-void __exit br_cleanup_bridges(void)
+void br_net_exit(struct net *net)
 {
 	struct net_device *dev;
 
 	rtnl_lock();
 restart:
-	for_each_netdev(&init_net, dev) {
+	for_each_netdev(net, dev) {
 		if (dev->priv_flags & IFF_EBRIDGE) {
-			del_br(dev->priv);
+			del_br(netdev_priv(dev));
 			goto restart;
 		}
 	}

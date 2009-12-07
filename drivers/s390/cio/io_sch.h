@@ -107,6 +107,7 @@ struct ccw_device_private {
 		unsigned int recog_done:1;  /* dev. recog. complete */
 		unsigned int fake_irb:1;    /* deliver faked irb */
 		unsigned int intretry:1;    /* retry internal operation */
+		unsigned int resuming:1;    /* recognition while resume */
 	} __attribute__((packed)) flags;
 	unsigned long intparm;	/* user interruption parameter */
 	struct qdio_irq *qdio_data;
@@ -123,7 +124,7 @@ struct ccw_device_private {
 	void *cmb_wait;			/* deferred cmb enable/disable */
 };
 
-static inline int ssch(struct subchannel_id schid, volatile union orb *addr)
+static inline int ssch(struct subchannel_id schid, union orb *addr)
 {
 	register struct subchannel_id reg1 asm("1") = schid;
 	int ccode = -EIO;
@@ -134,7 +135,9 @@ static inline int ssch(struct subchannel_id schid, volatile union orb *addr)
 		"	srl	%0,28\n"
 		"1:\n"
 		EX_TABLE(0b, 1b)
-		: "+d" (ccode) : "d" (reg1), "a" (addr), "m" (*addr) : "cc");
+		: "+d" (ccode)
+		: "d" (reg1), "a" (addr), "m" (*addr)
+		: "cc", "memory");
 	return ccode;
 }
 
@@ -147,7 +150,9 @@ static inline int rsch(struct subchannel_id schid)
 		"	rsch\n"
 		"	ipm	%0\n"
 		"	srl	%0,28"
-		: "=d" (ccode) : "d" (reg1) : "cc");
+		: "=d" (ccode)
+		: "d" (reg1)
+		: "cc", "memory");
 	return ccode;
 }
 
@@ -160,7 +165,9 @@ static inline int csch(struct subchannel_id schid)
 		"	csch\n"
 		"	ipm	%0\n"
 		"	srl	%0,28"
-		: "=d" (ccode) : "d" (reg1) : "cc");
+		: "=d" (ccode)
+		: "d" (reg1)
+		: "cc");
 	return ccode;
 }
 
@@ -173,7 +180,9 @@ static inline int hsch(struct subchannel_id schid)
 		"	hsch\n"
 		"	ipm	%0\n"
 		"	srl	%0,28"
-		: "=d" (ccode) : "d" (reg1) : "cc");
+		: "=d" (ccode)
+		: "d" (reg1)
+		: "cc");
 	return ccode;
 }
 
@@ -186,7 +195,9 @@ static inline int xsch(struct subchannel_id schid)
 		"	.insn	rre,0xb2760000,%1,0\n"
 		"	ipm	%0\n"
 		"	srl	%0,28"
-		: "=d" (ccode) : "d" (reg1) : "cc");
+		: "=d" (ccode)
+		: "d" (reg1)
+		: "cc");
 	return ccode;
 }
 

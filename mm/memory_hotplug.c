@@ -22,10 +22,11 @@
 #include <linux/highmem.h>
 #include <linux/vmalloc.h>
 #include <linux/ioport.h>
-#include <linux/cpuset.h>
 #include <linux/delay.h>
 #include <linux/migrate.h>
 #include <linux/page-isolation.h>
+#include <linux/pfn.h>
+#include <linux/suspend.h>
 
 #include <asm/tlbflush.h>
 
@@ -189,7 +190,7 @@ static void grow_pgdat_span(struct pglist_data *pgdat, unsigned long start_pfn,
 					pgdat->node_start_pfn;
 }
 
-static int __add_zone(struct zone *zone, unsigned long phys_start_pfn)
+static int __meminit __add_zone(struct zone *zone, unsigned long phys_start_pfn)
 {
 	struct pglist_data *pgdat = zone->zone_pgdat;
 	int nr_pages = PAGES_PER_SECTION;
@@ -216,7 +217,8 @@ static int __add_zone(struct zone *zone, unsigned long phys_start_pfn)
 	return 0;
 }
 
-static int __add_section(struct zone *zone, unsigned long phys_start_pfn)
+static int __meminit __add_section(int nid, struct zone *zone,
+					unsigned long phys_start_pfn)
 {
 	int nr_pages = PAGES_PER_SECTION;
 	int ret;
@@ -234,7 +236,7 @@ static int __add_section(struct zone *zone, unsigned long phys_start_pfn)
 	if (ret < 0)
 		return ret;
 
-	return register_new_memory(__pfn_to_section(phys_start_pfn));
+	return register_new_memory(nid, __pfn_to_section(phys_start_pfn));
 }
 
 #ifdef CONFIG_SPARSEMEM_VMEMMAP
@@ -273,8 +275,8 @@ static int __remove_section(struct zone *zone, struct mem_section *ms)
  * call this function after deciding the zone to which to
  * add the new pages.
  */
-int __add_pages(struct zone *zone, unsigned long phys_start_pfn,
-		 unsigned long nr_pages)
+int __ref __add_pages(int nid, struct zone *zone, unsigned long phys_start_pfn,
+			unsigned long nr_pages)
 {
 	unsigned long i;
 	int err = 0;
@@ -284,7 +286,7 @@ int __add_pages(struct zone *zone, unsigned long phys_start_pfn,
 	end_sec = pfn_to_section_nr(phys_start_pfn + nr_pages - 1);
 
 	for (i = start_sec; i <= end_sec; i++) {
-		err = __add_section(zone, i << PFN_SECTION_SHIFT);
+		err = __add_section(nid, zone, i << PFN_SECTION_SHIFT);
 
 		/*
 		 * EEXIST is finally dealt with by ioresource collision
@@ -323,11 +325,11 @@ int __remove_pages(struct zone *zone, unsigned long phys_start_pfn,
 	BUG_ON(phys_start_pfn & ~PAGE_SECTION_MASK);
 	BUG_ON(nr_pages % PAGES_PER_SECTION);
 
-	release_mem_region(phys_start_pfn << PAGE_SHIFT, nr_pages * PAGE_SIZE);
-
 	sections_to_remove = nr_pages / PAGES_PER_SECTION;
 	for (i = 0; i < sections_to_remove; i++) {
 		unsigned long pfn = phys_start_pfn + i*PAGES_PER_SECTION;
+		release_mem_region(pfn << PAGE_SHIFT,
+				   PAGES_PER_SECTION << PAGE_SHIFT);
 		ret = __remove_section(zone, __pfn_to_section(pfn));
 		if (ret)
 			break;
@@ -338,8 +340,11 @@ EXPORT_SYMBOL_GPL(__remove_pages);
 
 void online_page(struct page *page)
 {
+	unsigned long pfn = page_to_pfn(page);
+
 	totalram_pages++;
-	num_physpages++;
+	if (pfn >= num_physpages)
+		num_physpages = pfn + 1;
 
 #ifdef CONFIG_HIGHMEM
 	if (PageHighMem(page))
@@ -409,7 +414,7 @@ int online_pages(unsigned long pfn, unsigned long nr_pages)
 	if (!populated_zone(zone))
 		need_zonelists_rebuild = 1;
 
-	ret = walk_memory_resource(pfn, nr_pages, &onlined_pages,
+	ret = walk_system_ram_range(pfn, nr_pages, &onlined_pages,
 		online_pages_range);
 	if (ret) {
 		printk(KERN_DEBUG "online_pages %lx at %lx failed\n",
@@ -421,7 +426,9 @@ int online_pages(unsigned long pfn, unsigned long nr_pages)
 	zone->present_pages += onlined_pages;
 	zone->zone_pgdat->node_present_pages += onlined_pages;
 
-	setup_per_zone_pages_min();
+	zone_pcp_update(zone);
+	setup_per_zone_wmarks();
+	calculate_zone_inactive_ratio(zone);
 	if (onlined_pages) {
 		kswapd_run(zone_to_nid(zone));
 		node_set_state(zone_to_nid(zone), N_HIGH_MEMORY);
@@ -441,7 +448,8 @@ int online_pages(unsigned long pfn, unsigned long nr_pages)
 }
 #endif /* CONFIG_MEMORY_HOTPLUG_SPARSE */
 
-static pg_data_t *hotadd_new_pgdat(int nid, u64 start)
+/* we are OK calling __meminit stuff here - we have CONFIG_MEMORY_HOTPLUG */
+static pg_data_t __ref *hotadd_new_pgdat(int nid, u64 start)
 {
 	struct pglist_data *pgdat;
 	unsigned long zones_size[MAX_NR_ZONES] = {0};
@@ -470,21 +478,26 @@ static void rollback_node_hotadd(int nid, pg_data_t *pgdat)
 }
 
 
-int add_memory(int nid, u64 start, u64 size)
+/* we are OK calling __meminit stuff here - we have CONFIG_MEMORY_HOTPLUG */
+int __ref add_memory(int nid, u64 start, u64 size)
 {
 	pg_data_t *pgdat = NULL;
 	int new_pgdat = 0;
 	struct resource *res;
 	int ret;
 
+	lock_system_sleep();
+
 	res = register_memory_resource(start, size);
+	ret = -EEXIST;
 	if (!res)
-		return -EEXIST;
+		goto out;
 
 	if (!node_online(nid)) {
 		pgdat = hotadd_new_pgdat(nid, start);
+		ret = -ENOMEM;
 		if (!pgdat)
-			return -ENOMEM;
+			goto out;
 		new_pgdat = 1;
 	}
 
@@ -497,8 +510,6 @@ int add_memory(int nid, u64 start, u64 size)
 	/* we online node here. we can't roll back from here. */
 	node_set_online(nid);
 
-	cpuset_track_online_nodes();
-
 	if (new_pgdat) {
 		ret = register_one_node(nid);
 		/*
@@ -509,7 +520,8 @@ int add_memory(int nid, u64 start, u64 size)
 		BUG_ON(ret);
 	}
 
-	return ret;
+	goto out;
+
 error:
 	/* rollback pgdat allocation and others */
 	if (new_pgdat)
@@ -517,6 +529,8 @@ error:
 	if (res)
 		release_memory_resource(res);
 
+out:
+	unlock_system_sleep();
 	return ret;
 }
 EXPORT_SYMBOL_GPL(add_memory);
@@ -627,14 +641,11 @@ int scan_lru_pages(unsigned long start, unsigned long end)
 }
 
 static struct page *
-hotremove_migrate_alloc(struct page *page,
-			unsigned long private,
-			int **x)
+hotremove_migrate_alloc(struct page *page, unsigned long private, int **x)
 {
-	/* This should be improoooooved!! */
-	return alloc_page(GFP_HIGHUSER_PAGECACHE);
+	/* This should be improooooved!! */
+	return alloc_page(GFP_HIGHUSER_MOVABLE);
 }
-
 
 #define NR_OFFLINE_AT_ONCE_PAGES	(256)
 static int
@@ -657,8 +668,9 @@ do_migrate_range(unsigned long start_pfn, unsigned long end_pfn)
 		 * We can skip free pages. And we can only deal with pages on
 		 * LRU.
 		 */
-		ret = isolate_lru_page(page, &source);
+		ret = isolate_lru_page(page);
 		if (!ret) { /* Success */
+			list_add_tail(&page->lru, &source);
 			move_pages--;
 		} else {
 			/* Becasue we don't have big zone->lock. we should
@@ -702,7 +714,7 @@ offline_isolated_pages_cb(unsigned long start, unsigned long nr_pages,
 static void
 offline_isolated_pages(unsigned long start_pfn, unsigned long end_pfn)
 {
-	walk_memory_resource(start_pfn, end_pfn - start_pfn, NULL,
+	walk_system_ram_range(start_pfn, end_pfn - start_pfn, NULL,
 				offline_isolated_pages_cb);
 }
 
@@ -728,7 +740,7 @@ check_pages_isolated(unsigned long start_pfn, unsigned long end_pfn)
 	long offlined = 0;
 	int ret;
 
-	ret = walk_memory_resource(start_pfn, end_pfn - start_pfn, &offlined,
+	ret = walk_system_ram_range(start_pfn, end_pfn - start_pfn, &offlined,
 			check_pages_isolated_cb);
 	if (ret < 0)
 		offlined = (long)ret;
@@ -755,6 +767,8 @@ int offline_pages(unsigned long start_pfn,
 	if (!test_pages_in_a_zone(start_pfn, end_pfn))
 		return -EINVAL;
 
+	lock_system_sleep();
+
 	zone = page_zone(pfn_to_page(start_pfn));
 	node = zone_to_nid(zone);
 	nr_pages = end_pfn - start_pfn;
@@ -762,7 +776,7 @@ int offline_pages(unsigned long start_pfn,
 	/* set above range as isolated */
 	ret = start_isolate_page_range(start_pfn, end_pfn);
 	if (ret)
-		return ret;
+		goto out;
 
 	arg.start_pfn = start_pfn;
 	arg.nr_pages = nr_pages;
@@ -832,12 +846,15 @@ repeat:
 	zone->present_pages -= offlined_pages;
 	zone->zone_pgdat->node_present_pages -= offlined_pages;
 	totalram_pages -= offlined_pages;
-	num_physpages -= offlined_pages;
+
+	setup_per_zone_wmarks();
+	calculate_zone_inactive_ratio(zone);
 
 	vm_total_pages = nr_free_pagecache_pages();
 	writeback_set_ratelimit();
 
 	memory_notify(MEM_OFFLINE, &arg);
+	unlock_system_sleep();
 	return 0;
 
 failed_removal:
@@ -847,12 +864,23 @@ failed_removal:
 	/* pushback to free area */
 	undo_isolate_page_range(start_pfn, end_pfn);
 
+out:
+	unlock_system_sleep();
 	return ret;
+}
+
+int remove_memory(u64 start, u64 size)
+{
+	unsigned long start_pfn, end_pfn;
+
+	start_pfn = PFN_DOWN(start);
+	end_pfn = start_pfn + PFN_DOWN(size);
+	return offline_pages(start_pfn, end_pfn, 120 * HZ);
 }
 #else
 int remove_memory(u64 start, u64 size)
 {
 	return -EINVAL;
 }
-EXPORT_SYMBOL_GPL(remove_memory);
 #endif /* CONFIG_MEMORY_HOTREMOVE */
+EXPORT_SYMBOL_GPL(remove_memory);

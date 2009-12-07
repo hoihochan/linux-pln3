@@ -85,7 +85,7 @@ static void dn_nsp_send(struct sk_buff *skb)
 	dst = sk_dst_check(sk, 0);
 	if (dst) {
 try_again:
-		skb->dst = dst;
+		skb_dst_set(skb, dst);
 		dst_output(skb);
 		return;
 	}
@@ -230,7 +230,6 @@ static inline unsigned dn_nsp_clone_and_send(struct sk_buff *skb,
 /**
  * dn_nsp_output - Try and send something from socket queues
  * @sk: The socket whose queues are to be investigated
- * @gfp: The memory allocation flags
  *
  * Try and send the packet on the end of the data and other data queues.
  * Other data gets priority over data, and if we retransmit a packet we
@@ -326,8 +325,8 @@ static __le16 *dn_mk_ack_header(struct sock *sk, struct sk_buff *skb, unsigned c
 
 	ptr = (__le16 *)dn_mk_common_header(scp, skb, msgflag, hlen);
 
-	*ptr++ = dn_htons(acknum);
-	*ptr++ = dn_htons(ackcrs);
+	*ptr++ = cpu_to_le16(acknum);
+	*ptr++ = cpu_to_le16(ackcrs);
 
 	return ptr;
 }
@@ -345,7 +344,7 @@ static __le16 *dn_nsp_mk_data_header(struct sock *sk, struct sk_buff *skb, int o
 		cb->segnum = scp->numdat;
 		seq_add(&scp->numdat, 1);
 	}
-	*(ptr++) = dn_htons(cb->segnum);
+	*(ptr++) = cpu_to_le16(cb->segnum);
 
 	return ptr;
 }
@@ -383,7 +382,7 @@ int dn_nsp_check_xmit_queue(struct sock *sk, struct sk_buff *skb, struct sk_buff
 {
 	struct dn_skb_cb *cb = DN_SKB_CB(skb);
 	struct dn_scp *scp = DN_SK(sk);
-	struct sk_buff *skb2, *list, *ack = NULL;
+	struct sk_buff *skb2, *n, *ack = NULL;
 	int wakeup = 0;
 	int try_retrans = 0;
 	unsigned long reftime = cb->stamp;
@@ -391,17 +390,13 @@ int dn_nsp_check_xmit_queue(struct sock *sk, struct sk_buff *skb, struct sk_buff
 	unsigned short xmit_count;
 	unsigned short segnum;
 
-	skb2 = q->next;
-	list = (struct sk_buff *)q;
-	while(list != skb2) {
+	skb_queue_walk_safe(q, skb2, n) {
 		struct dn_skb_cb *cb2 = DN_SKB_CB(skb2);
 
 		if (dn_before_or_equal(cb2->segnum, acknum))
 			ack = skb2;
 
 		/* printk(KERN_DEBUG "ack: %s %04x %04x\n", ack ? "ACK" : "SKIP", (int)cb2->segnum, (int)acknum); */
-
-		skb2 = skb2->next;
 
 		if (ack == NULL)
 			continue;
@@ -523,7 +518,7 @@ void dn_send_conn_conf(struct sock *sk, gfp_t gfp)
 	struct dn_scp *scp = DN_SK(sk);
 	struct sk_buff *skb = NULL;
 	struct nsp_conn_init_msg *msg;
-	__u8 len = (__u8)dn_ntohs(scp->conndata_out.opt_optl);
+	__u8 len = (__u8)le16_to_cpu(scp->conndata_out.opt_optl);
 
 	if ((skb = dn_alloc_skb(sk, 50 + len, gfp)) == NULL)
 		return;
@@ -534,7 +529,7 @@ void dn_send_conn_conf(struct sock *sk, gfp_t gfp)
 	msg->srcaddr = scp->addrloc;
 	msg->services = scp->services_loc;
 	msg->info = scp->info_loc;
-	msg->segsize = dn_htons(scp->segsize_loc);
+	msg->segsize = cpu_to_le16(scp->segsize_loc);
 
 	*skb_put(skb,1) = len;
 
@@ -560,7 +555,7 @@ static __inline__ void dn_nsp_do_disc(struct sock *sk, unsigned char msgflg,
 
 	if ((dst == NULL) || (rem == 0)) {
 		if (net_ratelimit())
-			printk(KERN_DEBUG "DECnet: dn_nsp_do_disc: BUG! Please report this to SteveW@ACM.org rem=%u dst=%p\n", dn_ntohs(rem), dst);
+			printk(KERN_DEBUG "DECnet: dn_nsp_do_disc: BUG! Please report this to SteveW@ACM.org rem=%u dst=%p\n", le16_to_cpu(rem), dst);
 		return;
 	}
 
@@ -573,7 +568,7 @@ static __inline__ void dn_nsp_do_disc(struct sock *sk, unsigned char msgflg,
 	msg += 2;
 	*(__le16 *)msg = loc;
 	msg += 2;
-	*(__le16 *)msg = dn_htons(reason);
+	*(__le16 *)msg = cpu_to_le16(reason);
 	msg += 2;
 	if (msgflg == NSP_DISCINIT)
 		*msg++ = ddl;
@@ -587,7 +582,7 @@ static __inline__ void dn_nsp_do_disc(struct sock *sk, unsigned char msgflg,
 	 * to be able to send disc packets out which have no socket
 	 * associations.
 	 */
-	skb->dst = dst_clone(dst);
+	skb_dst_set(skb, dst_clone(dst));
 	dst_output(skb);
 }
 
@@ -599,10 +594,10 @@ void dn_nsp_send_disc(struct sock *sk, unsigned char msgflg,
 	int ddl = 0;
 
 	if (msgflg == NSP_DISCINIT)
-		ddl = dn_ntohs(scp->discdata_out.opt_optl);
+		ddl = le16_to_cpu(scp->discdata_out.opt_optl);
 
 	if (reason == 0)
-		reason = dn_ntohs(scp->discdata_out.opt_status);
+		reason = le16_to_cpu(scp->discdata_out.opt_status);
 
 	dn_nsp_do_disc(sk, msgflg, reason, gfp, sk->sk_dst_cache, ddl,
 		scp->discdata_out.opt_data, scp->addrrem, scp->addrloc);
@@ -616,7 +611,7 @@ void dn_nsp_return_disc(struct sk_buff *skb, unsigned char msgflg,
 	int ddl = 0;
 	gfp_t gfp = GFP_ATOMIC;
 
-	dn_nsp_do_disc(NULL, msgflg, reason, gfp, skb->dst, ddl,
+	dn_nsp_do_disc(NULL, msgflg, reason, gfp, skb_dst(skb), ddl,
 			NULL, cb->src_port, cb->dst_port);
 }
 
@@ -676,7 +671,7 @@ void dn_nsp_send_conninit(struct sock *sk, unsigned char msgflg)
 	msg->srcaddr	= scp->addrloc;
 	msg->services	= scp->services_loc;	/* Requested flow control    */
 	msg->info	= scp->info_loc;	/* Version Number            */
-	msg->segsize	= dn_htons(scp->segsize_loc);	/* Max segment size  */
+	msg->segsize	= cpu_to_le16(scp->segsize_loc);	/* Max segment size  */
 
 	if (scp->peer.sdn_objnum)
 		type = 0;
@@ -709,7 +704,7 @@ void dn_nsp_send_conninit(struct sock *sk, unsigned char msgflg)
 	if (aux > 0)
 	memcpy(skb_put(skb, aux), scp->accessdata.acc_acc, aux);
 
-	aux = (__u8)dn_ntohs(scp->conndata_out.opt_optl);
+	aux = (__u8)le16_to_cpu(scp->conndata_out.opt_optl);
 	*skb_put(skb, 1) = aux;
 	if (aux > 0)
 	memcpy(skb_put(skb,aux), scp->conndata_out.opt_data, aux);

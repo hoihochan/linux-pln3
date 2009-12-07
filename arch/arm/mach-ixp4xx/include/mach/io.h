@@ -17,7 +17,7 @@
 
 #include <mach/hardware.h>
 
-#define IO_SPACE_LIMIT 0xffff0000
+#define IO_SPACE_LIMIT 0x0000ffff
 
 extern int (*ixp4xx_pci_read)(u32 addr, u32 cmd, u32* data);
 extern int ixp4xx_pci_write(u32 addr, u32 cmd, u32 data);
@@ -48,8 +48,6 @@ extern int ixp4xx_pci_write(u32 addr, u32 cmd, u32 data);
 #define __mem_pci(a)		(a)
 
 #else
-
-#include <linux/mm.h>
 
 /*
  * In the case of using indirect PCI, we simply return the actual PCI
@@ -241,7 +239,7 @@ __ixp4xx_readsl(const volatile void __iomem *bus_addr, u32 *vaddr, u32 count)
 
 #ifndef CONFIG_PCI
 
-#define	__io(v)		v
+#define	__io(v)		__typesafe_io(v)
 
 #else
 

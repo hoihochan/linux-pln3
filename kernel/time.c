@@ -37,6 +37,7 @@
 #include <linux/fs.h>
 #include <linux/slab.h>
 #include <linux/math64.h>
+#include <linux/ptrace.h>
 
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
@@ -65,8 +66,9 @@ SYSCALL_DEFINE1(time, time_t __user *, tloc)
 
 	if (tloc) {
 		if (put_user(i,tloc))
-			i = -EFAULT;
+			return -EFAULT;
 	}
+	force_successful_syscall_return();
 	return i;
 }
 
@@ -368,13 +370,20 @@ EXPORT_SYMBOL(mktime);
  *	0 <= tv_nsec < NSEC_PER_SEC
  * For negative values only the tv_sec field is negative !
  */
-void set_normalized_timespec(struct timespec *ts, time_t sec, long nsec)
+void set_normalized_timespec(struct timespec *ts, time_t sec, s64 nsec)
 {
 	while (nsec >= NSEC_PER_SEC) {
+		/*
+		 * The following asm() prevents the compiler from
+		 * optimising this loop into a modulo operation. See
+		 * also __iter_div_u64_rem() in include/linux/time.h
+		 */
+		asm("" : "+rm"(nsec));
 		nsec -= NSEC_PER_SEC;
 		++sec;
 	}
 	while (nsec < 0) {
+		asm("" : "+rm"(nsec));
 		nsec += NSEC_PER_SEC;
 		--sec;
 	}
@@ -669,3 +678,21 @@ EXPORT_SYMBOL(get_jiffies_64);
 #endif
 
 EXPORT_SYMBOL(jiffies);
+
+/*
+ * Add two timespec values and do a safety check for overflow.
+ * It's assumed that both values are valid (>= 0)
+ */
+struct timespec timespec_add_safe(const struct timespec lhs,
+				  const struct timespec rhs)
+{
+	struct timespec res;
+
+	set_normalized_timespec(&res, lhs.tv_sec + rhs.tv_sec,
+				lhs.tv_nsec + rhs.tv_nsec);
+
+	if (res.tv_sec < lhs.tv_sec || res.tv_sec < rhs.tv_sec)
+		res.tv_sec = TIME_T_MAX;
+
+	return res;
+}

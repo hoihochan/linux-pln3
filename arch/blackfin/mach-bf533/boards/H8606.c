@@ -1,32 +1,11 @@
 /*
- * File:         arch/blackfin/mach-bf533/H8606.c
- * Based on:     arch/blackfin/mach-bf533/stamp.c
- * Author:       Javier Herrero <jherrero@hvsistemas.es>
+ * Copyright 2004-2009 Analog Devices Inc.
+ *           2007-2008 HV Sistemas S.L.
+ *                      Javier Herrero <jherrero@hvsistemas.es>
+ *                2005 National ICT Australia (NICTA)
+ *                      Aidan Williams <aidan@nicta.com.au>
  *
- * Created:      2007
- * Description:  Board Info File for the HV Sistemas H8606 board
- *
- * Modified:
- *               Copyright 2005 National ICT Australia (NICTA)
- *               Copyright 2004-2006 Analog Devices Inc
- *		 Copyright 2007 HV Sistemas S.L.
- *
- * Bugs:         Enter bugs at http://blackfin.uclinux.org/
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see the file COPYING, or write
- * to the Free Software Foundation, Inc.,
- * 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ * Licensed under the GPL-2 or later.
  */
 
 #include <linux/device.h>
@@ -64,18 +43,18 @@ static struct platform_device rtc_device = {
 static struct resource dm9000_resources[] = {
 	[0] = {
 		.start	= 0x20300000,
-		.end	= 0x20300000 + 1,
+		.end	= 0x20300002,
 		.flags	= IORESOURCE_MEM,
 	},
 	[1] = {
-		.start	= 0x20300000 + 4,
-		.end	= 0x20300000 + 5,
+		.start	= 0x20300004,
+		.end	= 0x20300006,
 		.flags	= IORESOURCE_MEM,
 	},
 	[2] = {
 		.start	= IRQ_PF10,
 		.end	= IRQ_PF10,
-		.flags	= (IORESOURCE_IRQ | IORESOURCE_IRQ_HIGHEDGE),
+		.flags	= (IORESOURCE_IRQ | IORESOURCE_IRQ_HIGHEDGE | IRQF_SHARED | IRQF_TRIGGER_HIGH),
 	},
 };
 
@@ -88,6 +67,14 @@ static struct platform_device dm9000_device = {
 #endif
 
 #if defined(CONFIG_SMC91X) || defined(CONFIG_SMC91X_MODULE)
+#include <linux/smc91x.h>
+
+static struct smc91x_platdata smc91x_info = {
+	.flags = SMC91X_USE_16BIT | SMC91X_NOWAIT,
+	.leda = RPC_LED_100_10,
+	.ledb = RPC_LED_TX_RX,
+};
+
 static struct resource smc91x_resources[] = {
 	{
 		.name = "smc91x-regs",
@@ -110,6 +97,9 @@ static struct platform_device smc91x_device = {
 	.id = 0,
 	.num_resources = ARRAY_SIZE(smc91x_resources),
 	.resource = smc91x_resources,
+	.dev	= {
+		.platform_data	= &smc91x_info,
+	},
 };
 #endif
 
@@ -140,18 +130,22 @@ static struct platform_device net2272_bfin_device = {
 #if defined(CONFIG_MTD_M25P80) || defined(CONFIG_MTD_M25P80_MODULE)
 static struct mtd_partition bfin_spi_flash_partitions[] = {
 	{
-		.name = "bootloader(spi)",
-		.size = 0x00060000,
+		.name = "bootloader (spi)",
+		.size = 0x40000,
 		.offset = 0,
 		.mask_flags = MTD_CAP_ROM
 	}, {
-		.name = "linux kernel(spi)",
-		.size = 0x100000,
-		.offset = 0x60000
+		.name = "fpga (spi)",
+		.size =   0x30000,
+		.offset = 0x40000
 	}, {
-		.name = "file system(spi)",
-		.size = 0x6a0000,
-		.offset = 0x00160000,
+		.name = "linux kernel (spi)",
+		.size =   0x150000,
+		.offset =  0x70000
+	}, {
+		.name = "jffs2 root file system (spi)",
+		.size =   0x640000,
+		.offset = 0x1c0000,
 	}
 };
 
@@ -169,7 +163,7 @@ static struct bfin5xx_spi_chip spi_flash_chip_info = {
 };
 #endif
 
-#if defined(CONFIG_SPI_ADC_BF533) || defined(CONFIG_SPI_ADC_BF533_MODULE)
+#if defined(CONFIG_BFIN_SPI_ADC) || defined(CONFIG_BFIN_SPI_ADC_MODULE)
 /* SPI ADC chip */
 static struct bfin5xx_spi_chip spi_adc_chip_info = {
 	.ctl_reg = 0x1000,
@@ -183,15 +177,6 @@ static struct bfin5xx_spi_chip ad1836_spi_chip_info = {
 	.ctl_reg = 0x1000,
 	.enable_dma = 0,
 	.bits_per_word = 16,
-};
-#endif
-
-#if defined(CONFIG_PBX)
-static struct bfin5xx_spi_chip spi_si3xxx_chip_info = {
-	.ctl_reg	= 0x1c04,
-	.enable_dma	= 0,
-	.bits_per_word	= 8,
-	.cs_change_per_word = 1,
 };
 #endif
 
@@ -212,7 +197,7 @@ static struct spi_board_info bfin_spi_board_info[] __initdata = {
 	},
 #endif
 
-#if defined(CONFIG_SPI_ADC_BF533) || defined(CONFIG_SPI_ADC_BF533_MODULE)
+#if defined(CONFIG_BFIN_SPI_ADC) || defined(CONFIG_BFIN_SPI_ADC_MODULE)
 	{
 		.modalias = "bfin_spi_adc", /* Name of spi_driver for this device */
 		.max_speed_hz = 4,     /* actual baudrate is SCLK/(2xspeed_hz) */
@@ -225,7 +210,7 @@ static struct spi_board_info bfin_spi_board_info[] __initdata = {
 
 #if defined(CONFIG_SND_BLACKFIN_AD1836) || defined(CONFIG_SND_BLACKFIN_AD1836_MODULE)
 	{
-		.modalias = "ad1836-spi",
+		.modalias = "ad1836",
 		.max_speed_hz = 16,
 		.bus_num = 1,
 		.chip_select = CONFIG_SND_BLACKFIN_SPI_PFBIT,
@@ -233,23 +218,6 @@ static struct spi_board_info bfin_spi_board_info[] __initdata = {
 	},
 #endif
 
-#if defined(CONFIG_PBX)
-	{
-		.modalias	 = "fxs-spi",
-		.max_speed_hz	 = 4,
-		.bus_num	 = 1,
-		.chip_select	 = 3,
-		.controller_data = &spi_si3xxx_chip_info,
-	},
-
-	{
-		.modalias	 = "fxo-spi",
-		.max_speed_hz	 = 4,
-		.bus_num	 = 1,
-		.chip_select	 = 2,
-		.controller_data = &spi_si3xxx_chip_info,
-	},
-#endif
 };
 
 /* SPI (0) */
@@ -262,6 +230,11 @@ static struct resource bfin_spi0_resource[] = {
 	[1] = {
 		.start = CH_SPI,
 		.end   = CH_SPI,
+		.flags = IORESOURCE_DMA,
+	},
+	[2] = {
+		.start = IRQ_SPI,
+		.end   = IRQ_SPI,
 		.flags = IORESOURCE_IRQ,
 	}
 };
@@ -309,22 +282,32 @@ static struct platform_device bfin_uart_device = {
 #endif
 
 #if defined(CONFIG_BFIN_SIR) || defined(CONFIG_BFIN_SIR_MODULE)
-static struct resource bfin_sir_resources[] = {
 #ifdef CONFIG_BFIN_SIR0
+static struct resource bfin_sir0_resources[] = {
 	{
 		.start = 0xFFC00400,
 		.end = 0xFFC004FF,
 		.flags = IORESOURCE_MEM,
 	},
-#endif
+	{
+		.start = IRQ_UART0_RX,
+		.end = IRQ_UART0_RX+1,
+		.flags = IORESOURCE_IRQ,
+	},
+	{
+		.start = CH_UART0_RX,
+		.end = CH_UART0_RX+1,
+		.flags = IORESOURCE_DMA,
+	},
 };
 
-static struct platform_device bfin_sir_device = {
+static struct platform_device bfin_sir0_device = {
 	.name = "bfin_sir",
 	.id = 0,
-	.num_resources = ARRAY_SIZE(bfin_sir_resources),
-	.resource = bfin_sir_resources,
+	.num_resources = ARRAY_SIZE(bfin_sir0_resources),
+	.resource = bfin_sir0_resources,
 };
+#endif
 #endif
 
 #if defined(CONFIG_SERIAL_8250) || defined(CONFIG_SERIAL_8250_MODULE)
@@ -340,7 +323,7 @@ static struct platform_device bfin_sir_device = {
 
 static struct plat_serial8250_port serial8250_platform_data [] = {
 	{
-		.membase = 0x20200000,
+		.membase = (void *)0x20200000,
 		.mapbase = 0x20200000,
 		.irq = IRQ_PF8,
 		.flags = UPF_BOOT_AUTOCONF | UART_CONFIG_TYPE,
@@ -348,7 +331,7 @@ static struct plat_serial8250_port serial8250_platform_data [] = {
 		.regshift = 1,
 		.uartclk = 66666667,
 	}, {
-		.membase = 0x20200010,
+		.membase = (void *)0x20200010,
 		.mapbase = 0x20200010,
 		.irq = IRQ_PF8,
 		.flags = UPF_BOOT_AUTOCONF | UART_CONFIG_TYPE,
@@ -427,7 +410,9 @@ static struct platform_device *h8606_devices[] __initdata = {
 #endif
 
 #if defined(CONFIG_BFIN_SIR) || defined(CONFIG_BFIN_SIR_MODULE)
-	&bfin_sir_device,
+#ifdef CONFIG_BFIN_SIR0
+	&bfin_sir0_device,
+#endif
 #endif
 
 #if defined(CONFIG_KEYBOARD_OPENCORES) || defined(CONFIG_KEYBOARD_OPENCORES_MODULE)

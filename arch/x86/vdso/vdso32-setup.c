@@ -310,7 +310,7 @@ int __init sysenter_setup(void)
 }
 
 /* Setup a VMA at program startup for the vsyscall page */
-int arch_setup_additional_pages(struct linux_binprm *bprm, int exstack)
+int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
 {
 	struct mm_struct *mm = current->mm;
 	unsigned long addr;
@@ -338,6 +338,8 @@ int arch_setup_additional_pages(struct linux_binprm *bprm, int exstack)
 		}
 	}
 
+	current->mm->context.vdso = (void *)addr;
+
 	if (compat_uses_vma || !compat) {
 		/*
 		 * MAYWRITE to allow gdb to COW and set breakpoints
@@ -358,11 +360,13 @@ int arch_setup_additional_pages(struct linux_binprm *bprm, int exstack)
 			goto up_fail;
 	}
 
-	current->mm->context.vdso = (void *)addr;
 	current_thread_info()->sysenter_return =
 		VDSO32_SYMBOL(addr, SYSENTER_RETURN);
 
   up_fail:
+	if (ret)
+		current->mm->context.vdso = NULL;
+
 	up_write(&mm->mmap_sem);
 
 	return ret;

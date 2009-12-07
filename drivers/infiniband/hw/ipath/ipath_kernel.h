@@ -355,6 +355,19 @@ struct ipath_devdata {
 	/* errors masked because they occur too fast */
 	ipath_err_t ipath_maskederrs;
 	u64 ipath_lastlinkrecov; /* link recoveries at last ACTIVE */
+	/* these 5 fields are used to establish deltas for IB Symbol
+	 * errors and linkrecovery errors. They can be reported on
+	 * some chips during link negotiation prior to INIT, and with
+	 * DDR when faking DDR negotiations with non-IBTA switches.
+	 * The chip counters are adjusted at driver unload if there is
+	 * a non-zero delta.
+	 */
+	u64 ibdeltainprog;
+	u64 ibsymdelta;
+	u64 ibsymsnap;
+	u64 iblnkerrdelta;
+	u64 iblnkerrsnap;
+
 	/* time in jiffies at which to re-enable maskederrs */
 	unsigned long ipath_unmasktime;
 	/* count of egrfull errors, combined for all ports */
@@ -464,6 +477,8 @@ struct ipath_devdata {
 	spinlock_t ipath_kernel_tid_lock;
 	spinlock_t ipath_user_tid_lock;
 	spinlock_t ipath_sendctrl_lock;
+	/* around ipath_pd and (user ports) port_cnt use (intr vs free) */
+	spinlock_t ipath_uctxt_lock;
 
 	/*
 	 * IPATH_STATUS_*,
@@ -1271,7 +1286,7 @@ struct device_driver;
 
 extern const char ib_ipath_version[];
 
-extern struct attribute_group *ipath_driver_attr_groups[];
+extern const struct attribute_group *ipath_driver_attr_groups[];
 
 int ipath_device_create_group(struct device *, struct ipath_devdata *);
 void ipath_device_remove_group(struct device *, struct ipath_devdata *);

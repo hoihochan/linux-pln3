@@ -103,7 +103,6 @@ static inline u8 llc_ui_header_len(struct sock *sk, struct sockaddr_llc *addr)
  *	llc_ui_send_data - send data via reliable llc2 connection
  *	@sk: Connection the socket is using.
  *	@skb: Data the user wishes to send.
- *	@addr: Source and destination fields provided by the user.
  *	@noblock: can we block waiting for data?
  *
  *	Send data via reliable llc2 connection.
@@ -937,7 +936,7 @@ static int llc_ui_getname(struct socket *sock, struct sockaddr *uaddr,
 
 		if (llc->dev) {
 			sllc.sllc_arphrd = llc->dev->type;
-			memcpy(&sllc.sllc_mac, &llc->dev->dev_addr,
+			memcpy(&sllc.sllc_mac, llc->dev->dev_addr,
 			       IFHWADDRLEN);
 		}
 	}
@@ -974,7 +973,7 @@ static int llc_ui_ioctl(struct socket *sock, unsigned int cmd,
  *	Set various connection specific parameters.
  */
 static int llc_ui_setsockopt(struct socket *sock, int level, int optname,
-			     char __user *optval, int optlen)
+			     char __user *optval, unsigned int optlen)
 {
 	struct sock *sk = sock->sk;
 	struct llc_sock *llc = llc_sk(sk);
@@ -1120,11 +1119,11 @@ static const struct proto_ops llc_ui_ops = {
 	.sendpage    = sock_no_sendpage,
 };
 
-static char llc_proc_err_msg[] __initdata =
+static const char llc_proc_err_msg[] __initconst =
 	KERN_CRIT "LLC: Unable to register the proc_fs entries\n";
-static char llc_sysctl_err_msg[] __initdata =
+static const char llc_sysctl_err_msg[] __initconst =
 	KERN_CRIT "LLC: Unable to register the sysctl entries\n";
-static char llc_sock_err_msg[] __initdata =
+static const char llc_sock_err_msg[] __initconst =
 	KERN_CRIT "LLC: Unable to register the network family\n";
 
 static int __init llc2_init(void)

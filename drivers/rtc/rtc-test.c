@@ -34,14 +34,9 @@ static int test_rtc_read_time(struct device *dev,
 	return 0;
 }
 
-static int test_rtc_set_time(struct device *dev,
-	struct rtc_time *tm)
-{
-	return 0;
-}
-
 static int test_rtc_set_mmss(struct device *dev, unsigned long secs)
 {
+	dev_info(dev, "%s, secs = %lu\n", __func__, secs);
 	return 0;
 }
 
@@ -78,7 +73,6 @@ static int test_rtc_ioctl(struct device *dev, unsigned int cmd,
 static const struct rtc_class_ops test_rtc_ops = {
 	.proc = test_rtc_proc,
 	.read_time = test_rtc_read_time,
-	.set_time = test_rtc_set_time,
 	.read_alarm = test_rtc_read_alarm,
 	.set_alarm = test_rtc_set_alarm,
 	.set_mmss = test_rtc_set_mmss,
@@ -99,7 +93,6 @@ static ssize_t test_irq_store(struct device *dev,
 	struct rtc_device *rtc = platform_get_drvdata(plat_dev);
 
 	retval = count;
-	local_irq_disable();
 	if (strncmp(buf, "tick", 4) == 0)
 		rtc_update_irq(rtc, 1, RTC_PF | RTC_IRQF);
 	else if (strncmp(buf, "alarm", 5) == 0)
@@ -108,7 +101,6 @@ static ssize_t test_irq_store(struct device *dev,
 		rtc_update_irq(rtc, 1, RTC_UF | RTC_IRQF);
 	else
 		retval = -EINVAL;
-	local_irq_enable();
 
 	return retval;
 }

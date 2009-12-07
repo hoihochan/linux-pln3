@@ -327,7 +327,7 @@ static int qe_uart_tx_pump(struct uart_qe_port *qe_port)
 	unsigned char *p;
 	unsigned int count;
 	struct uart_port *port = &qe_port->port;
-	struct circ_buf *xmit = &port->info->xmit;
+	struct circ_buf *xmit = &port->state->xmit;
 
 	bdp = qe_port->rx_cur;
 
@@ -466,7 +466,7 @@ static void qe_uart_int_rx(struct uart_qe_port *qe_port)
 	int i;
 	unsigned char ch, *cp;
 	struct uart_port *port = &qe_port->port;
-	struct tty_struct *tty = port->info->port.tty;
+	struct tty_struct *tty = port->state->port.tty;
 	struct qe_bd *bdp;
 	u16 status;
 	unsigned int flg;
@@ -681,22 +681,27 @@ static void qe_uart_init_ucc(struct uart_qe_port *qe_port)
 	out_be16(&uccup->rccm, 0xc0ff);
 
 	/* Configure the GUMR registers for UART */
-	if (soft_uart)
+	if (soft_uart) {
 		/* Soft-UART requires a 1X multiplier for TX */
 		clrsetbits_be32(&uccp->gumr_l,
 			UCC_SLOW_GUMR_L_MODE_MASK | UCC_SLOW_GUMR_L_TDCR_MASK |
 			UCC_SLOW_GUMR_L_RDCR_MASK,
 			UCC_SLOW_GUMR_L_MODE_UART | UCC_SLOW_GUMR_L_TDCR_1 |
 			UCC_SLOW_GUMR_L_RDCR_16);
-	else
+
+		clrsetbits_be32(&uccp->gumr_h, UCC_SLOW_GUMR_H_RFW,
+			UCC_SLOW_GUMR_H_TRX | UCC_SLOW_GUMR_H_TTX);
+	} else {
 		clrsetbits_be32(&uccp->gumr_l,
 			UCC_SLOW_GUMR_L_MODE_MASK | UCC_SLOW_GUMR_L_TDCR_MASK |
 			UCC_SLOW_GUMR_L_RDCR_MASK,
 			UCC_SLOW_GUMR_L_MODE_UART | UCC_SLOW_GUMR_L_TDCR_16 |
 			UCC_SLOW_GUMR_L_RDCR_16);
 
-	clrsetbits_be32(&uccp->gumr_h, UCC_SLOW_GUMR_H_RFW,
-		UCC_SLOW_GUMR_H_TRX | UCC_SLOW_GUMR_H_TTX);
+		clrsetbits_be32(&uccp->gumr_h,
+			UCC_SLOW_GUMR_H_TRX | UCC_SLOW_GUMR_H_TTX,
+			UCC_SLOW_GUMR_H_RFW);
+	}
 
 #ifdef LOOPBACK
 	clrsetbits_be32(&uccp->gumr_l, UCC_SLOW_GUMR_L_DIAG_MASK,
@@ -706,7 +711,7 @@ static void qe_uart_init_ucc(struct uart_qe_port *qe_port)
 		UCC_SLOW_GUMR_H_CDS);
 #endif
 
-	/* Enable rx interrupts  and clear all pending events.  */
+	/* Disable rx interrupts  and clear all pending events.  */
 	out_be16(&uccp->uccm, 0);
 	out_be16(&uccp->ucce, 0xffff);
 	out_be16(&uccp->udsr, 0x7e7e);
@@ -765,6 +770,10 @@ static void qe_uart_init_ucc(struct uart_qe_port *qe_port)
 		cecr_subblock = ucc_slow_get_qe_cr_subblock(qe_port->ucc_num);
 		qe_issue_cmd(QE_INIT_TX_RX, cecr_subblock,
 			QE_CR_PROTOCOL_UNSPECIFIED, 0);
+	} else {
+		cecr_subblock = ucc_slow_get_qe_cr_subblock(qe_port->ucc_num);
+		qe_issue_cmd(QE_INIT_TX_RX, cecr_subblock,
+			QE_CR_PROTOCOL_UART, 0);
 	}
 }
 
@@ -1009,7 +1018,7 @@ static int qe_uart_request_port(struct uart_port *port)
 	rx_size = L1_CACHE_ALIGN(qe_port->rx_nrfifos * qe_port->rx_fifosize);
 	tx_size = L1_CACHE_ALIGN(qe_port->tx_nrfifos * qe_port->tx_fifosize);
 
-	bd_virt = dma_alloc_coherent(NULL, rx_size + tx_size, &bd_dma_addr,
+	bd_virt = dma_alloc_coherent(port->dev, rx_size + tx_size, &bd_dma_addr,
 		GFP_KERNEL);
 	if (!bd_virt) {
 		dev_err(port->dev, "could not allocate buffer descriptors\n");
@@ -1051,7 +1060,7 @@ static void qe_uart_release_port(struct uart_port *port)
 		container_of(port, struct uart_qe_port, port);
 	struct ucc_slow_private *uccs = qe_port->us_private;
 
-	dma_free_coherent(NULL, qe_port->bd_size, qe_port->bd_virt,
+	dma_free_coherent(port->dev, qe_port->bd_size, qe_port->bd_virt,
 			  qe_port->bd_dma_addr);
 
 	ucc_slow_free(uccs);
@@ -1066,7 +1075,7 @@ static int qe_uart_verify_port(struct uart_port *port,
 	if (ser->type != PORT_UNKNOWN && ser->type != PORT_CPM)
 		return -EINVAL;
 
-	if (ser->irq < 0 || ser->irq >= NR_IRQS)
+	if (ser->irq < 0 || ser->irq >= nr_irqs)
 		return -EINVAL;
 
 	if (ser->baud_base < 9600)
@@ -1274,6 +1283,7 @@ static int ucc_uart_probe(struct of_device *ofdev,
 	if (!iprop) {
 		iprop = of_get_property(np, "device-id", NULL);
 		if (!iprop) {
+			kfree(qe_port);
 			dev_err(&ofdev->dev, "UCC is unspecified in "
 				"device tree\n");
 			return -EINVAL;

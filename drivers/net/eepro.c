@@ -309,7 +309,8 @@ struct eepro_local {
 
 static int	eepro_probe1(struct net_device *dev, int autoprobe);
 static int	eepro_open(struct net_device *dev);
-static int	eepro_send_packet(struct sk_buff *skb, struct net_device *dev);
+static netdev_tx_t eepro_send_packet(struct sk_buff *skb,
+				     struct net_device *dev);
 static irqreturn_t eepro_interrupt(int irq, void *dev_id);
 static void 	eepro_rx(struct net_device *dev);
 static void 	eepro_transmit_interrupt(struct net_device *dev);
@@ -605,7 +606,7 @@ out:
 
 static void __init printEEPROMInfo(struct net_device *dev)
 {
-	struct eepro_local *lp = (struct eepro_local *)dev->priv;
+	struct eepro_local *lp = netdev_priv(dev);
 	int ioaddr = dev->base_addr;
 	unsigned short Word;
 	int i,j;
@@ -690,7 +691,6 @@ static void __init eepro_print_info (struct net_device *dev)
 	struct eepro_local *	lp = netdev_priv(dev);
 	int			i;
 	const char *		ifmap[] = {"AUI", "10Base2", "10BaseT"};
-	DECLARE_MAC_BUF(mac);
 
 	i = inb(dev->base_addr + ID_REG);
 	printk(KERN_DEBUG " id: %#x ",i);
@@ -715,7 +715,7 @@ static void __init eepro_print_info (struct net_device *dev)
 			break;
 	}
 
-	printk(" %s", print_mac(mac, dev->dev_addr));
+	printk(" %pM", dev->dev_addr);
 
 	if (net_debug > 3)
 		printk(KERN_DEBUG ", %dK RCV buffer",
@@ -739,6 +739,17 @@ static void __init eepro_print_info (struct net_device *dev)
 }
 
 static const struct ethtool_ops eepro_ethtool_ops;
+
+static const struct net_device_ops eepro_netdev_ops = {
+ 	.ndo_open               = eepro_open,
+ 	.ndo_stop               = eepro_close,
+ 	.ndo_start_xmit    	= eepro_send_packet,
+ 	.ndo_set_multicast_list = set_multicast_list,
+ 	.ndo_tx_timeout		= eepro_tx_timeout,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+};
 
 /* This is the real probe routine.  Linux has a history of friendly device
    probes on the ISA bus.  A good device probe avoids doing writes, and
@@ -852,11 +863,7 @@ static int __init eepro_probe1(struct net_device *dev, int autoprobe)
  		}
  	}
 
- 	dev->open               = eepro_open;
- 	dev->stop               = eepro_close;
- 	dev->hard_start_xmit    = eepro_send_packet;
- 	dev->set_multicast_list = &set_multicast_list;
- 	dev->tx_timeout		= eepro_tx_timeout;
+	dev->netdev_ops		= &eepro_netdev_ops;
  	dev->watchdog_timeo	= TX_TIMEOUT;
 	dev->ethtool_ops	= &eepro_ethtool_ops;
 
@@ -1127,7 +1134,8 @@ static void eepro_tx_timeout (struct net_device *dev)
 }
 
 
-static int eepro_send_packet(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t eepro_send_packet(struct sk_buff *skb,
+				     struct net_device *dev)
 {
 	struct eepro_local *lp = netdev_priv(dev);
 	unsigned long flags;
@@ -1139,7 +1147,7 @@ static int eepro_send_packet(struct sk_buff *skb, struct net_device *dev)
 
 	if (length < ETH_ZLEN) {
 		if (skb_padto(skb, ETH_ZLEN))
-			return 0;
+			return NETDEV_TX_OK;
 		length = ETH_ZLEN;
 	}
 	netif_stop_queue (dev);
@@ -1172,7 +1180,7 @@ static int eepro_send_packet(struct sk_buff *skb, struct net_device *dev)
 	eepro_en_int(ioaddr);
 	spin_unlock_irqrestore(&lp->lock, flags);
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 
@@ -1396,7 +1404,7 @@ set_multicast_list(struct net_device *dev)
 #define eeprom_delay() { udelay(40); }
 #define EE_READ_CMD (6 << 6)
 
-int
+static int
 read_eeprom(int ioaddr, int location, struct net_device *dev)
 {
 	int i;
@@ -1581,7 +1589,6 @@ eepro_rx(struct net_device *dev)
 
 			skb->protocol = eth_type_trans(skb,dev);
 			netif_rx(skb);
-			dev->last_rx = jiffies;
 			dev->stats.rx_packets++;
 		}
 
@@ -1676,7 +1683,7 @@ eepro_transmit_interrupt(struct net_device *dev)
 static int eepro_ethtool_get_settings(struct net_device *dev,
 					struct ethtool_cmd *cmd)
 {
-	struct eepro_local	*lp = (struct eepro_local *)dev->priv;
+	struct eepro_local	*lp = netdev_priv(dev);
 
 	cmd->supported = 	SUPPORTED_10baseT_Half |
 				SUPPORTED_10baseT_Full |
@@ -1779,7 +1786,7 @@ int __init init_module(void)
 		printk(KERN_INFO "eepro_init_module: Auto-detecting boards (May God protect us...)\n");
 	}
 
-	for (i = 0; io[i] != -1 && i < MAX_EEPRO; i++) {
+	for (i = 0; i < MAX_EEPRO && io[i] != -1; i++) {
 		dev = alloc_etherdev(sizeof(struct eepro_local));
 		if (!dev)
 			break;

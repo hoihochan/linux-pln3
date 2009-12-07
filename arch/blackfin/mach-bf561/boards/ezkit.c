@@ -1,30 +1,9 @@
 /*
- * File:         arch/blackfin/mach-bf561/ezkit.c
- * Based on:
- * Author:
+ * Copyright 2004-2009 Analog Devices Inc.
+ *               2005 National ICT Australia (NICTA)
+ *                    Aidan Williams <aidan@nicta.com.au>
  *
- * Created:
- * Description:
- *
- * Modified:
- *               Copyright 2004-2006 Analog Devices Inc.
- *
- * Bugs:         Enter bugs at http://blackfin.uclinux.org/
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see the file COPYING, or write
- * to the Free Software Foundation, Inc.,
- * 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ * Licensed under the GPL-2 or later.
  */
 
 #include <linux/device.h>
@@ -43,53 +22,41 @@
 /*
  * Name the Board for the /proc/cpuinfo
  */
-const char bfin_board_name[] = "ADDS-BF561-EZKIT";
-
-#define ISP1761_BASE       0x2C0F0000
-#define ISP1761_IRQ        IRQ_PF10
+const char bfin_board_name[] = "ADI BF561-EZKIT";
 
 #if defined(CONFIG_USB_ISP1760_HCD) || defined(CONFIG_USB_ISP1760_HCD_MODULE)
-static struct resource bfin_isp1761_resources[] = {
-	{
-		.name	= "isp1761-regs",
-		.start  = ISP1761_BASE + 0x00000000,
-		.end    = ISP1761_BASE + 0x000fffff,
+#include <linux/usb/isp1760.h>
+static struct resource bfin_isp1760_resources[] = {
+	[0] = {
+		.start  = 0x2C0F0000,
+		.end    = 0x203C0000 + 0xfffff,
 		.flags  = IORESOURCE_MEM,
 	},
-	{
-		.start  = ISP1761_IRQ,
-		.end    = ISP1761_IRQ,
+	[1] = {
+		.start  = IRQ_PF10,
+		.end    = IRQ_PF10,
 		.flags  = IORESOURCE_IRQ,
 	},
 };
 
-static struct platform_device bfin_isp1761_device = {
-	.name           = "isp1761",
+static struct isp1760_platform_data isp1760_priv = {
+	.is_isp1761 = 0,
+	.bus_width_16 = 1,
+	.port1_otg = 0,
+	.analog_oc = 0,
+	.dack_polarity_high = 0,
+	.dreq_polarity_high = 0,
+};
+
+static struct platform_device bfin_isp1760_device = {
+	.name           = "isp1760-hcd",
 	.id             = 0,
-	.num_resources  = ARRAY_SIZE(bfin_isp1761_resources),
-	.resource       = bfin_isp1761_resources,
+	.dev = {
+		.platform_data = &isp1760_priv,
+	},
+	.num_resources  = ARRAY_SIZE(bfin_isp1760_resources),
+	.resource       = bfin_isp1760_resources,
 };
-
-static struct platform_device *bfin_isp1761_devices[] = {
-	&bfin_isp1761_device,
-};
-
-int __init bfin_isp1761_init(void)
-{
-	unsigned int num_devices = ARRAY_SIZE(bfin_isp1761_devices);
-
-	printk(KERN_INFO "%s(): registering device resources\n", __func__);
-	set_irq_type(ISP1761_IRQ, IRQF_TRIGGER_FALLING);
-
-	return platform_add_devices(bfin_isp1761_devices, num_devices);
-}
-
-void __exit bfin_isp1761_exit(void)
-{
-	platform_device_unregister(&bfin_isp1761_device);
-}
-
-arch_initcall(bfin_isp1761_init);
 #endif
 
 #if defined(CONFIG_USB_ISP1362_HCD) || defined(CONFIG_USB_ISP1362_HCD_MODULE)
@@ -159,6 +126,14 @@ static struct platform_device net2272_bfin_device = {
  *  Driver needs to know address, irq and flag pin.
  */
 #if defined(CONFIG_SMC91X) || defined(CONFIG_SMC91X_MODULE)
+#include <linux/smc91x.h>
+
+static struct smc91x_platdata smc91x_info = {
+	.flags = SMC91X_USE_32BIT | SMC91X_NOWAIT,
+	.leda = RPC_LED_100_10,
+	.ledb = RPC_LED_TX_RX,
+};
+
 static struct resource smc91x_resources[] = {
 	{
 		.name = "smc91x-regs",
@@ -178,6 +153,9 @@ static struct platform_device smc91x_device = {
 	.id = 0,
 	.num_resources = ARRAY_SIZE(smc91x_resources),
 	.resource = smc91x_resources,
+	.dev	= {
+		.platform_data	= &smc91x_info,
+	},
 };
 #endif
 
@@ -221,22 +199,32 @@ static struct platform_device bfin_uart_device = {
 #endif
 
 #if defined(CONFIG_BFIN_SIR) || defined(CONFIG_BFIN_SIR_MODULE)
-static struct resource bfin_sir_resources[] = {
 #ifdef CONFIG_BFIN_SIR0
+static struct resource bfin_sir0_resources[] = {
 	{
 		.start = 0xFFC00400,
 		.end = 0xFFC004FF,
 		.flags = IORESOURCE_MEM,
 	},
-#endif
+	{
+		.start = IRQ_UART0_RX,
+		.end = IRQ_UART0_RX+1,
+		.flags = IORESOURCE_IRQ,
+	},
+	{
+		.start = CH_UART0_RX,
+		.end = CH_UART0_RX+1,
+		.flags = IORESOURCE_DMA,
+	},
 };
 
-static struct platform_device bfin_sir_device = {
+static struct platform_device bfin_sir0_device = {
 	.name = "bfin_sir",
 	.id = 0,
-	.num_resources = ARRAY_SIZE(bfin_sir_resources),
-	.resource = bfin_sir_resources,
+	.num_resources = ARRAY_SIZE(bfin_sir0_resources),
+	.resource = bfin_sir0_resources,
 };
+#endif
 #endif
 
 #if defined(CONFIG_MTD_PHYSMAP) || defined(CONFIG_MTD_PHYSMAP_MODULE)
@@ -305,6 +293,11 @@ static struct resource bfin_spi0_resource[] = {
 	[1] = {
 		.start = CH_SPI,
 		.end   = CH_SPI,
+		.flags = IORESOURCE_DMA,
+	},
+	[2] = {
+		.start = IRQ_SPI,
+		.end   = IRQ_SPI,
 		.flags = IORESOURCE_IRQ,
 	}
 };
@@ -331,7 +324,7 @@ static struct spi_board_info bfin_spi_board_info[] __initdata = {
 #if defined(CONFIG_SND_BLACKFIN_AD1836) \
 	|| defined(CONFIG_SND_BLACKFIN_AD1836_MODULE)
 	{
-		.modalias = "ad1836-spi",
+		.modalias = "ad1836",
 		.max_speed_hz = 3125000,     /* max spi clock (SCK) speed in HZ */
 		.bus_num = 0,
 		.chip_select = CONFIG_SND_BLACKFIN_SPI_PFBIT,
@@ -372,19 +365,6 @@ static struct platform_device bfin_device_gpiokeys = {
 	},
 };
 #endif
-
-static struct resource bfin_gpios_resources = {
-	.start = 0,
-	.end   = MAX_BLACKFIN_GPIOS - 1,
-	.flags = IORESOURCE_IRQ,
-};
-
-static struct platform_device bfin_gpios_device = {
-	.name = "simple-gpio",
-	.id = -1,
-	.num_resources = 1,
-	.resource = &bfin_gpios_resources,
-};
 
 #if defined(CONFIG_I2C_GPIO) || defined(CONFIG_I2C_GPIO_MODULE)
 #include <linux/i2c-gpio.h>
@@ -449,6 +429,10 @@ static struct platform_device *ezkit_devices[] __initdata = {
 	&net2272_bfin_device,
 #endif
 
+#if defined(CONFIG_USB_ISP1760_HCD) || defined(CONFIG_USB_ISP1760_HCD_MODULE)
+	&bfin_isp1760_device,
+#endif
+
 #if defined(CONFIG_SPI_BFIN) || defined(CONFIG_SPI_BFIN_MODULE)
 	&bfin_spi0_device,
 #endif
@@ -458,7 +442,9 @@ static struct platform_device *ezkit_devices[] __initdata = {
 #endif
 
 #if defined(CONFIG_BFIN_SIR) || defined(CONFIG_BFIN_SIR_MODULE)
-	&bfin_sir_device,
+#ifdef CONFIG_BFIN_SIR0
+	&bfin_sir0_device,
+#endif
 #endif
 
 #if defined(CONFIG_KEYBOARD_GPIO) || defined(CONFIG_KEYBOARD_GPIO_MODULE)
@@ -472,8 +458,6 @@ static struct platform_device *ezkit_devices[] __initdata = {
 #if defined(CONFIG_USB_ISP1362_HCD) || defined(CONFIG_USB_ISP1362_HCD_MODULE)
 	&isp1362_hcd_device,
 #endif
-
-	&bfin_gpios_device,
 
 #if defined(CONFIG_MTD_PHYSMAP) || defined(CONFIG_MTD_PHYSMAP_MODULE)
 	&ezkit_flash_device,

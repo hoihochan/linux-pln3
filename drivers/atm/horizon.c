@@ -635,13 +635,13 @@ static int make_rate (const hrz_dev * dev, u32 c, rounding r,
 		// take care of rounding
 		switch (r) {
 			case round_down:
-				pre = (br+(c<<div)-1)/(c<<div);
+				pre = DIV_ROUND_UP(br, c<<div);
 				// but p must be non-zero
 				if (!pre)
 					pre = 1;
 				break;
 			case round_nearest:
-				pre = (br+(c<<div)/2)/(c<<div);
+				pre = DIV_ROUND_CLOSEST(br, c<<div);
 				// but p must be non-zero
 				if (!pre)
 					pre = 1;
@@ -668,10 +668,10 @@ static int make_rate (const hrz_dev * dev, u32 c, rounding r,
 			// take care of rounding
 			switch (r) {
 				case round_down:
-					pre = (br+(c<<div)-1)/(c<<div);
+					pre = DIV_ROUND_UP(br, c<<div);
 					break;
 				case round_nearest:
-					pre = (br+(c<<div)/2)/(c<<div);
+					pre = DIV_ROUND_CLOSEST(br, c<<div);
 					break;
 				default: /* round_up */
 					pre = br/(c<<div);
@@ -698,7 +698,7 @@ got_it:
 		if (bits)
 			*bits = (div<<CLOCK_SELECT_SHIFT) | (pre-1);
 		if (actual) {
-			*actual = (br + (pre<<div) - 1) / (pre<<div);
+			*actual = DIV_ROUND_UP(br, pre<<div);
 			PRINTD (DBG_QOS, "actual rate: %u", *actual);
 		}
 		return 0;
@@ -1967,7 +1967,7 @@ static int __devinit hrz_init (hrz_dev * dev) {
   // Set the max AAL5 cell count to be just enough to contain the
   // largest AAL5 frame that the user wants to receive
   wr_regw (dev, MAX_AAL5_CELL_COUNT_OFF,
-	   (max_rx_size + ATM_AAL5_TRAILER + ATM_CELL_PAYLOAD - 1) / ATM_CELL_PAYLOAD);
+	   DIV_ROUND_UP(max_rx_size + ATM_AAL5_TRAILER, ATM_CELL_PAYLOAD));
   
   // Enable receive
   wr_regw (dev, RX_CONFIG_OFF, rd_regw (dev, RX_CONFIG_OFF) | RX_ENABLE);
@@ -2590,7 +2590,7 @@ static int hrz_getsockopt (struct atm_vcc * atm_vcc, int level, int optname,
 }
 
 static int hrz_setsockopt (struct atm_vcc * atm_vcc, int level, int optname,
-			   void *optval, int optlen) {
+			   void *optval, unsigned int optlen) {
   hrz_dev * dev = HRZ_DEV(atm_vcc->dev);
   PRINTD (DBG_FLOW|DBG_VCC, "hrz_setsockopt");
   switch (level) {
@@ -2705,7 +2705,7 @@ static int __devinit hrz_probe(struct pci_dev *pci_dev, const struct pci_device_
 
 	/* XXX DEV_LABEL is a guess */
 	if (!request_region(iobase, HRZ_IO_EXTENT, DEV_LABEL)) {
-		return -EINVAL;
+		err = -EINVAL;
 		goto out_disable;
 	}
 

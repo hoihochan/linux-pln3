@@ -34,8 +34,6 @@ struct fs_ops {
 	void (*adjust_link)(struct net_device *dev);
 	void (*restart)(struct net_device *dev);
 	void (*stop)(struct net_device *dev);
-	void (*pre_request_irq)(struct net_device *dev, int irq);
-	void (*post_free_irq)(struct net_device *dev, int irq);
 	void (*napi_clear_rx_event)(struct net_device *dev);
 	void (*napi_enable_rx)(struct net_device *dev);
 	void (*napi_disable_rx)(struct net_device *dev);
@@ -193,11 +191,6 @@ void fs_enet_platform_cleanup(void);
 extern const struct fs_ops fs_fec_ops;
 extern const struct fs_ops fs_fcc_ops;
 extern const struct fs_ops fs_scc_ops;
-
-/*******************************************************************/
-
-/* handy pointer to the immap */
-extern void __iomem *fs_enet_immap;
 
 /*******************************************************************/
 

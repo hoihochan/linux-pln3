@@ -27,7 +27,8 @@
 static struct dst_ops xfrm6_dst_ops;
 static struct xfrm_policy_afinfo xfrm6_policy_afinfo;
 
-static struct dst_entry *xfrm6_dst_lookup(int tos, xfrm_address_t *saddr,
+static struct dst_entry *xfrm6_dst_lookup(struct net *net, int tos,
+					  xfrm_address_t *saddr,
 					  xfrm_address_t *daddr)
 {
 	struct flowi fl = {};
@@ -38,7 +39,7 @@ static struct dst_entry *xfrm6_dst_lookup(int tos, xfrm_address_t *saddr,
 	if (saddr)
 		memcpy(&fl.fl6_src, saddr, sizeof(fl.fl6_src));
 
-	dst = ip6_route_output(&init_net, NULL, &fl);
+	dst = ip6_route_output(net, NULL, &fl);
 
 	err = dst->error;
 	if (dst->error) {
@@ -49,12 +50,13 @@ static struct dst_entry *xfrm6_dst_lookup(int tos, xfrm_address_t *saddr,
 	return dst;
 }
 
-static int xfrm6_get_saddr(xfrm_address_t *saddr, xfrm_address_t *daddr)
+static int xfrm6_get_saddr(struct net *net,
+			   xfrm_address_t *saddr, xfrm_address_t *daddr)
 {
 	struct dst_entry *dst;
 	struct net_device *dev;
 
-	dst = xfrm6_dst_lookup(0, NULL, daddr);
+	dst = xfrm6_dst_lookup(net, 0, NULL, daddr);
 	if (IS_ERR(dst))
 		return -EHOSTUNREACH;
 
@@ -144,6 +146,7 @@ static int xfrm6_fill_dst(struct xfrm_dst *xdst, struct net_device *dev)
 static inline void
 _decode_session6(struct sk_buff *skb, struct flowi *fl, int reverse)
 {
+	int onlyproto = 0;
 	u16 offset = skb_network_header_len(skb);
 	struct ipv6hdr *hdr = ipv6_hdr(skb);
 	struct ipv6_opt_hdr *exthdr;
@@ -154,11 +157,14 @@ _decode_session6(struct sk_buff *skb, struct flowi *fl, int reverse)
 	ipv6_addr_copy(&fl->fl6_dst, reverse ? &hdr->saddr : &hdr->daddr);
 	ipv6_addr_copy(&fl->fl6_src, reverse ? &hdr->daddr : &hdr->saddr);
 
-	while (pskb_may_pull(skb, nh + offset + 1 - skb->data)) {
+	while (nh + offset + 1 < skb->data ||
+	       pskb_may_pull(skb, nh + offset + 1 - skb->data)) {
 		nh = skb_network_header(skb);
 		exthdr = (struct ipv6_opt_hdr *)(nh + offset);
 
 		switch (nexthdr) {
+		case NEXTHDR_FRAGMENT:
+			onlyproto = 1;
 		case NEXTHDR_ROUTING:
 		case NEXTHDR_HOP:
 		case NEXTHDR_DEST:
@@ -172,7 +178,8 @@ _decode_session6(struct sk_buff *skb, struct flowi *fl, int reverse)
 		case IPPROTO_TCP:
 		case IPPROTO_SCTP:
 		case IPPROTO_DCCP:
-			if (pskb_may_pull(skb, nh + offset + 4 - skb->data)) {
+			if (!onlyproto && (nh + offset + 4 < skb->data ||
+			     pskb_may_pull(skb, nh + offset + 4 - skb->data))) {
 				__be16 *ports = (__be16 *)exthdr;
 
 				fl->fl_ip_sport = ports[!!reverse];
@@ -182,7 +189,7 @@ _decode_session6(struct sk_buff *skb, struct flowi *fl, int reverse)
 			return;
 
 		case IPPROTO_ICMPV6:
-			if (pskb_may_pull(skb, nh + offset + 2 - skb->data)) {
+			if (!onlyproto && pskb_may_pull(skb, nh + offset + 2 - skb->data)) {
 				u8 *icmp = (u8 *)exthdr;
 
 				fl->fl_icmp_type = icmp[0];
@@ -193,7 +200,7 @@ _decode_session6(struct sk_buff *skb, struct flowi *fl, int reverse)
 
 #if defined(CONFIG_IPV6_MIP6) || defined(CONFIG_IPV6_MIP6_MODULE)
 		case IPPROTO_MH:
-			if (pskb_may_pull(skb, nh + offset + 3 - skb->data)) {
+			if (!onlyproto && pskb_may_pull(skb, nh + offset + 3 - skb->data)) {
 				struct ip6_mh *mh;
 				mh = (struct ip6_mh *)exthdr;
 
@@ -217,7 +224,7 @@ _decode_session6(struct sk_buff *skb, struct flowi *fl, int reverse)
 
 static inline int xfrm6_garbage_collect(struct dst_ops *ops)
 {
-	xfrm6_policy_afinfo.garbage_collect();
+	xfrm6_policy_afinfo.garbage_collect(&init_net);
 	return (atomic_read(&xfrm6_dst_ops.entries) > xfrm6_dst_ops.gc_thresh*2);
 }
 
@@ -267,14 +274,13 @@ static void xfrm6_dst_ifdown(struct dst_entry *dst, struct net_device *dev,
 
 static struct dst_ops xfrm6_dst_ops = {
 	.family =		AF_INET6,
-	.protocol =		__constant_htons(ETH_P_IPV6),
+	.protocol =		cpu_to_be16(ETH_P_IPV6),
 	.gc =			xfrm6_garbage_collect,
 	.update_pmtu =		xfrm6_update_pmtu,
 	.destroy =		xfrm6_dst_destroy,
 	.ifdown =		xfrm6_dst_ifdown,
 	.local_out =		__ip6_local_out,
 	.gc_thresh =		1024,
-	.entry_size =		sizeof(struct xfrm_dst),
 	.entries =		ATOMIC_INIT(0),
 };
 
@@ -300,9 +306,26 @@ static void xfrm6_policy_fini(void)
 	xfrm_policy_unregister_afinfo(&xfrm6_policy_afinfo);
 }
 
+#ifdef CONFIG_SYSCTL
+static struct ctl_table xfrm6_policy_table[] = {
+	{
+		.ctl_name       = CTL_UNNUMBERED,
+		.procname       = "xfrm6_gc_thresh",
+		.data	   	= &xfrm6_dst_ops.gc_thresh,
+		.maxlen	 	= sizeof(int),
+		.mode	   	= 0644,
+		.proc_handler   = proc_dointvec,
+	},
+	{ }
+};
+
+static struct ctl_table_header *sysctl_hdr;
+#endif
+
 int __init xfrm6_init(void)
 {
 	int ret;
+	unsigned int gc_thresh;
 
 	ret = xfrm6_policy_init();
 	if (ret)
@@ -311,6 +334,23 @@ int __init xfrm6_init(void)
 	ret = xfrm6_state_init();
 	if (ret)
 		goto out_policy;
+	/*
+	 * We need a good default value for the xfrm6 gc threshold.
+	 * In ipv4 we set it to the route hash table size * 8, which
+	 * is half the size of the maximaum route cache for ipv4.  It
+	 * would be good to do the same thing for v6, except the table is
+	 * constructed differently here.  Here each table for a net namespace
+	 * can have FIB_TABLE_HASHSZ entries, so lets go with the same
+	 * computation that we used for ipv4 here.  Also, lets keep the initial
+	 * gc_thresh to a minimum of 1024, since, the ipv6 route cache defaults
+	 * to that as a minimum as well
+	 */
+	gc_thresh = FIB6_TABLE_HASHSZ * 8;
+	xfrm6_dst_ops.gc_thresh = (gc_thresh < 1024) ? 1024 : gc_thresh;
+#ifdef CONFIG_SYSCTL
+	sysctl_hdr = register_net_sysctl_table(&init_net, net_ipv6_ctl_path,
+						xfrm6_policy_table);
+#endif
 out:
 	return ret;
 out_policy:
@@ -320,6 +360,10 @@ out_policy:
 
 void xfrm6_fini(void)
 {
+#ifdef CONFIG_SYSCTL
+	if (sysctl_hdr)
+		unregister_net_sysctl_table(sysctl_hdr);
+#endif
 	//xfrm6_input_fini();
 	xfrm6_policy_fini();
 	xfrm6_state_fini();

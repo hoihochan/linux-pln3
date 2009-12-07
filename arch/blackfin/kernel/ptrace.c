@@ -1,37 +1,14 @@
 /*
- * File:         arch/blackfin/kernel/ptrace.c
- * Based on:     Taken from linux/kernel/ptrace.c
- * Author:       linux/kernel/ptrace.c is by Ross Biro 1/23/92, edited by Linus Torvalds
+ * linux/kernel/ptrace.c is by Ross Biro 1/23/92, edited by Linus Torvalds
+ * these modifications are Copyright 2004-2009 Analog Devices Inc.
  *
- * Created:      1/23/92
- * Description:
- *
- * Modified:
- *               Copyright 2004-2006 Analog Devices Inc.
- *
- * Bugs:         Enter bugs at http://blackfin.uclinux.org/
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see the file COPYING, or write
- * to the Free Software Foundation, Inc.,
- * 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ * Licensed under the GPL-2
  */
 
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/errno.h>
 #include <linux/ptrace.h>
 #include <linux/user.h>
@@ -45,8 +22,9 @@
 #include <asm/asm-offsets.h>
 #include <asm/dma.h>
 #include <asm/fixed_code.h>
+#include <asm/cacheflush.h>
+#include <asm/mem_map.h>
 
-#define MAX_SHARED_LIBS 3
 #define TEXT_OFFSET 0
 /*
  * does not yet catch signals sent when the child dies.
@@ -81,10 +59,12 @@ static inline struct pt_regs *get_user_regs(struct task_struct *task)
 /*
  * Get all user integer registers.
  */
-static inline int ptrace_getregs(struct task_struct *tsk, void __user * uregs)
+static inline int ptrace_getregs(struct task_struct *tsk, void __user *uregs)
 {
-	struct pt_regs *regs = get_user_regs(tsk);
-	return copy_to_user(uregs, regs, sizeof(struct pt_regs)) ? -EFAULT : 0;
+	struct pt_regs regs;
+	memcpy(&regs, get_user_regs(tsk), sizeof(regs));
+	regs.usp = tsk->thread.usp;
+	return copy_to_user(uregs, &regs, sizeof(struct pt_regs)) ? -EFAULT : 0;
 }
 
 /* Mapping from PT_xxx to the stack offset at which the register is
@@ -158,22 +138,33 @@ put_reg(struct task_struct *task, int regno, unsigned long data)
 static inline int is_user_addr_valid(struct task_struct *child,
 				     unsigned long start, unsigned long len)
 {
-	struct vm_list_struct *vml;
+	struct vm_area_struct *vma;
 	struct sram_list_struct *sraml;
 
-	for (vml = child->mm->context.vmlist; vml; vml = vml->next)
-		if (start >= vml->vma->vm_start && start + len <= vml->vma->vm_end)
+	/* overflow */
+	if (start + len < start)
+		return -EIO;
+
+	vma = find_vma(child->mm, start);
+	if (vma && start >= vma->vm_start && start + len <= vma->vm_end)
 			return 0;
 
 	for (sraml = child->mm->context.sram_list; sraml; sraml = sraml->next)
 		if (start >= (unsigned long)sraml->addr
-		    && start + len <= (unsigned long)sraml->addr + sraml->length)
+		    && start + len < (unsigned long)sraml->addr + sraml->length)
 			return 0;
 
-	if (start >= FIXED_CODE_START && start + len <= FIXED_CODE_END)
+	if (start >= FIXED_CODE_START && start + len < FIXED_CODE_END)
 		return 0;
 
 	return -EIO;
+}
+
+void ptrace_enable(struct task_struct *child)
+{
+	unsigned long tmp;
+	tmp = get_reg(child, PT_SYSCFG) | (TRACE_BITS);
+	put_reg(child, PT_SYSCFG, tmp);
 }
 
 /*
@@ -192,59 +183,60 @@ void ptrace_disable(struct task_struct *child)
 long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 {
 	int ret;
-	int add = 0;
 	unsigned long __user *datap = (unsigned long __user *)data;
+	void *paddr = (void *)addr;
 
 	switch (request) {
 		/* when I and D space are separate, these will need to be fixed. */
 	case PTRACE_PEEKDATA:
 		pr_debug("ptrace: PEEKDATA\n");
-		add = MAX_SHARED_LIBS * 4;	/* space between text and data */
 		/* fall through */
 	case PTRACE_PEEKTEXT:	/* read word at location addr. */
 		{
 			unsigned long tmp = 0;
-			int copied;
+			int copied = 0, to_copy = sizeof(tmp);
 
 			ret = -EIO;
-			pr_debug("ptrace: PEEKTEXT at addr 0x%08lx + add %d %ld\n", addr, add,
-			         sizeof(data));
-			if (is_user_addr_valid(child, addr + add, sizeof(tmp)) < 0)
+			pr_debug("ptrace: PEEKTEXT at addr 0x%08lx + %i\n", addr, to_copy);
+			if (is_user_addr_valid(child, addr, to_copy) < 0)
 				break;
 			pr_debug("ptrace: user address is valid\n");
 
-#if L1_CODE_LENGTH != 0
-			if (addr + add >= L1_CODE_START
-			    && addr + add + sizeof(tmp) <= L1_CODE_START + L1_CODE_LENGTH) {
-				safe_dma_memcpy (&tmp, (const void *)(addr + add), sizeof(tmp));
-				copied = sizeof(tmp);
-			} else
-#endif
-#if L1_DATA_A_LENGTH != 0
-			if (addr + add >= L1_DATA_A_START
-			    && addr + add + sizeof(tmp) <= L1_DATA_A_START + L1_DATA_A_LENGTH) {
-				memcpy(&tmp, (const void *)(addr + add), sizeof(tmp));
-				copied = sizeof(tmp);
-			} else
-#endif
-#if L1_DATA_B_LENGTH != 0
-			if (addr + add >= L1_DATA_B_START
-			    && addr + add + sizeof(tmp) <= L1_DATA_B_START + L1_DATA_B_LENGTH) {
-				memcpy(&tmp, (const void *)(addr + add), sizeof(tmp));
-				copied = sizeof(tmp);
-			} else
-#endif
-			if (addr + add >= FIXED_CODE_START
-			    && addr + add + sizeof(tmp) <= FIXED_CODE_END) {
-				memcpy(&tmp, (const void *)(addr + add), sizeof(tmp));
-				copied = sizeof(tmp);
-			} else
-				copied = access_process_vm(child, addr + add, &tmp,
-							   sizeof(tmp), 0);
-			pr_debug("ptrace: copied size %d [0x%08lx]\n", copied, tmp);
-			if (copied != sizeof(tmp))
+			switch (bfin_mem_access_type(addr, to_copy)) {
+			case BFIN_MEM_ACCESS_CORE:
+			case BFIN_MEM_ACCESS_CORE_ONLY:
+				copied = access_process_vm(child, addr, &tmp,
+				                           to_copy, 0);
+				if (copied)
+					break;
+
+				/* hrm, why didn't that work ... maybe no mapping */
+				if (addr >= FIXED_CODE_START &&
+				    addr + to_copy <= FIXED_CODE_END) {
+					copy_from_user_page(0, 0, 0, &tmp, paddr, to_copy);
+					copied = to_copy;
+				} else if (addr >= BOOT_ROM_START) {
+					memcpy(&tmp, paddr, to_copy);
+					copied = to_copy;
+				}
+
 				break;
-			ret = put_user(tmp, datap);
+			case BFIN_MEM_ACCESS_DMA:
+				if (safe_dma_memcpy(&tmp, paddr, to_copy))
+					copied = to_copy;
+				break;
+			case BFIN_MEM_ACCESS_ITEST:
+				if (isram_memcpy(&tmp, paddr, to_copy))
+					copied = to_copy;
+				break;
+			default:
+				copied = 0;
+				break;
+			}
+
+			pr_debug("ptrace: copied size %d [0x%08lx]\n", copied, tmp);
+			if (copied == to_copy)
+				ret = put_user(tmp, datap);
 			break;
 		}
 
@@ -271,9 +263,9 @@ long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 				tmp = child->mm->start_data;
 #ifdef CONFIG_BINFMT_ELF_FDPIC
 			} else if (addr == (sizeof(struct pt_regs) + 12)) {
-				tmp = child->mm->context.exec_fdpic_loadmap;
+				goto case_PTRACE_GETFDPIC_EXEC;
 			} else if (addr == (sizeof(struct pt_regs) + 16)) {
-				tmp = child->mm->context.interp_fdpic_loadmap;
+				goto case_PTRACE_GETFDPIC_INTERP;
 #endif
 			} else {
 				tmp = get_reg(child, addr);
@@ -282,53 +274,78 @@ long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 			break;
 		}
 
+#ifdef CONFIG_BINFMT_ELF_FDPIC
+	case PTRACE_GETFDPIC: {
+		unsigned long tmp = 0;
+
+		switch (addr) {
+		case_PTRACE_GETFDPIC_EXEC:
+		case PTRACE_GETFDPIC_EXEC:
+			tmp = child->mm->context.exec_fdpic_loadmap;
+			break;
+		case_PTRACE_GETFDPIC_INTERP:
+		case PTRACE_GETFDPIC_INTERP:
+			tmp = child->mm->context.interp_fdpic_loadmap;
+			break;
+		default:
+			break;
+		}
+
+		ret = put_user(tmp, datap);
+		break;
+	}
+#endif
+
 		/* when I and D space are separate, this will have to be fixed. */
 	case PTRACE_POKEDATA:
-		printk(KERN_NOTICE "ptrace: PTRACE_PEEKDATA\n");
+		pr_debug("ptrace: PTRACE_PEEKDATA\n");
 		/* fall through */
 	case PTRACE_POKETEXT:	/* write the word at location addr. */
 		{
-			int copied;
+			int copied = 0, to_copy = sizeof(data);
 
 			ret = -EIO;
-			pr_debug("ptrace: POKETEXT at addr 0x%08lx + add %d %ld bytes %lx\n",
-			         addr, add, sizeof(data), data);
-			if (is_user_addr_valid(child, addr + add, sizeof(data)) < 0)
+			pr_debug("ptrace: POKETEXT at addr 0x%08lx + %i bytes %lx\n",
+			         addr, to_copy, data);
+			if (is_user_addr_valid(child, addr, to_copy) < 0)
 				break;
 			pr_debug("ptrace: user address is valid\n");
 
-#if L1_CODE_LENGTH != 0
-			if (addr + add >= L1_CODE_START
-			    && addr + add + sizeof(data) <= L1_CODE_START + L1_CODE_LENGTH) {
-				safe_dma_memcpy ((void *)(addr + add), &data, sizeof(data));
-				copied = sizeof(data);
-			} else
-#endif
-#if L1_DATA_A_LENGTH != 0
-			if (addr + add >= L1_DATA_A_START
-			    && addr + add + sizeof(data) <= L1_DATA_A_START + L1_DATA_A_LENGTH) {
-				memcpy((void *)(addr + add), &data, sizeof(data));
-				copied = sizeof(data);
-			} else
-#endif
-#if L1_DATA_B_LENGTH != 0
-			if (addr + add >= L1_DATA_B_START
-			    && addr + add + sizeof(data) <= L1_DATA_B_START + L1_DATA_B_LENGTH) {
-				memcpy((void *)(addr + add), &data, sizeof(data));
-				copied = sizeof(data);
-			} else
-#endif
-			if (addr + add >= FIXED_CODE_START
-			    && addr + add + sizeof(data) <= FIXED_CODE_END) {
-				memcpy((void *)(addr + add), &data, sizeof(data));
-				copied = sizeof(data);
-			} else
-				copied = access_process_vm(child, addr + add, &data,
-							   sizeof(data), 1);
-			pr_debug("ptrace: copied size %d\n", copied);
-			if (copied != sizeof(data))
+			switch (bfin_mem_access_type(addr, to_copy)) {
+			case BFIN_MEM_ACCESS_CORE:
+			case BFIN_MEM_ACCESS_CORE_ONLY:
+				copied = access_process_vm(child, addr, &data,
+				                           to_copy, 1);
+				if (copied)
+					break;
+
+				/* hrm, why didn't that work ... maybe no mapping */
+				if (addr >= FIXED_CODE_START &&
+				    addr + to_copy <= FIXED_CODE_END) {
+					copy_to_user_page(0, 0, 0, paddr, &data, to_copy);
+					copied = to_copy;
+				} else if (addr >= BOOT_ROM_START) {
+					memcpy(paddr, &data, to_copy);
+					copied = to_copy;
+				}
+
 				break;
-			ret = 0;
+			case BFIN_MEM_ACCESS_DMA:
+				if (safe_dma_memcpy(paddr, &data, to_copy))
+					copied = to_copy;
+				break;
+			case BFIN_MEM_ACCESS_ITEST:
+				if (isram_memcpy(paddr, &data, to_copy))
+					copied = to_copy;
+				break;
+			default:
+				copied = 0;
+				break;
+			}
+
+			pr_debug("ptrace: copied size %d\n", copied);
+			if (copied == to_copy)
+				ret = 0;
 			break;
 		}
 
@@ -351,29 +368,22 @@ long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 		break;
 
 	case PTRACE_SYSCALL:	/* continue and stop at next (return from) syscall */
-	case PTRACE_CONT:
-		{		/* restart after signal. */
-			long tmp;
+	case PTRACE_CONT:	/* restart after signal. */
+		pr_debug("ptrace: syscall/cont\n");
 
-			pr_debug("ptrace_cont\n");
-
-			ret = -EIO;
-			if (!valid_signal(data))
-				break;
-			if (request == PTRACE_SYSCALL)
-				set_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
-			else
-				clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
-
-			child->exit_code = data;
-			/* make sure the single step bit is not set. */
-			tmp = get_reg(child, PT_SYSCFG) & ~(TRACE_BITS);
-			put_reg(child, PT_SYSCFG, tmp);
-			pr_debug("before wake_up_process\n");
-			wake_up_process(child);
-			ret = 0;
+		ret = -EIO;
+		if (!valid_signal(data))
 			break;
-		}
+		if (request == PTRACE_SYSCALL)
+			set_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
+		else
+			clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
+		child->exit_code = data;
+		ptrace_disable(child);
+		pr_debug("ptrace: before wake_up_process\n");
+		wake_up_process(child);
+		ret = 0;
+		break;
 
 	/*
 	 * make the child exit.  Best I can do is send it a sigkill.
@@ -381,55 +391,37 @@ long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 	 * exit.
 	 */
 	case PTRACE_KILL:
-		{
-			long tmp;
-			ret = 0;
-			if (child->exit_state == EXIT_ZOMBIE)	/* already dead */
-				break;
-			child->exit_code = SIGKILL;
-			/* make sure the single step bit is not set. */
-			tmp = get_reg(child, PT_SYSCFG) & ~(TRACE_BITS);
-			put_reg(child, PT_SYSCFG, tmp);
-			wake_up_process(child);
+		ret = 0;
+		if (child->exit_state == EXIT_ZOMBIE)	/* already dead */
 			break;
-		}
+		child->exit_code = SIGKILL;
+		ptrace_disable(child);
+		wake_up_process(child);
+		break;
 
-	case PTRACE_SINGLESTEP:
-		{		/* set the trap flag. */
-			long tmp;
-
-			pr_debug("single step\n");
-			ret = -EIO;
-			if (!valid_signal(data))
-				break;
-			clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
-
-			tmp = get_reg(child, PT_SYSCFG) | (TRACE_BITS);
-			put_reg(child, PT_SYSCFG, tmp);
-
-			child->exit_code = data;
-			/* give it a chance to run. */
-			wake_up_process(child);
-			ret = 0;
+	case PTRACE_SINGLESTEP:	/* set the trap flag. */
+		pr_debug("ptrace: single step\n");
+		ret = -EIO;
+		if (!valid_signal(data))
 			break;
-		}
+		clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
+		ptrace_enable(child);
+		child->exit_code = data;
+		wake_up_process(child);
+		ret = 0;
+		break;
 
 	case PTRACE_GETREGS:
-		{
-
-			/* Get all gp regs from the child. */
-			ret = ptrace_getregs(child, datap);
-			break;
-		}
+		/* Get all gp regs from the child. */
+		ret = ptrace_getregs(child, datap);
+		break;
 
 	case PTRACE_SETREGS:
-		{
-			printk(KERN_NOTICE
-			       "ptrace: SETREGS: **** NOT IMPLEMENTED ***\n");
-			/* Set all gp regs in the child. */
-			ret = 0;
-			break;
-		}
+		printk(KERN_WARNING "ptrace: SETREGS: **** NOT IMPLEMENTED ***\n");
+		/* Set all gp regs in the child. */
+		ret = 0;
+		break;
+
 	default:
 		ret = ptrace_request(child, request, addr, data);
 		break;
@@ -440,7 +432,6 @@ long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 
 asmlinkage void syscall_trace(void)
 {
-
 	if (!test_thread_flag(TIF_SYSCALL_TRACE))
 		return;
 

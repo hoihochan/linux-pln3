@@ -42,11 +42,6 @@
 
 #include "cmtp.h"
 
-#ifndef CONFIG_BT_CMTP_DEBUG
-#undef  BT_DBG
-#define BT_DBG(D...)
-#endif
-
 #define CAPI_INTEROPERABILITY		0x20
 
 #define CAPI_INTEROPERABILITY_REQ	CAPICMD(CAPI_INTEROPERABILITY, CAPI_REQ)
@@ -387,7 +382,7 @@ static void cmtp_reset_ctr(struct capi_ctr *ctrl)
 
 	BT_DBG("ctrl %p", ctrl);
 
-	capi_ctr_reseted(ctrl);
+	capi_ctr_down(ctrl);
 
 	atomic_inc(&session->terminate);
 	cmtp_schedule(session);

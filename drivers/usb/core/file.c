@@ -67,6 +67,16 @@ static struct usb_class {
 	struct class *class;
 } *usb_class;
 
+static char *usb_devnode(struct device *dev, mode_t *mode)
+{
+	struct usb_class_driver *drv;
+
+	drv = dev_get_drvdata(dev);
+	if (!drv || !drv->devnode)
+		return NULL;
+	return drv->devnode(dev, mode);
+}
+
 static int init_usb_class(void)
 {
 	int result = 0;
@@ -86,10 +96,11 @@ static int init_usb_class(void)
 	usb_class->class = class_create(THIS_MODULE, "usb");
 	if (IS_ERR(usb_class->class)) {
 		result = IS_ERR(usb_class->class);
-		err("class_create failed for usb devices");
+		printk(KERN_ERR "class_create failed for usb devices\n");
 		kfree(usb_class);
 		usb_class = NULL;
 	}
+	usb_class->class->devnode = usb_devnode;
 
 exit:
 	return result;
@@ -115,7 +126,8 @@ int usb_major_init(void)
 
 	error = register_chrdev(USB_MAJOR, "usb", &usb_fops);
 	if (error)
-		err("unable to get major %d for usb devices", USB_MAJOR);
+		printk(KERN_ERR "Unable to get major %d for usb devices\n",
+		       USB_MAJOR);
 
 	return error;
 }
@@ -196,9 +208,9 @@ int usb_register_dev(struct usb_interface *intf,
 		++temp;
 	else
 		temp = name;
-	intf->usb_dev = device_create_drvdata(usb_class->class, &intf->dev,
-					      MKDEV(USB_MAJOR, minor), NULL,
-					      "%s", temp);
+	intf->usb_dev = device_create(usb_class->class, &intf->dev,
+				      MKDEV(USB_MAJOR, minor), class_driver,
+				      "%s", temp);
 	if (IS_ERR(intf->usb_dev)) {
 		down_write(&minor_rwsem);
 		usb_minors[intf->minor] = NULL;

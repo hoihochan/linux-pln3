@@ -147,7 +147,7 @@ int __init pq2ads_pci_init_irq(void)
 		goto out;
 	}
 
-	priv = alloc_bootmem(sizeof(struct pq2ads_pci_pic));
+	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
 	if (!priv) {
 		of_node_put(np);
 		ret = -ENOMEM;
@@ -186,7 +186,7 @@ out_unmap_regs:
 	iounmap(priv->regs);
 out_free_bootmem:
 	free_bootmem((unsigned long)priv,
-	             sizeof(sizeof(struct pq2ads_pci_pic)));
+	             sizeof(struct pq2ads_pci_pic));
 	of_node_put(np);
 out_unmap_irq:
 	irq_dispose_mapping(irq);

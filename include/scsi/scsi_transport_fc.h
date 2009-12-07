@@ -33,7 +33,6 @@
 
 struct scsi_transport_template;
 
-
 /*
  * FC Port definitions - Following FC HBAAPI guidelines
  *
@@ -167,6 +166,26 @@ enum fc_tgtid_binding_type  {
 struct device_attribute dev_attr_vport_##_name = 	\
 	__ATTR(_name,_mode,_show,_store)
 
+/*
+ * fc_vport_identifiers: This set of data contains all elements
+ * to uniquely identify and instantiate a FC virtual port.
+ *
+ * Notes:
+ *   symbolic_name: The driver is to append the symbolic_name string data
+ *      to the symbolic_node_name data that it generates by default.
+ *      the resulting combination should then be registered with the switch.
+ *      It is expected that things like Xen may stuff a VM title into
+ *      this field.
+ */
+#define FC_VPORT_SYMBOLIC_NAMELEN		64
+struct fc_vport_identifiers {
+	u64 node_name;
+	u64 port_name;
+	u32 roles;
+	bool disable;
+	enum fc_port_type vport_type;	/* only FC_PORTTYPE_NPIV allowed */
+	char symbolic_name[FC_VPORT_SYMBOLIC_NAMELEN];
+};
 
 /*
  * FC Virtual Port Attributes
@@ -197,7 +216,6 @@ struct device_attribute dev_attr_vport_##_name = 	\
  * managed by the transport w/o driver interaction.
  */
 
-#define FC_VPORT_SYMBOLIC_NAMELEN		64
 struct fc_vport {
 	/* Fixed Attributes */
 
@@ -333,11 +351,14 @@ struct fc_rport {	/* aka fc_starget_attrs */
  	struct delayed_work fail_io_work;
  	struct work_struct stgt_delete_work;
 	struct work_struct rport_delete_work;
+	struct request_queue *rqst_q;	/* bsg support */
 } __attribute__((aligned(sizeof(unsigned long))));
 
 /* bit field values for struct fc_rport "flags" field: */
 #define FC_RPORT_DEVLOSS_PENDING	0x01
 #define FC_RPORT_SCAN_PENDING		0x02
+#define FC_RPORT_FAST_FAIL_TIMEDOUT	0x04
+#define FC_RPORT_DEVLOSS_CALLBK_DONE	0x08
 
 #define	dev_to_rport(d)				\
 	container_of(d, struct fc_rport, dev)
@@ -493,6 +514,9 @@ struct fc_host_attrs {
 	struct workqueue_struct *work_q;
 	char devloss_work_q_name[20];
 	struct workqueue_struct *devloss_work_q;
+
+	/* bsg support */
+	struct request_queue *rqst_q;
 };
 
 #define shost_to_fc_host(x) \
@@ -558,6 +582,47 @@ struct fc_host_attrs {
 	(((struct fc_host_attrs *)(x)->shost_data)->devloss_work_q)
 
 
+struct fc_bsg_buffer {
+	unsigned int payload_len;
+	int sg_cnt;
+	struct scatterlist *sg_list;
+};
+
+/* Values for fc_bsg_job->state_flags (bitflags) */
+#define FC_RQST_STATE_INPROGRESS	0
+#define FC_RQST_STATE_DONE		1
+
+struct fc_bsg_job {
+	struct Scsi_Host *shost;
+	struct fc_rport *rport;
+	struct device *dev;
+	struct request *req;
+	spinlock_t job_lock;
+	unsigned int state_flags;
+	unsigned int ref_cnt;
+	void (*job_done)(struct fc_bsg_job *);
+
+	struct fc_bsg_request *request;
+	struct fc_bsg_reply *reply;
+	unsigned int request_len;
+	unsigned int reply_len;
+	/*
+	 * On entry : reply_len indicates the buffer size allocated for
+	 * the reply.
+	 *
+	 * Upon completion : the message handler must set reply_len
+	 *  to indicates the size of the reply to be returned to the
+	 *  caller.
+	 */
+
+	/* DMA payloads for the request/response */
+	struct fc_bsg_buffer request_payload;
+	struct fc_bsg_buffer reply_payload;
+
+	void *dd_data;			/* Used for driver-specific storage */
+};
+
+
 /* The functions by which the transport class and the driver communicate */
 struct fc_function_template {
 	void    (*get_rport_dev_loss_tmo)(struct fc_rport *);
@@ -593,9 +658,14 @@ struct fc_function_template {
 	int     (* tsk_mgmt_response)(struct Scsi_Host *, u64, u64, int);
 	int     (* it_nexus_response)(struct Scsi_Host *, u64, int);
 
+	/* bsg support */
+	int	(*bsg_request)(struct fc_bsg_job *);
+	int	(*bsg_timeout)(struct fc_bsg_job *);
+
 	/* allocation lengths for host-specific data */
 	u32	 			dd_fcrport_size;
 	u32	 			dd_fcvport_size;
+	u32				dd_bsg_size;
 
 	/*
 	 * The driver sets these to tell the transport class it
@@ -664,7 +734,10 @@ fc_remote_port_chkready(struct fc_rport *rport)
 			result = DID_NO_CONNECT << 16;
 		break;
 	case FC_PORTSTATE_BLOCKED:
-		result = DID_IMM_RETRY << 16;
+		if (rport->flags & FC_RPORT_FAST_FAIL_TIMEDOUT)
+			result = DID_TRANSPORT_FAILFAST << 16;
+		else
+			result = DID_IMM_RETRY << 16;
 		break;
 	default:
 		result = DID_NO_CONNECT << 16;
@@ -713,7 +786,6 @@ fc_vport_set_state(struct fc_vport *vport, enum fc_vport_state new_state)
 	vport->vport_state = new_state;
 }
 
-
 struct scsi_transport_template *fc_attach_transport(
 			struct fc_function_template *);
 void fc_release_transport(struct scsi_transport_template *);
@@ -732,6 +804,8 @@ void fc_host_post_vendor_event(struct Scsi_Host *shost, u32 event_number,
 	 *   be sure to read the Vendor Type and ID formatting requirements
 	 *   specified in scsi_netlink.h
 	 */
+struct fc_vport *fc_vport_create(struct Scsi_Host *shost, int channel,
+		struct fc_vport_identifiers *);
 int fc_vport_terminate(struct fc_vport *vport);
 
 #endif /* SCSI_TRANSPORT_FC_H */

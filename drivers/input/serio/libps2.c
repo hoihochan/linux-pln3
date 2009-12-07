@@ -13,10 +13,12 @@
 
 #include <linux/delay.h>
 #include <linux/module.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/input.h>
 #include <linux/serio.h>
+#include <linux/i8042.h>
 #include <linux/init.h>
 #include <linux/libps2.h>
 
@@ -54,6 +56,24 @@ int ps2_sendbyte(struct ps2dev *ps2dev, unsigned char byte, int timeout)
 }
 EXPORT_SYMBOL(ps2_sendbyte);
 
+void ps2_begin_command(struct ps2dev *ps2dev)
+{
+	mutex_lock(&ps2dev->cmd_mutex);
+
+	if (i8042_check_port_owner(ps2dev->serio))
+		i8042_lock_chip();
+}
+EXPORT_SYMBOL(ps2_begin_command);
+
+void ps2_end_command(struct ps2dev *ps2dev)
+{
+	if (i8042_check_port_owner(ps2dev->serio))
+		i8042_unlock_chip();
+
+	mutex_unlock(&ps2dev->cmd_mutex);
+}
+EXPORT_SYMBOL(ps2_end_command);
+
 /*
  * ps2_drain() waits for device to transmit requested number of bytes
  * and discards them.
@@ -66,7 +86,7 @@ void ps2_drain(struct ps2dev *ps2dev, int maxbytes, int timeout)
 		maxbytes = sizeof(ps2dev->cmdbuf);
 	}
 
-	mutex_lock(&ps2dev->cmd_mutex);
+	ps2_begin_command(ps2dev);
 
 	serio_pause_rx(ps2dev->serio);
 	ps2dev->flags = PS2_FLAG_CMD;
@@ -76,7 +96,8 @@ void ps2_drain(struct ps2dev *ps2dev, int maxbytes, int timeout)
 	wait_event_timeout(ps2dev->wait,
 			   !(ps2dev->flags & PS2_FLAG_CMD),
 			   msecs_to_jiffies(timeout));
-	mutex_unlock(&ps2dev->cmd_mutex);
+
+	ps2_end_command(ps2dev);
 }
 EXPORT_SYMBOL(ps2_drain);
 
@@ -161,7 +182,7 @@ static int ps2_adjust_timeout(struct ps2dev *ps2dev, int command, int timeout)
  * ps2_command() can only be called from a process context
  */
 
-int ps2_command(struct ps2dev *ps2dev, unsigned char *param, int command)
+int __ps2_command(struct ps2dev *ps2dev, unsigned char *param, int command)
 {
 	int timeout;
 	int send = (command >> 12) & 0xf;
@@ -178,8 +199,6 @@ int ps2_command(struct ps2dev *ps2dev, unsigned char *param, int command)
 		WARN_ON(1);
 		return -1;
 	}
-
-	mutex_lock(&ps2dev->cmd_mutex);
 
 	serio_pause_rx(ps2dev->serio);
 	ps2dev->flags = command == PS2_CMD_GETID ? PS2_FLAG_WAITID : 0;
@@ -210,7 +229,7 @@ int ps2_command(struct ps2dev *ps2dev, unsigned char *param, int command)
 	timeout = wait_event_timeout(ps2dev->wait,
 				     !(ps2dev->flags & PS2_FLAG_CMD1), timeout);
 
-	if (ps2dev->cmdcnt && timeout > 0) {
+	if (ps2dev->cmdcnt && !(ps2dev->flags & PS2_FLAG_CMD1)) {
 
 		timeout = ps2_adjust_timeout(ps2dev, command, timeout);
 		wait_event_timeout(ps2dev->wait,
@@ -231,7 +250,18 @@ int ps2_command(struct ps2dev *ps2dev, unsigned char *param, int command)
 	ps2dev->flags = 0;
 	serio_continue_rx(ps2dev->serio);
 
-	mutex_unlock(&ps2dev->cmd_mutex);
+	return rc;
+}
+EXPORT_SYMBOL(__ps2_command);
+
+int ps2_command(struct ps2dev *ps2dev, unsigned char *param, int command)
+{
+	int rc;
+
+	ps2_begin_command(ps2dev);
+	rc = __ps2_command(ps2dev, param, command);
+	ps2_end_command(ps2dev);
+
 	return rc;
 }
 EXPORT_SYMBOL(ps2_command);
@@ -262,8 +292,16 @@ int ps2_handle_ack(struct ps2dev *ps2dev, unsigned char data)
 			break;
 
 		case PS2_RET_NAK:
-			ps2dev->nak = 1;
+			ps2dev->flags |= PS2_FLAG_NAK;
+			ps2dev->nak = PS2_RET_NAK;
 			break;
+
+		case PS2_RET_ERR:
+			if (ps2dev->flags & PS2_FLAG_NAK) {
+				ps2dev->flags &= ~PS2_FLAG_NAK;
+				ps2dev->nak = PS2_RET_ERR;
+				break;
+			}
 
 		/*
 		 * Workaround for mice which don't ACK the Get ID command.
@@ -282,8 +320,11 @@ int ps2_handle_ack(struct ps2dev *ps2dev, unsigned char data)
 	}
 
 
-	if (!ps2dev->nak && ps2dev->cmdcnt)
-		ps2dev->flags |= PS2_FLAG_CMD | PS2_FLAG_CMD1;
+	if (!ps2dev->nak) {
+		ps2dev->flags &= ~PS2_FLAG_NAK;
+		if (ps2dev->cmdcnt)
+			ps2dev->flags |= PS2_FLAG_CMD | PS2_FLAG_CMD1;
+	}
 
 	ps2dev->flags &= ~PS2_FLAG_ACK;
 	wake_up(&ps2dev->wait);
@@ -329,6 +370,7 @@ void ps2_cmd_aborted(struct ps2dev *ps2dev)
 	if (ps2dev->flags & (PS2_FLAG_ACK | PS2_FLAG_CMD))
 		wake_up(&ps2dev->wait);
 
-	ps2dev->flags = 0;
+	/* reset all flags except last nack */
+	ps2dev->flags &= PS2_FLAG_NAK;
 }
 EXPORT_SYMBOL(ps2_cmd_aborted);

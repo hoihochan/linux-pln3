@@ -17,7 +17,6 @@
  * loader.
  */
 #define pcibios_assign_all_busses()     0
-#define pcibios_scan_all_fns(a, b)	0
 
 #define PCIBIOS_MIN_IO		0x1000
 #define PCIBIOS_MIN_MEM		0x10000000
@@ -95,16 +94,8 @@ extern int pci_mmap_page_range (struct pci_dev *dev, struct vm_area_struct *vma,
 				enum pci_mmap_state mmap_state, int write_combine);
 #define HAVE_PCI_LEGACY
 extern int pci_mmap_legacy_page_range(struct pci_bus *bus,
-				      struct vm_area_struct *vma);
-extern ssize_t pci_read_legacy_io(struct kobject *kobj,
-				  struct bin_attribute *bin_attr,
-				  char *buf, loff_t off, size_t count);
-extern ssize_t pci_write_legacy_io(struct kobject *kobj,
-				   struct bin_attribute *bin_attr,
-				   char *buf, loff_t off, size_t count);
-extern int pci_mmap_legacy_mem(struct kobject *kobj,
-			       struct bin_attribute *attr,
-			       struct vm_area_struct *vma);
+				      struct vm_area_struct *vma,
+				      enum pci_mmap_state mmap_state);
 
 #define pci_get_legacy_mem platform_pci_get_legacy_mem
 #define pci_legacy_read platform_pci_legacy_read
@@ -156,12 +147,13 @@ pcibios_select_root(struct pci_dev *pdev, struct resource *res)
 	return root;
 }
 
-#define pcibios_scan_all_fns(a, b)	0
-
 #define HAVE_ARCH_PCI_GET_LEGACY_IDE_IRQ
 static inline int pci_get_legacy_ide_irq(struct pci_dev *dev, int channel)
 {
 	return channel ? isa_irq_to_vector(15) : isa_irq_to_vector(14);
 }
 
+#ifdef CONFIG_DMAR
+extern void pci_iommu_alloc(void);
+#endif
 #endif /* _ASM_IA64_PCI_H */

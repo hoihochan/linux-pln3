@@ -4,12 +4,14 @@
  * Copyright 1997 Paul Mackerras
  */
 #include <linux/errno.h>
+#include <linux/init.h>
 #include <linux/time.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
 #include <linux/string.h>
 #include <asm/prom.h>
 #include <asm/uaccess.h>
+#include "internal.h"
 
 #ifndef HAVE_ARCH_DEVTREE_FIXUPS
 static inline void set_node_proc_entry(struct device_node *np,
@@ -193,20 +195,20 @@ void proc_device_tree_add_node(struct device_node *np,
 			p = fixup_name(np, de, p);
 
 		ent = proc_mkdir(p, de);
-		if (ent == 0)
+		if (ent == NULL)
 			break;
 		proc_device_tree_add_node(child, ent);
 	}
 	of_node_put(child);
 
-	for (pp = np->properties; pp != 0; pp = pp->next) {
+	for (pp = np->properties; pp != NULL; pp = pp->next) {
 		p = pp->name;
 
 		if (duplicate_name(de, p))
 			p = fixup_name(np, de, p);
 
 		ent = __proc_device_tree_add_prop(de, pp, p);
-		if (ent == 0)
+		if (ent == NULL)
 			break;
 	}
 }
@@ -214,16 +216,15 @@ void proc_device_tree_add_node(struct device_node *np,
 /*
  * Called on initialization to set up the /proc/device-tree subtree
  */
-void proc_device_tree_init(void)
+void __init proc_device_tree_init(void)
 {
 	struct device_node *root;
-	if ( !have_of )
-		return;
+
 	proc_device_tree = proc_mkdir("device-tree", NULL);
-	if (proc_device_tree == 0)
+	if (proc_device_tree == NULL)
 		return;
 	root = of_find_node_by_path("/");
-	if (root == 0) {
+	if (root == NULL) {
 		printk(KERN_ERR "/proc/device-tree: can't find root\n");
 		return;
 	}

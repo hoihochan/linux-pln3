@@ -6,7 +6,7 @@
  * for example.  All board-specific configuration goes in your
  * board resources file.
  *
- * Copyright 2000 Nicolas Pitre <nico@cam.org>
+ * Copyright 2000 Nicolas Pitre <nico@fluxnic.net>
  * Copyright 2005-2008 Analog Devices Inc.
  *
  * Enter bugs at http://blackfin.uclinux.org/
@@ -40,6 +40,9 @@ struct async_state {
 	uint32_t flash_ambctl0, flash_ambctl1;
 	uint32_t save_ambctl0, save_ambctl1;
 	unsigned long irq_flags;
+#ifdef CONFIG_MTD_PARTITIONS
+	struct mtd_partition *parts;
+#endif
 };
 
 static void switch_to_flash(struct async_state *state)
@@ -152,20 +155,25 @@ static int __devinit bfin_flash_probe(struct platform_device *pdev)
 
 	if (gpio_request(state->enet_flash_pin, DRIVER_NAME)) {
 		pr_devinit(KERN_ERR DRIVER_NAME ": Failed to request gpio %d\n", state->enet_flash_pin);
+		kfree(state);
 		return -EBUSY;
 	}
 	gpio_direction_output(state->enet_flash_pin, 1);
 
 	pr_devinit(KERN_NOTICE DRIVER_NAME ": probing %d-bit flash bus\n", state->map.bankwidth * 8);
 	state->mtd = do_map_probe(memory->name, &state->map);
-	if (!state->mtd)
+	if (!state->mtd) {
+		gpio_free(state->enet_flash_pin);
+		kfree(state);
 		return -ENXIO;
+	}
 
 #ifdef CONFIG_MTD_PARTITIONS
 	ret = parse_mtd_partitions(state->mtd, part_probe_types, &pdata->parts, 0);
 	if (ret > 0) {
 		pr_devinit(KERN_NOTICE DRIVER_NAME ": Using commandline partition definition\n");
 		add_mtd_partitions(state->mtd, pdata->parts, ret);
+		state->parts = pdata->parts;
 
 	} else if (pdata->nr_parts) {
 		pr_devinit(KERN_NOTICE DRIVER_NAME ": Using board partition definition\n");
@@ -189,6 +197,7 @@ static int __devexit bfin_flash_remove(struct platform_device *pdev)
 	gpio_free(state->enet_flash_pin);
 #ifdef CONFIG_MTD_PARTITIONS
 	del_mtd_partitions(state->mtd);
+	kfree(state->parts);
 #endif
 	map_destroy(state->mtd);
 	kfree(state);

@@ -91,8 +91,7 @@ struct xenbus_driver {
 	void (*otherend_changed)(struct xenbus_device *dev,
 				 enum xenbus_state backend_state);
 	int (*remove)(struct xenbus_device *dev);
-	int (*suspend)(struct xenbus_device *dev);
-	int (*suspend_cancel)(struct xenbus_device *dev);
+	int (*suspend)(struct xenbus_device *dev, pm_message_t state);
 	int (*resume)(struct xenbus_device *dev);
 	int (*uevent)(struct xenbus_device *, char **, int, char *, int);
 	struct device_driver driver;
@@ -135,8 +134,6 @@ struct xenbus_transaction
 
 /* Nil transaction ID. */
 #define XBT_NIL ((struct xenbus_transaction) { 0 })
-
-int __init xenbus_dev_init(void);
 
 char **xenbus_directory(struct xenbus_transaction t,
 			const char *dir, const char *node, unsigned int *num);

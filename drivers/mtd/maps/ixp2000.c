@@ -170,7 +170,7 @@ static int ixp2000_flash_probe(struct platform_device *dev)
 		err = -ENOMEM;
 		goto Error;
 	}
-	memzero(info, sizeof(struct ixp2000_flash_info));
+	memset(info, 0, sizeof(struct ixp2000_flash_info));
 
 	platform_set_drvdata(dev, info);
 
@@ -184,11 +184,11 @@ static int ixp2000_flash_probe(struct platform_device *dev)
 	info->map.bankwidth = 1;
 
 	/*
- 	 * map_priv_2 is used to store a ptr to to the bank_setup routine
+ 	 * map_priv_2 is used to store a ptr to the bank_setup routine
  	 */
 	info->map.map_priv_2 = (unsigned long) ixp_data->bank_setup;
 
-	info->map.name = dev->dev.bus_id;
+	info->map.name = dev_name(&dev->dev);
 	info->map.read = ixp2000_flash_read8;
 	info->map.write = ixp2000_flash_write8;
 	info->map.copy_from = ixp2000_flash_copy_from;
@@ -196,7 +196,7 @@ static int ixp2000_flash_probe(struct platform_device *dev)
 
 	info->res = request_mem_region(dev->resource->start,
 			dev->resource->end - dev->resource->start + 1,
-			dev->dev.bus_id);
+			dev_name(&dev->dev));
 	if (!info->res) {
 		dev_err(&dev->dev, "Could not reserve memory region\n");
 		err = -ENOMEM;

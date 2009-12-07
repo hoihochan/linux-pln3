@@ -219,27 +219,26 @@ static int pcd_sector;		/* address of next requested sector */
 static int pcd_count;		/* number of blocks still to do */
 static char *pcd_buf;		/* buffer for request in progress */
 
-static int pcd_warned;		/* Have we logged a phase warning ? */
-
 /* kernel glue structures */
 
-static int pcd_block_open(struct inode *inode, struct file *file)
+static int pcd_block_open(struct block_device *bdev, fmode_t mode)
 {
-	struct pcd_unit *cd = inode->i_bdev->bd_disk->private_data;
-	return cdrom_open(&cd->info, inode, file);
+	struct pcd_unit *cd = bdev->bd_disk->private_data;
+	return cdrom_open(&cd->info, bdev, mode);
 }
 
-static int pcd_block_release(struct inode *inode, struct file *file)
+static int pcd_block_release(struct gendisk *disk, fmode_t mode)
 {
-	struct pcd_unit *cd = inode->i_bdev->bd_disk->private_data;
-	return cdrom_release(&cd->info, file);
+	struct pcd_unit *cd = disk->private_data;
+	cdrom_release(&cd->info, mode);
+	return 0;
 }
 
-static int pcd_block_ioctl(struct inode *inode, struct file *file,
+static int pcd_block_ioctl(struct block_device *bdev, fmode_t mode,
 				unsigned cmd, unsigned long arg)
 {
-	struct pcd_unit *cd = inode->i_bdev->bd_disk->private_data;
-	return cdrom_ioctl(file, &cd->info, inode, cmd, arg);
+	struct pcd_unit *cd = bdev->bd_disk->private_data;
+	return cdrom_ioctl(&cd->info, bdev, mode, cmd, arg);
 }
 
 static int pcd_block_media_changed(struct gendisk *disk)
@@ -248,11 +247,11 @@ static int pcd_block_media_changed(struct gendisk *disk)
 	return cdrom_media_changed(&cd->info);
 }
 
-static struct block_device_operations pcd_bdops = {
+static const struct block_device_operations pcd_bdops = {
 	.owner		= THIS_MODULE,
 	.open		= pcd_block_open,
 	.release	= pcd_block_release,
-	.ioctl		= pcd_block_ioctl,
+	.locked_ioctl	= pcd_block_ioctl,
 	.media_changed	= pcd_block_media_changed,
 };
 
@@ -416,12 +415,10 @@ static int pcd_completion(struct pcd_unit *cd, char *buf, char *fun)
 					printk
 					    ("%s: %s: Unexpected phase %d, d=%d, k=%d\n",
 					     cd->name, fun, p, d, k);
-				if ((verbose < 2) && !pcd_warned) {
-					pcd_warned = 1;
-					printk
-					    ("%s: WARNING: ATAPI phase errors\n",
-					     cd->name);
-				}
+				if (verbose < 2)
+					printk_once(
+					    "%s: WARNING: ATAPI phase errors\n",
+					    cd->name);
 				mdelay(1);
 			}
 			if (k++ > PCD_TMO) {
@@ -718,32 +715,37 @@ static void do_pcd_request(struct request_queue * q)
 	if (pcd_busy)
 		return;
 	while (1) {
-		pcd_req = elv_next_request(q);
-		if (!pcd_req)
-			return;
+		if (!pcd_req) {
+			pcd_req = blk_fetch_request(q);
+			if (!pcd_req)
+				return;
+		}
 
 		if (rq_data_dir(pcd_req) == READ) {
 			struct pcd_unit *cd = pcd_req->rq_disk->private_data;
 			if (cd != pcd_current)
 				pcd_bufblk = -1;
 			pcd_current = cd;
-			pcd_sector = pcd_req->sector;
-			pcd_count = pcd_req->current_nr_sectors;
+			pcd_sector = blk_rq_pos(pcd_req);
+			pcd_count = blk_rq_cur_sectors(pcd_req);
 			pcd_buf = pcd_req->buffer;
 			pcd_busy = 1;
 			ps_set_intr(do_pcd_read, NULL, 0, nice);
 			return;
-		} else
-			end_request(pcd_req, 0);
+		} else {
+			__blk_end_request_all(pcd_req, -EIO);
+			pcd_req = NULL;
+		}
 	}
 }
 
-static inline void next_request(int success)
+static inline void next_request(int err)
 {
 	unsigned long saved_flags;
 
 	spin_lock_irqsave(&pcd_lock, saved_flags);
-	end_request(pcd_req, success);
+	if (!__blk_end_request_cur(pcd_req, err))
+		pcd_req = NULL;
 	pcd_busy = 0;
 	do_pcd_request(pcd_queue);
 	spin_unlock_irqrestore(&pcd_lock, saved_flags);
@@ -780,7 +782,7 @@ static void pcd_start(void)
 
 	if (pcd_command(pcd_current, rd_cmd, 2048, "read block")) {
 		pcd_bufblk = -1;
-		next_request(0);
+		next_request(-EIO);
 		return;
 	}
 
@@ -795,7 +797,7 @@ static void do_pcd_read(void)
 	pcd_retries = 0;
 	pcd_transfer();
 	if (!pcd_count) {
-		next_request(1);
+		next_request(0);
 		return;
 	}
 
@@ -814,7 +816,7 @@ static void do_pcd_read_drq(void)
 			return;
 		}
 		pcd_bufblk = -1;
-		next_request(0);
+		next_request(-EIO);
 		return;
 	}
 

@@ -17,7 +17,7 @@
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
-#include <asm/io.h>
+#include <linux/io.h>
 #include <asm/irq.h>
 #include <asm/signal.h>
 #include <asm/system.h>
@@ -257,7 +257,8 @@ void __init iop3xx_atu_setup(void)
 	*IOP3XX_OUMWTVR0 = 0;
 
 	/* Outbound window 1 */
-	*IOP3XX_OMWTVR1 = IOP3XX_PCI_LOWER_MEM_BA + IOP3XX_PCI_MEM_WINDOW_SIZE;
+	*IOP3XX_OMWTVR1 = IOP3XX_PCI_LOWER_MEM_BA +
+			  IOP3XX_PCI_MEM_WINDOW_SIZE / 2;
 	*IOP3XX_OUMWTVR1 = 0;
 
 	/* BAR 3 ( Disabled ) */

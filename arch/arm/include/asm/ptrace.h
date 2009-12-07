@@ -27,6 +27,8 @@
 /* PTRACE_SYSCALL is 24 */
 #define PTRACE_GETCRUNCHREGS	25
 #define PTRACE_SETCRUNCHREGS	26
+#define PTRACE_GETVFPREGS	27
+#define PTRACE_SETVFPREGS	28
 
 /*
  * PSR bits
@@ -48,13 +50,13 @@
 #define PSR_F_BIT	0x00000040
 #define PSR_I_BIT	0x00000080
 #define PSR_A_BIT	0x00000100
+#define PSR_E_BIT	0x00000200
 #define PSR_J_BIT	0x01000000
 #define PSR_Q_BIT	0x08000000
 #define PSR_V_BIT	0x10000000
 #define PSR_C_BIT	0x20000000
 #define PSR_Z_BIT	0x40000000
 #define PSR_N_BIT	0x80000000
-#define PCMASK		0
 
 /*
  * Groups of PSR bits
@@ -63,6 +65,30 @@
 #define PSR_s		0x00ff0000	/* Status		*/
 #define PSR_x		0x0000ff00	/* Extension		*/
 #define PSR_c		0x000000ff	/* Control		*/
+
+/*
+ * ARMv7 groups of APSR bits
+ */
+#define PSR_ISET_MASK	0x01000010	/* ISA state (J, T) mask */
+#define PSR_IT_MASK	0x0600fc00	/* If-Then execution state mask */
+#define PSR_ENDIAN_MASK	0x00000200	/* Endianness state mask */
+
+/*
+ * Default endianness state
+ */
+#ifdef CONFIG_CPU_ENDIAN_BE8
+#define PSR_ENDSTATE	PSR_E_BIT
+#else
+#define PSR_ENDSTATE	0
+#endif
+
+/* 
+ * These are 'magic' values for PTRACE_PEEKUSR that return info about where a
+ * process is located in memory.
+ */
+#define PT_TEXT_ADDR		0x10000
+#define PT_DATA_ADDR		0x10004
+#define PT_TEXT_END_ADDR	0x10008
 
 #ifndef __ASSEMBLY__
 
@@ -139,11 +165,7 @@ static inline int valid_user_regs(struct pt_regs *regs)
 	return 0;
 }
 
-#define pc_pointer(v) \
-	((v) & ~PCMASK)
-
-#define instruction_pointer(regs) \
-	(pc_pointer((regs)->ARM_pc))
+#define instruction_pointer(regs)	(regs)->ARM_pc
 
 #ifdef CONFIG_SMP
 extern unsigned long profile_pc(struct pt_regs *regs);

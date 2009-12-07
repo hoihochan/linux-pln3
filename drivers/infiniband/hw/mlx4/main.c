@@ -342,6 +342,9 @@ static struct ib_ucontext *mlx4_ib_alloc_ucontext(struct ib_device *ibdev,
 	struct mlx4_ib_alloc_ucontext_resp resp;
 	int err;
 
+	if (!dev->ib_active)
+		return ERR_PTR(-EAGAIN);
+
 	resp.qp_tab_size      = dev->dev->caps.num_qps;
 	resp.bf_reg_size      = dev->dev->caps.bf_reg_size;
 	resp.bf_regs_per_page = dev->dev->caps.bf_regs_per_page;
@@ -394,8 +397,7 @@ static int mlx4_ib_mmap(struct ib_ucontext *context, struct vm_area_struct *vma)
 				       PAGE_SIZE, vma->vm_page_prot))
 			return -EAGAIN;
 	} else if (vma->vm_pgoff == 1 && dev->dev->caps.bf_reg_size != 0) {
-		/* FIXME want pgprot_writecombine() for BlueFlame pages */
-		vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
 
 		if (io_remap_pfn_range(vma, vma->vm_start,
 				       to_mucontext(context)->uar.pfn +
@@ -541,15 +543,18 @@ static struct device_attribute *mlx4_class_attributes[] = {
 
 static void *mlx4_ib_add(struct mlx4_dev *dev)
 {
-	static int mlx4_ib_version_printed;
 	struct mlx4_ib_dev *ibdev;
+	int num_ports = 0;
 	int i;
 
+	printk_once(KERN_INFO "%s", mlx4_ib_version);
 
-	if (!mlx4_ib_version_printed) {
-		printk(KERN_INFO "%s", mlx4_ib_version);
-		++mlx4_ib_version_printed;
-	}
+	mlx4_foreach_port(i, dev, MLX4_PORT_TYPE_IB)
+		num_ports++;
+
+	/* No point in registering a device with no ports... */
+	if (num_ports == 0)
+		return NULL;
 
 	ibdev = (struct mlx4_ib_dev *) ib_alloc_device(sizeof *ibdev);
 	if (!ibdev) {
@@ -574,8 +579,9 @@ static void *mlx4_ib_add(struct mlx4_dev *dev)
 	ibdev->ib_dev.owner		= THIS_MODULE;
 	ibdev->ib_dev.node_type		= RDMA_NODE_IB_CA;
 	ibdev->ib_dev.local_dma_lkey	= dev->caps.reserved_lkey;
-	ibdev->ib_dev.phys_port_cnt	= dev->caps.num_ports;
-	ibdev->ib_dev.num_comp_vectors	= 1;
+	ibdev->num_ports		= num_ports;
+	ibdev->ib_dev.phys_port_cnt     = ibdev->num_ports;
+	ibdev->ib_dev.num_comp_vectors	= dev->caps.num_comp_vectors;
 	ibdev->ib_dev.dma_device	= &dev->pdev->dev;
 
 	ibdev->ib_dev.uverbs_abi_ver	= MLX4_IB_UVERBS_ABI_VERSION;
@@ -666,6 +672,8 @@ static void *mlx4_ib_add(struct mlx4_dev *dev)
 			goto err_reg;
 	}
 
+	ibdev->ib_active = true;
+
 	return ibdev;
 
 err_reg:
@@ -691,11 +699,12 @@ static void mlx4_ib_remove(struct mlx4_dev *dev, void *ibdev_ptr)
 	struct mlx4_ib_dev *ibdev = ibdev_ptr;
 	int p;
 
-	for (p = 1; p <= dev->caps.num_ports; ++p)
-		mlx4_CLOSE_PORT(dev, p);
-
 	mlx4_ib_mad_cleanup(ibdev);
 	ib_unregister_device(&ibdev->ib_dev);
+
+	for (p = 1; p <= ibdev->num_ports; ++p)
+		mlx4_CLOSE_PORT(dev, p);
+
 	iounmap(ibdev->uar_map);
 	mlx4_uar_free(dev, &ibdev->priv_uar);
 	mlx4_pd_free(dev, ibdev->priv_pdn);
@@ -706,6 +715,10 @@ static void mlx4_ib_event(struct mlx4_dev *dev, void *ibdev_ptr,
 			  enum mlx4_dev_event event, int port)
 {
 	struct ib_event ibev;
+	struct mlx4_ib_dev *ibdev = to_mdev((struct ib_device *) ibdev_ptr);
+
+	if (port > ibdev->num_ports)
+		return;
 
 	switch (event) {
 	case MLX4_DEV_EVENT_PORT_UP:
@@ -717,6 +730,7 @@ static void mlx4_ib_event(struct mlx4_dev *dev, void *ibdev_ptr,
 		break;
 
 	case MLX4_DEV_EVENT_CATASTROPHIC_ERROR:
+		ibdev->ib_active = false;
 		ibev.event = IB_EVENT_DEVICE_FATAL;
 		break;
 

@@ -9,7 +9,7 @@
  *	as published by the Free Software Foundation; either version
  *	2 of the License, or (at your option) any later version.
  *
- *	based on softdog.c by Alan Cox <alan@redhat.com>
+ *	based on softdog.c by Alan Cox <alan@lxorguk.ukuu.org.uk>
  */
 
 #include <linux/module.h>
@@ -83,7 +83,6 @@ static int indydog_open(struct inode *inode, struct file *file)
 	indydog_start();
 	indydog_ping();
 
-	indydog_alive = 1;
 	printk(KERN_INFO "Started watchdog timer.\n");
 
 	return nonseekable_open(inode, file);
@@ -113,8 +112,7 @@ static long indydog_ioctl(struct file *file, unsigned int cmd,
 {
 	int options, retval = -EINVAL;
 	static struct watchdog_info ident = {
-		.options		= WDIOF_KEEPALIVEPING |
-					  WDIOF_MAGICCLOSE,
+		.options		= WDIOF_KEEPALIVEPING,
 		.firmware_version	= 0,
 		.identity		= "Hardware Watchdog for SGI IP22",
 	};

@@ -33,9 +33,8 @@
  *	Moved MOD_DEC_USE_COUNT to end of empeg_close().
  *
  * (12/03/2000) gb
- *	Added port->port.tty->ldisc.set_termios(port->port.tty, NULL) to
- *	empeg_open(). This notifies the tty driver that the termios have
- *	changed.
+ *	Added tty->ldisc.set_termios(port, tty, NULL) to empeg_open().
+ *	This notifies the tty driver that the termios have changed.
  *
  * (11/13/2000) gb
  *	Moved tty->low_latency = 1 from empeg_read_bulk_callback() to
@@ -80,10 +79,8 @@ static int debug;
 #define EMPEG_PRODUCT_ID		0x0001
 
 /* function prototypes for an empeg-car player */
-static int  empeg_open(struct tty_struct *tty, struct usb_serial_port *port,
-						struct file *filp);
-static void empeg_close(struct tty_struct *tty, struct usb_serial_port *port,
-						struct file *filp);
+static int  empeg_open(struct tty_struct *tty, struct usb_serial_port *port);
+static void empeg_close(struct usb_serial_port *port);
 static int  empeg_write(struct tty_struct *tty, struct usb_serial_port *port,
 						const unsigned char *buf,
 						int count);
@@ -92,9 +89,7 @@ static int  empeg_chars_in_buffer(struct tty_struct *tty);
 static void empeg_throttle(struct tty_struct *tty);
 static void empeg_unthrottle(struct tty_struct *tty);
 static int  empeg_startup(struct usb_serial *serial);
-static void empeg_shutdown(struct usb_serial *serial);
-static void empeg_set_termios(struct tty_struct *tty,
-		struct usb_serial_port *port, struct ktermios *old_termios);
+static void empeg_init_termios(struct tty_struct *tty);
 static void empeg_write_bulk_callback(struct urb *urb);
 static void empeg_read_bulk_callback(struct urb *urb);
 
@@ -126,8 +121,7 @@ static struct usb_serial_driver empeg_device = {
 	.throttle =		empeg_throttle,
 	.unthrottle =		empeg_unthrottle,
 	.attach =		empeg_startup,
-	.shutdown =		empeg_shutdown,
-	.set_termios =		empeg_set_termios,
+	.init_termios =		empeg_init_termios,
 	.write =		empeg_write,
 	.write_room =		empeg_write_room,
 	.chars_in_buffer =	empeg_chars_in_buffer,
@@ -146,16 +140,12 @@ static int		bytes_out;
 /******************************************************************************
  * Empeg specific driver functions
  ******************************************************************************/
-static int empeg_open(struct tty_struct *tty, struct usb_serial_port *port,
-				struct file *filp)
+static int empeg_open(struct tty_struct *tty,struct usb_serial_port *port)
 {
 	struct usb_serial *serial = port->serial;
 	int result = 0;
 
 	dbg("%s - port %d", __func__, port->number);
-
-	/* Force default termio settings */
-	empeg_set_termios(tty, port, NULL) ;
 
 	bytes_in = 0;
 	bytes_out = 0;
@@ -182,8 +172,7 @@ static int empeg_open(struct tty_struct *tty, struct usb_serial_port *port,
 }
 
 
-static void empeg_close(struct tty_struct *tty, struct usb_serial_port *port,
-				struct file *filp)
+static void empeg_close(struct usb_serial_port *port)
 {
 	dbg("%s - port %d", __func__, port->number);
 
@@ -354,7 +343,7 @@ static void empeg_read_bulk_callback(struct urb *urb)
 
 	usb_serial_debug_data(debug, &port->dev, __func__,
 						urb->actual_length, data);
-	tty = port->port.tty;
+	tty = tty_port_tty_get(&port->port);
 
 	if (urb->actual_length) {
 		tty_buffer_request_room(tty, urb->actual_length);
@@ -362,6 +351,7 @@ static void empeg_read_bulk_callback(struct urb *urb)
 		tty_flip_buffer_push(tty);
 		bytes_in += urb->actual_length;
 	}
+	tty_kref_put(tty);
 
 	/* Continue trying to always read  */
 	usb_fill_bulk_urb(
@@ -401,7 +391,7 @@ static void empeg_unthrottle(struct tty_struct *tty)
 	dbg("%s - port %d", __func__, port->number);
 
 	port->read_urb->dev = port->serial->dev;
-	result = usb_submit_urb(port->read_urb, GFP_ATOMIC);
+	result = usb_submit_urb(port->read_urb, GFP_KERNEL);
 	if (result)
 		dev_err(&port->dev,
 			"%s - failed submitting read urb, error %d\n",
@@ -416,7 +406,7 @@ static int  empeg_startup(struct usb_serial *serial)
 	dbg("%s", __func__);
 
 	if (serial->dev->actconfig->desc.bConfigurationValue != 1) {
-		err("active config #%d != 1 ??",
+		dev_err(&serial->dev->dev, "active config #%d != 1 ??\n",
 			serial->dev->actconfig->desc.bConfigurationValue);
 		return -ENODEV;
 	}
@@ -429,17 +419,9 @@ static int  empeg_startup(struct usb_serial *serial)
 }
 
 
-static void empeg_shutdown(struct usb_serial *serial)
-{
-	dbg("%s", __func__);
-}
-
-
-static void empeg_set_termios(struct tty_struct *tty,
-		struct usb_serial_port *port, struct ktermios *old_termios)
+static void empeg_init_termios(struct tty_struct *tty)
 {
 	struct ktermios *termios = tty->termios;
-	dbg("%s - port %d", __func__, port->number);
 
 	/*
 	 * The empeg-car player wants these particular tty settings.
@@ -493,15 +475,15 @@ static int __init empeg_init(void)
 		urb = usb_alloc_urb(0, GFP_KERNEL);
 		write_urb_pool[i] = urb;
 		if (urb == NULL) {
-			err("No more urbs???");
+			printk(KERN_ERR "empeg: No more urbs???\n");
 			continue;
 		}
 
 		urb->transfer_buffer = kmalloc(URB_TRANSFER_BUFFER_SIZE,
 								GFP_KERNEL);
 		if (!urb->transfer_buffer) {
-			err("%s - out of memory for urb buffers.",
-			    __func__);
+			printk(KERN_ERR "empeg: %s - out of memory for urb "
+			       "buffers.", __func__);
 			continue;
 		}
 	}
@@ -513,7 +495,8 @@ static int __init empeg_init(void)
 	if (retval)
 		goto failed_usb_register;
 
-	info(DRIVER_VERSION ":" DRIVER_DESC);
+	printk(KERN_INFO KBUILD_MODNAME ": " DRIVER_VERSION ":"
+	       DRIVER_DESC "\n");
 
 	return 0;
 failed_usb_register:

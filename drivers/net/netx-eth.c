@@ -134,7 +134,7 @@ netx_eth_hard_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 	spin_unlock_irq(&priv->lock);
 	dev_kfree_skb(skb);
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 static void netx_eth_receive(struct net_device *ndev)
@@ -165,7 +165,6 @@ static void netx_eth_receive(struct net_device *ndev)
 	pfifo_push(EMPTY_PTR_FIFO(priv->id),
 		FIFO_PTR_SEGMENT(seg) | FIFO_PTR_FRAMENO(frameno));
 
-	ndev->last_rx = jiffies;
 	skb->protocol = eth_type_trans(skb, ndev);
 	netif_rx(skb);
 	ndev->stats.rx_packets++;
@@ -189,7 +188,7 @@ netx_eth_interrupt(int irq, void *dev_id)
 
 		if ((status & ISR_CON_HI) || (status & ISR_IND_HI))
 			printk("%s: unexpected status: 0x%08x\n",
-			    __FUNCTION__, status);
+			    __func__, status);
 
 		fill_level =
 		    readl(NETX_PFIFO_FILL_LEVEL(IND_FIFO_PORT_LO(priv->id)));
@@ -302,6 +301,17 @@ netx_eth_phy_write(struct net_device *ndev, int phy_id, int reg, int value)
 	while (readl(NETX_MIIMU) & MIIMU_SNRDY);
 }
 
+static const struct net_device_ops netx_eth_netdev_ops = {
+	.ndo_open		= netx_eth_open,
+	.ndo_stop		= netx_eth_close,
+	.ndo_start_xmit		= netx_eth_hard_start_xmit,
+	.ndo_tx_timeout		= netx_eth_timeout,
+	.ndo_set_multicast_list	= netx_eth_set_multicast_list,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_set_mac_address	= eth_mac_addr,
+};
+
 static int netx_eth_enable(struct net_device *ndev)
 {
 	struct netx_eth_priv *priv = netdev_priv(ndev);
@@ -310,12 +320,8 @@ static int netx_eth_enable(struct net_device *ndev)
 
 	ether_setup(ndev);
 
-	ndev->open = netx_eth_open;
-	ndev->stop = netx_eth_close;
-	ndev->hard_start_xmit = netx_eth_hard_start_xmit;
-	ndev->tx_timeout = netx_eth_timeout;
+	ndev->netdev_ops = &netx_eth_netdev_ops;
 	ndev->watchdog_timeo = msecs_to_jiffies(5000);
-	ndev->set_multicast_list = netx_eth_set_multicast_list;
 
 	priv->msg_enable       = NETIF_MSG_LINK;
 	priv->mii.phy_id_mask  = 0x1f;
@@ -400,6 +406,8 @@ static int netx_eth_drv_probe(struct platform_device *pdev)
 	priv->xpec_base = priv->xc->xpec_base;
 	priv->xmac_base = priv->xc->xmac_base;
 	priv->sram_base = priv->xc->sram_base;
+
+	spin_lock_init(&priv->lock);
 
 	ret = pfifo_request(PFIFO_MASK(priv->id));
 	if (ret) {

@@ -6,6 +6,8 @@
 #include <linux/delay.h>
 #include <linux/sched.h>
 #include <linux/idr.h>
+#include <linux/rculist.h>
+#include <linux/nsproxy.h>
 #include <net/net_namespace.h>
 #include <net/netns/generic.h>
 
@@ -18,6 +20,7 @@ static struct list_head *first_device = &pernet_list;
 static DEFINE_MUTEX(net_mutex);
 
 LIST_HEAD(net_namespace_list);
+EXPORT_SYMBOL_GPL(net_namespace_list);
 
 struct net init_net;
 EXPORT_SYMBOL(init_net);
@@ -31,25 +34,14 @@ static __net_init int setup_net(struct net *net)
 {
 	/* Must be called with net_mutex held */
 	struct pernet_operations *ops;
-	int error;
-	struct net_generic *ng;
+	int error = 0;
 
 	atomic_set(&net->count, 1);
+
 #ifdef NETNS_REFCNT_DEBUG
 	atomic_set(&net->use_count, 0);
 #endif
 
-	error = -ENOMEM;
-	ng = kzalloc(sizeof(struct net_generic) +
-			INITIAL_NET_GEN_PTRS * sizeof(void *), GFP_KERNEL);
-	if (ng == NULL)
-		goto out;
-
-	ng->len = INITIAL_NET_GEN_PTRS;
-	INIT_RCU_HEAD(&ng->rcu);
-	rcu_assign_pointer(net->gen, ng);
-
-	error = 0;
 	list_for_each_entry(ops, &pernet_list, list) {
 		if (ops->init) {
 			error = ops->init(net);
@@ -70,8 +62,20 @@ out_undo:
 	}
 
 	rcu_barrier();
-	kfree(ng);
 	goto out;
+}
+
+static struct net_generic *net_alloc_generic(void)
+{
+	struct net_generic *ng;
+	size_t generic_size = sizeof(struct net_generic) +
+		INITIAL_NET_GEN_PTRS * sizeof(void *);
+
+	ng = kzalloc(generic_size, GFP_KERNEL);
+	if (ng)
+		ng->len = INITIAL_NET_GEN_PTRS;
+
+	return ng;
 }
 
 #ifdef CONFIG_NET_NS
@@ -80,14 +84,28 @@ static struct workqueue_struct *netns_wq;
 
 static struct net *net_alloc(void)
 {
-	return kmem_cache_zalloc(net_cachep, GFP_KERNEL);
+	struct net *net = NULL;
+	struct net_generic *ng;
+
+	ng = net_alloc_generic();
+	if (!ng)
+		goto out;
+
+	net = kmem_cache_zalloc(net_cachep, GFP_KERNEL);
+	if (!net)
+		goto out_free;
+
+	rcu_assign_pointer(net->gen, ng);
+out:
+	return net;
+
+out_free:
+	kfree(ng);
+	goto out;
 }
 
 static void net_free(struct net *net)
 {
-	if (!net)
-		return;
-
 #ifdef NETNS_REFCNT_DEBUG
 	if (unlikely(atomic_read(&net->use_count) != 0)) {
 		printk(KERN_EMERG "network namespace not free! Usage: %d\n",
@@ -95,44 +113,38 @@ static void net_free(struct net *net)
 		return;
 	}
 #endif
-
+	kfree(net->gen);
 	kmem_cache_free(net_cachep, net);
+}
+
+static struct net *net_create(void)
+{
+	struct net *net;
+	int rv;
+
+	net = net_alloc();
+	if (!net)
+		return ERR_PTR(-ENOMEM);
+	mutex_lock(&net_mutex);
+	rv = setup_net(net);
+	if (rv == 0) {
+		rtnl_lock();
+		list_add_tail_rcu(&net->list, &net_namespace_list);
+		rtnl_unlock();
+	}
+	mutex_unlock(&net_mutex);
+	if (rv < 0) {
+		net_free(net);
+		return ERR_PTR(rv);
+	}
+	return net;
 }
 
 struct net *copy_net_ns(unsigned long flags, struct net *old_net)
 {
-	struct net *new_net = NULL;
-	int err;
-
-	get_net(old_net);
-
 	if (!(flags & CLONE_NEWNET))
-		return old_net;
-
-	err = -ENOMEM;
-	new_net = net_alloc();
-	if (!new_net)
-		goto out;
-
-	mutex_lock(&net_mutex);
-	err = setup_net(new_net);
-	if (err)
-		goto out_unlock;
-
-	rtnl_lock();
-	list_add_tail(&new_net->list, &net_namespace_list);
-	rtnl_unlock();
-
-
-out_unlock:
-	mutex_unlock(&net_mutex);
-out:
-	put_net(old_net);
-	if (err) {
-		net_free(new_net);
-		new_net = ERR_PTR(err);
-	}
-	return new_net;
+		return get_net(old_net);
+	return net_create();
 }
 
 static void cleanup_net(struct work_struct *work)
@@ -140,17 +152,21 @@ static void cleanup_net(struct work_struct *work)
 	struct pernet_operations *ops;
 	struct net *net;
 
-	/* Be very certain incoming network packets will not find us */
-	rcu_barrier();
-
 	net = container_of(work, struct net, work);
 
 	mutex_lock(&net_mutex);
 
 	/* Don't let anyone else find us. */
 	rtnl_lock();
-	list_del(&net->list);
+	list_del_rcu(&net->list);
 	rtnl_unlock();
+
+	/*
+	 * Another CPU might be rcu-iterating the list, wait for it.
+	 * This needs to be before calling the exit() notifiers, so
+	 * the rcu_barrier() below isn't sufficient alone.
+	 */
+	synchronize_rcu();
 
 	/* Run all of the network namespace exit methods */
 	list_for_each_entry_reverse(ops, &pernet_list, list) {
@@ -186,11 +202,30 @@ struct net *copy_net_ns(unsigned long flags, struct net *old_net)
 }
 #endif
 
+struct net *get_net_ns_by_pid(pid_t pid)
+{
+	struct task_struct *tsk;
+	struct net *net;
+
+	/* Lookup the network namespace */
+	net = ERR_PTR(-ESRCH);
+	rcu_read_lock();
+	tsk = find_task_by_vpid(pid);
+	if (tsk) {
+		struct nsproxy *nsproxy;
+		nsproxy = task_nsproxy(tsk);
+		if (nsproxy)
+			net = get_net(nsproxy->net_ns);
+	}
+	rcu_read_unlock();
+	return net;
+}
+EXPORT_SYMBOL_GPL(get_net_ns_by_pid);
+
 static int __init net_ns_init(void)
 {
-	int err;
+	struct net_generic *ng;
 
-	printk(KERN_INFO "net_namespace: %zd bytes\n", sizeof(struct net));
 #ifdef CONFIG_NET_NS
 	net_cachep = kmem_cache_create("net_namespace", sizeof(struct net),
 					SMP_CACHE_BYTES,
@@ -202,16 +237,21 @@ static int __init net_ns_init(void)
 		panic("Could not create netns workq");
 #endif
 
+	ng = net_alloc_generic();
+	if (!ng)
+		panic("Could not allocate generic netns");
+
+	rcu_assign_pointer(init_net.gen, ng);
+
 	mutex_lock(&net_mutex);
-	err = setup_net(&init_net);
+	if (setup_net(&init_net))
+		panic("Could not setup the initial network namespace");
 
 	rtnl_lock();
-	list_add_tail(&init_net.list, &net_namespace_list);
+	list_add_tail_rcu(&init_net.list, &net_namespace_list);
 	rtnl_unlock();
 
 	mutex_unlock(&net_mutex);
-	if (err)
-		panic("Could not setup the initial network namespace");
 
 	return 0;
 }
@@ -323,6 +363,38 @@ void unregister_pernet_subsys(struct pernet_operations *module)
 	mutex_unlock(&net_mutex);
 }
 EXPORT_SYMBOL_GPL(unregister_pernet_subsys);
+
+int register_pernet_gen_subsys(int *id, struct pernet_operations *ops)
+{
+	int rv;
+
+	mutex_lock(&net_mutex);
+again:
+	rv = ida_get_new_above(&net_generic_ids, 1, id);
+	if (rv < 0) {
+		if (rv == -EAGAIN) {
+			ida_pre_get(&net_generic_ids, GFP_KERNEL);
+			goto again;
+		}
+		goto out;
+	}
+	rv = register_pernet_operations(first_device, ops);
+	if (rv < 0)
+		ida_remove(&net_generic_ids, *id);
+out:
+	mutex_unlock(&net_mutex);
+	return rv;
+}
+EXPORT_SYMBOL_GPL(register_pernet_gen_subsys);
+
+void unregister_pernet_gen_subsys(int id, struct pernet_operations *ops)
+{
+	mutex_lock(&net_mutex);
+	unregister_pernet_operations(ops);
+	ida_remove(&net_generic_ids, id);
+	mutex_unlock(&net_mutex);
+}
+EXPORT_SYMBOL_GPL(unregister_pernet_gen_subsys);
 
 /**
  *      register_pernet_device - register a network namespace device
@@ -445,7 +517,6 @@ int net_assign_generic(struct net *net, int id, void *data)
 	 */
 
 	ng->len = id;
-	INIT_RCU_HEAD(&ng->rcu);
 	memcpy(&ng->ptr, &old_ng->ptr, old_ng->len * sizeof(void*));
 
 	rcu_assign_pointer(net->gen, ng);

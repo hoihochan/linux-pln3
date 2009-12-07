@@ -36,8 +36,8 @@
  *              - should be incremented on every checkin
  */
 #define	MISDN_MAJOR_VERSION	1
-#define	MISDN_MINOR_VERSION	0
-#define MISDN_RELEASE		19
+#define	MISDN_MINOR_VERSION	1
+#define MISDN_RELEASE		21
 
 /* primitives for information exchange
  * generell format
@@ -80,6 +80,7 @@
 #define PH_DEACTIVATE_IND	0x0202
 #define PH_DEACTIVATE_CNF	0x4202
 #define PH_DATA_IND		0x2002
+#define PH_DATA_E_IND		0x3002
 #define MPH_ACTIVATE_IND	0x0502
 #define MPH_DEACTIVATE_IND	0x0602
 #define MPH_INFORMATION_IND	0x0702
@@ -103,7 +104,7 @@
 #define DL_UNITDATA_IND		0x3108
 #define DL_INFORMATION_IND	0x0008
 
-/* intern layer 2 managment */
+/* intern layer 2 management */
 #define MDL_ASSIGN_REQ		0x1804
 #define MDL_ASSIGN_IND		0x1904
 #define MDL_REMOVE_REQ		0x1A04
@@ -152,6 +153,18 @@
 #define HFC_VOL_CHANGE_RX	0x2602
 #define HFC_SPL_LOOP_ON		0x2603
 #define HFC_SPL_LOOP_OFF	0x2604
+/* for T30 FAX and analog modem */
+#define HW_MOD_FRM		0x4000
+#define HW_MOD_FRH		0x4001
+#define HW_MOD_FTM		0x4002
+#define HW_MOD_FTH		0x4003
+#define HW_MOD_FTS		0x4004
+#define HW_MOD_CONNECT		0x4010
+#define HW_MOD_OK		0x4011
+#define HW_MOD_NOCARR		0x4012
+#define HW_MOD_FCERROR		0x4013
+#define HW_MOD_READY		0x4014
+#define HW_MOD_LASTDATA		0x4015
 
 /* DSP_TONE_PATT_ON parameter */
 #define TONE_OFF			0x0000
@@ -199,6 +212,18 @@
 #define ISDN_P_NT_S0  		0x02
 #define ISDN_P_TE_E1		0x03
 #define ISDN_P_NT_E1  		0x04
+#define ISDN_P_TE_UP0		0x05
+#define ISDN_P_NT_UP0		0x06
+
+#define IS_ISDN_P_TE(p) ((p == ISDN_P_TE_S0) || (p == ISDN_P_TE_E1) || \
+				(p == ISDN_P_TE_UP0) || (p == ISDN_P_LAPD_TE))
+#define IS_ISDN_P_NT(p) ((p == ISDN_P_NT_S0) || (p == ISDN_P_NT_E1) || \
+				(p == ISDN_P_NT_UP0) || (p == ISDN_P_LAPD_NT))
+#define IS_ISDN_P_S0(p) ((p == ISDN_P_TE_S0) || (p == ISDN_P_NT_S0))
+#define IS_ISDN_P_E1(p) ((p == ISDN_P_TE_E1) || (p == ISDN_P_NT_E1))
+#define IS_ISDN_P_UP0(p) ((p == ISDN_P_TE_UP0) || (p == ISDN_P_NT_UP0))
+
+
 #define ISDN_P_LAPD_TE		0x10
 #define	ISDN_P_LAPD_NT		0x11
 
@@ -211,11 +236,14 @@
 #define ISDN_P_B_L2DTMF		0x24
 #define ISDN_P_B_L2DSP		0x25
 #define ISDN_P_B_L2DSPHDLC	0x26
+#define ISDN_P_B_T30_FAX	0x27
+#define ISDN_P_B_MODEM_ASYNC	0x28
 
 #define OPTION_L2_PMX		1
 #define OPTION_L2_PTP		2
 #define OPTION_L2_FIXEDTEI	3
 #define OPTION_L2_CLEANUP	4
+#define OPTION_L1_HOLD		5
 
 /* should be in sync with linux/kobject.h:KOBJ_NAME_LEN */
 #define MISDN_MAX_IDLEN		20
@@ -255,16 +283,6 @@ struct sockaddr_mISDN {
 	unsigned char	tei;
 };
 
-/* timer device ioctl */
-#define IMADDTIMER	_IOR('I', 64, int)
-#define IMDELTIMER	_IOR('I', 65, int)
-/* socket ioctls */
-#define	IMGETVERSION	_IOR('I', 66, int)
-#define	IMGETCOUNT	_IOR('I', 67, int)
-#define IMGETDEVINFO	_IOR('I', 68, int)
-#define IMCTRLREQ	_IOR('I', 69, int)
-#define IMCLEAR_L2	_IOR('I', 70, int)
-
 struct mISDNversion {
 	unsigned char	major;
 	unsigned char	minor;
@@ -280,6 +298,41 @@ struct mISDN_devinfo {
 	u_int			nrbchan;
 	char			name[MISDN_MAX_IDLEN];
 };
+
+struct mISDN_devrename {
+	u_int			id;
+	char			name[MISDN_MAX_IDLEN]; /* new name */
+};
+
+/* MPH_INFORMATION_REQ payload */
+struct ph_info_ch {
+	__u32 protocol;
+	__u64 Flags;
+};
+
+struct ph_info_dch {
+	struct ph_info_ch ch;
+	__u16 state;
+	__u16 num_bch;
+};
+
+struct ph_info {
+	struct ph_info_dch dch;
+	struct ph_info_ch  bch[];
+};
+
+/* timer device ioctl */
+#define IMADDTIMER	_IOR('I', 64, int)
+#define IMDELTIMER	_IOR('I', 65, int)
+
+/* socket ioctls */
+#define	IMGETVERSION	_IOR('I', 66, int)
+#define	IMGETCOUNT	_IOR('I', 67, int)
+#define IMGETDEVINFO	_IOR('I', 68, int)
+#define IMCTRLREQ	_IOR('I', 69, int)
+#define IMCLEAR_L2	_IOR('I', 70, int)
+#define IMSETDEVNAME	_IOR('I', 71, struct mISDN_devrename)
+#define IMHOLD_L1	_IOR('I', 72, int)
 
 static inline int
 test_channelmap(u_int nr, u_char *map)
@@ -312,6 +365,8 @@ clear_channelmap(u_int nr, u_char *map)
 #define MISDN_CTRL_SETPEER		0x0040
 #define MISDN_CTRL_UNSETPEER		0x0080
 #define MISDN_CTRL_RX_OFF		0x0100
+#define MISDN_CTRL_FILL_EMPTY		0x0200
+#define MISDN_CTRL_GETPEER		0x0400
 #define MISDN_CTRL_HW_FEATURES_OP	0x2000
 #define MISDN_CTRL_HW_FEATURES		0x2001
 #define MISDN_CTRL_HFC_OP		0x4000
@@ -323,7 +378,8 @@ clear_channelmap(u_int nr, u_char *map)
 #define MISDN_CTRL_HFC_RECEIVE_ON	0x4006
 #define MISDN_CTRL_HFC_ECHOCAN_ON 	0x4007
 #define MISDN_CTRL_HFC_ECHOCAN_OFF 	0x4008
-
+#define MISDN_CTRL_HFC_WD_INIT		0x4009
+#define MISDN_CTRL_HFC_WD_RESET		0x400A
 
 /* socket options */
 #define MISDN_TIME_STAMP		0x0001
@@ -362,6 +418,7 @@ struct mISDN_ctrl_req {
 #define DEBUG_L2_TEI		0x00100000
 #define DEBUG_L2_TEIFSM		0x00200000
 #define DEBUG_TIMER		0x01000000
+#define DEBUG_CLOCK		0x02000000
 
 #define mISDN_HEAD_P(s)		((struct mISDNhead *)&s->cb[0])
 #define mISDN_HEAD_PRIM(s)	(((struct mISDNhead *)&s->cb[0])->prim)
@@ -375,6 +432,7 @@ struct mISDN_ctrl_req {
 struct mISDNchannel;
 struct mISDNdevice;
 struct mISDNstack;
+struct mISDNclock;
 
 struct channel_req {
 	u_int			protocol;
@@ -423,7 +481,6 @@ struct mISDN_sock {
 struct mISDNdevice {
 	struct mISDNchannel	D;
 	u_int			id;
-	char			name[MISDN_MAX_IDLEN];
 	u_int			Dprotocols;
 	u_int			Bprotocols;
 	u_int			nrbchan;
@@ -450,6 +507,16 @@ struct mISDNstack {
 	u_int			sleep_cnt;
 	u_int			stopped_cnt;
 #endif
+};
+
+typedef	int	(clockctl_func_t)(void *, int);
+
+struct	mISDNclock {
+	struct list_head	list;
+	char			name[64];
+	int			pri;
+	clockctl_func_t		*ctl;
+	void			*priv;
 };
 
 /* global alloc/queue functions */
@@ -498,12 +565,26 @@ _queue_data(struct mISDNchannel *ch, u_int prim,
 
 /* global register/unregister functions */
 
-extern int	mISDN_register_device(struct mISDNdevice *, char *name);
+extern int	mISDN_register_device(struct mISDNdevice *,
+					struct device *parent, char *name);
 extern void	mISDN_unregister_device(struct mISDNdevice *);
 extern int	mISDN_register_Bprotocol(struct Bprotocol *);
 extern void	mISDN_unregister_Bprotocol(struct Bprotocol *);
+extern struct mISDNclock *mISDN_register_clock(char *, int, clockctl_func_t *,
+						void *);
+extern void	mISDN_unregister_clock(struct mISDNclock *);
+
+static inline struct mISDNdevice *dev_to_mISDN(struct device *dev)
+{
+	if (dev)
+		return dev_get_drvdata(dev);
+	else
+		return NULL;
+}
 
 extern void	set_channel_address(struct mISDNchannel *, u_int, u_int);
+extern void	mISDN_clock_update(struct mISDNclock *, int, struct timeval *);
+extern unsigned short mISDN_clock_get(void);
 
 #endif /* __KERNEL__ */
 #endif /* mISDNIF_H */

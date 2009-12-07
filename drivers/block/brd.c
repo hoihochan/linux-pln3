@@ -275,8 +275,10 @@ static int brd_do_bvec(struct brd_device *brd, struct page *page,
 	if (rw == READ) {
 		copy_from_brd(mem + off, brd, sector, len);
 		flush_dcache_page(page);
-	} else
+	} else {
+		flush_dcache_page(page);
 		copy_to_brd(brd, mem + off, sector, len);
+	}
 	kunmap_atomic(mem, KM_USER0);
 
 out:
@@ -340,11 +342,10 @@ static int brd_direct_access (struct block_device *bdev, sector_t sector,
 }
 #endif
 
-static int brd_ioctl(struct inode *inode, struct file *file,
+static int brd_ioctl(struct block_device *bdev, fmode_t mode,
 			unsigned int cmd, unsigned long arg)
 {
 	int error;
-	struct block_device *bdev = inode->i_bdev;
 	struct brd_device *brd = bdev->bd_disk->private_data;
 
 	if (cmd != BLKFLSBUF)
@@ -374,9 +375,9 @@ static int brd_ioctl(struct inode *inode, struct file *file,
 	return error;
 }
 
-static struct block_device_operations brd_fops = {
+static const struct block_device_operations brd_fops = {
 	.owner =		THIS_MODULE,
-	.ioctl =		brd_ioctl,
+	.locked_ioctl =		brd_ioctl,
 #ifdef CONFIG_BLK_DEV_XIP
 	.direct_access =	brd_direct_access,
 #endif
@@ -406,12 +407,7 @@ static int __init ramdisk_size(char *str)
 	rd_size = simple_strtol(str, NULL, 0);
 	return 1;
 }
-static int __init ramdisk_size2(char *str)
-{
-	return ramdisk_size(str);
-}
-__setup("ramdisk=", ramdisk_size);
-__setup("ramdisk_size=", ramdisk_size2);
+__setup("ramdisk_size=", ramdisk_size);
 #endif
 
 /*
@@ -437,6 +433,7 @@ static struct brd_device *brd_alloc(int i)
 	if (!brd->brd_queue)
 		goto out_free_dev;
 	blk_queue_make_request(brd->brd_queue, brd_make_request);
+	blk_queue_ordered(brd->brd_queue, QUEUE_ORDERED_TAG, NULL);
 	blk_queue_max_sectors(brd->brd_queue, 1024);
 	blk_queue_bounce_limit(brd->brd_queue, BLK_BOUNCE_ANY);
 

@@ -11,6 +11,7 @@
 #include <linux/buffer_head.h>
 #include <linux/ext2_fs_sb.h>
 #include <linux/ext2_fs.h>
+#include <linux/blkdev.h>
 #include "ext2.h"
 #include "xip.h"
 
@@ -19,7 +20,7 @@ __inode_direct_access(struct inode *inode, sector_t block,
 		      void **kaddr, unsigned long *pfn)
 {
 	struct block_device *bdev = inode->i_sb->s_bdev;
-	struct block_device_operations *ops = bdev->bd_disk->fops;
+	const struct block_device_operations *ops = bdev->bd_disk->fops;
 	sector_t sector;
 
 	sector = block * (PAGE_SIZE / 512); /* ext2 block to bdev sector */

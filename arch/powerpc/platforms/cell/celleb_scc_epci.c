@@ -134,14 +134,10 @@ static int celleb_epci_read_config(struct pci_bus *bus,
 {
 	PCI_IO_ADDR epci_base;
 	PCI_IO_ADDR addr;
-	struct device_node *node;
-	struct pci_controller *hose;
+	struct pci_controller *hose = pci_bus_to_host(bus);
 
 	/* allignment check */
 	BUG_ON(where % size);
-
-	node = (struct device_node *)bus->sysdata;
-	hose = pci_find_hose_for_OF_device(node);
 
 	if (!celleb_epci_get_epci_cfg(hose))
 		return PCIBIOS_DEVICE_NOT_FOUND;
@@ -198,15 +194,10 @@ static int celleb_epci_write_config(struct pci_bus *bus,
 {
 	PCI_IO_ADDR epci_base;
 	PCI_IO_ADDR addr;
-	struct device_node *node;
-	struct pci_controller *hose;
+	struct pci_controller *hose = pci_bus_to_host(bus);
 
 	/* allignment check */
 	BUG_ON(where % size);
-
-	node = (struct device_node *)bus->sysdata;
-	hose = pci_find_hose_for_OF_device(node);
-
 
 	if (!celleb_epci_get_epci_cfg(hose))
 		return PCIBIOS_DEVICE_NOT_FOUND;
@@ -405,7 +396,7 @@ static int __init celleb_setup_epci(struct device_node *node,
 	hose->cfg_addr = ioremap(r.start, (r.end - r.start + 1));
 	if (!hose->cfg_addr)
 		goto error;
-	pr_debug("EPCI: cfg_addr map 0x%016lx->0x%016lx + 0x%016lx\n",
+	pr_debug("EPCI: cfg_addr map 0x%016llx->0x%016lx + 0x%016llx\n",
 		 r.start, (unsigned long)hose->cfg_addr, (r.end - r.start + 1));
 
 	if (of_address_to_resource(node, 2, &r))
@@ -413,7 +404,7 @@ static int __init celleb_setup_epci(struct device_node *node,
 	hose->cfg_data = ioremap(r.start, (r.end - r.start + 1));
 	if (!hose->cfg_data)
 		goto error;
-	pr_debug("EPCI: cfg_data map 0x%016lx->0x%016lx + 0x%016lx\n",
+	pr_debug("EPCI: cfg_data map 0x%016llx->0x%016lx + 0x%016llx\n",
 		 r.start, (unsigned long)hose->cfg_data, (r.end - r.start + 1));
 
 	hose->ops = &celleb_epci_ops;

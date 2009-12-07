@@ -90,7 +90,7 @@ static void aaci_ac97_write(struct snd_ac97 *ac97, unsigned short reg,
 	 */
 	do {
 		v = readl(aaci->base + AACI_SLFR);
-	} while ((v & (SLFR_1TXB|SLFR_2TXB)) && timeout--);
+	} while ((v & (SLFR_1TXB|SLFR_2TXB)) && --timeout);
 
 	if (!timeout)
 		dev_err(&aaci->dev->dev,
@@ -126,7 +126,7 @@ static unsigned short aaci_ac97_read(struct snd_ac97 *ac97, unsigned short reg)
 	 */
 	do {
 		v = readl(aaci->base + AACI_SLFR);
-	} while ((v & SLFR_1TXB) && timeout--);
+	} while ((v & SLFR_1TXB) && --timeout);
 
 	if (!timeout) {
 		dev_err(&aaci->dev->dev, "timeout on slot 1 TX busy\n");
@@ -147,7 +147,7 @@ static unsigned short aaci_ac97_read(struct snd_ac97 *ac97, unsigned short reg)
 	do {
 		cond_resched();
 		v = readl(aaci->base + AACI_SLFR) & (SLFR_1RXV|SLFR_2RXV);
-	} while ((v != (SLFR_1RXV|SLFR_2RXV)) && timeout--);
+	} while ((v != (SLFR_1RXV|SLFR_2RXV)) && --timeout);
 
 	if (!timeout) {
 		dev_err(&aaci->dev->dev, "timeout on RX valid\n");
@@ -504,6 +504,10 @@ static int aaci_pcm_hw_params(struct snd_pcm_substream *substream,
 	int err;
 
 	aaci_pcm_hw_free(substream);
+	if (aacirun->pcm_open) {
+		snd_ac97_pcm_close(aacirun->pcm);
+		aacirun->pcm_open = 0;
+	}
 
 	err = devdma_hw_alloc(NULL, substream,
 			      params_buffer_bytes(params));
@@ -517,7 +521,7 @@ static int aaci_pcm_hw_params(struct snd_pcm_substream *substream,
 	else
 		err = snd_ac97_pcm_open(aacirun->pcm, params_rate(params),
 					params_channels(params),
-					aacirun->pcm->r[1].slots);
+					aacirun->pcm->r[0].slots);
 
 	if (err)
 		goto out;
@@ -937,6 +941,7 @@ static int __devinit aaci_probe_ac97(struct aaci *aaci)
 	struct snd_ac97 *ac97;
 	int ret;
 
+	writel(0, aaci->base + AC97_POWERDOWN);
 	/*
 	 * Assert AACIRESET for 2us
 	 */
@@ -995,11 +1000,12 @@ static struct aaci * __devinit aaci_init_card(struct amba_device *dev)
 {
 	struct aaci *aaci;
 	struct snd_card *card;
+	int err;
 
-	card = snd_card_new(SNDRV_DEFAULT_IDX1, SNDRV_DEFAULT_STR1,
-			    THIS_MODULE, sizeof(struct aaci));
-	if (card == NULL)
-		return ERR_PTR(-ENOMEM);
+	err = snd_card_create(SNDRV_DEFAULT_IDX1, SNDRV_DEFAULT_STR1,
+			      THIS_MODULE, sizeof(struct aaci), &card);
+	if (err < 0)
+		return NULL;
 
 	card->private_free = aaci_free_card;
 
@@ -1073,7 +1079,7 @@ static unsigned int __devinit aaci_size_fifo(struct aaci *aaci)
 	return i;
 }
 
-static int __devinit aaci_probe(struct amba_device *dev, void *id)
+static int __devinit aaci_probe(struct amba_device *dev, struct amba_id *id)
 {
 	struct aaci *aaci;
 	int ret, i;
@@ -1083,12 +1089,12 @@ static int __devinit aaci_probe(struct amba_device *dev, void *id)
 		return ret;
 
 	aaci = aaci_init_card(dev);
-	if (IS_ERR(aaci)) {
-		ret = PTR_ERR(aaci);
+	if (!aaci) {
+		ret = -ENOMEM;
 		goto out;
 	}
 
-	aaci->base = ioremap(dev->res.start, SZ_4K);
+	aaci->base = ioremap(dev->res.start, resource_size(&dev->res));
 	if (!aaci->base) {
 		ret = -ENOMEM;
 		goto out;

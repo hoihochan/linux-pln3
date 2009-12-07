@@ -128,8 +128,6 @@ sys32_alarm_wrapper:
 	llgfr	%r2,%r2			# unsigned int
 	jg	sys_alarm		# branch to system call
 
-#sys32_pause_wrapper			# void
-
 	.globl	compat_sys_utime_wrapper
 compat_sys_utime_wrapper:
 	llgtr	%r2,%r2			# char *
@@ -254,7 +252,7 @@ sys32_chroot_wrapper:
 sys32_ustat_wrapper:
 	llgfr	%r2,%r2			# dev_t
 	llgtr	%r3,%r3			# struct ustat *
-	jg	sys_ustat
+	jg	compat_sys_ustat
 
 	.globl	sys32_dup2_wrapper
 sys32_dup2_wrapper:
@@ -334,17 +332,17 @@ compat_sys_getrusage_wrapper:
 	llgtr	%r3,%r3			# struct rusage_emu31 *
 	jg	compat_sys_getrusage	# branch to system call
 
-	.globl	sys32_gettimeofday_wrapper
-sys32_gettimeofday_wrapper:
+	.globl	compat_sys_gettimeofday_wrapper
+compat_sys_gettimeofday_wrapper:
 	llgtr	%r2,%r2			# struct timeval_emu31 *
 	llgtr	%r3,%r3			# struct timezone *
-	jg	sys32_gettimeofday	# branch to system call
+	jg	compat_sys_gettimeofday	# branch to system call
 
-	.globl	sys32_settimeofday_wrapper
-sys32_settimeofday_wrapper:
+	.globl	compat_sys_settimeofday_wrapper
+compat_sys_settimeofday_wrapper:
 	llgtr	%r2,%r2			# struct timeval_emu31 *
 	llgtr	%r3,%r3			# struct timezone *
-	jg	sys32_settimeofday	# branch to system call
+	jg	compat_sys_settimeofday	# branch to system call
 
 	.globl	sys32_getgroups16_wrapper
 sys32_getgroups16_wrapper:
@@ -411,7 +409,7 @@ sys32_munmap_wrapper:
 	.globl	sys32_truncate_wrapper
 sys32_truncate_wrapper:
 	llgtr	%r2,%r2			# const char *
-	llgfr	%r3,%r3			# unsigned long
+	lgfr	%r3,%r3			# long
 	jg	sys_truncate		# branch to system call
 
 	.globl	sys32_ftruncate_wrapper
@@ -570,18 +568,18 @@ compat_sys_sigprocmask_wrapper:
 	llgtr	%r4,%r4			# compat_old_sigset_t *
 	jg	compat_sys_sigprocmask		# branch to system call
 
-	.globl	sys32_init_module_wrapper
-sys32_init_module_wrapper:
+	.globl	sys_init_module_wrapper
+sys_init_module_wrapper:
 	llgtr	%r2,%r2			# void *
 	llgfr	%r3,%r3			# unsigned long
 	llgtr	%r4,%r4			# char *
-	jg	sys32_init_module	# branch to system call
+	jg	sys_init_module		# branch to system call
 
-	.globl	sys32_delete_module_wrapper
-sys32_delete_module_wrapper:
+	.globl	sys_delete_module_wrapper
+sys_delete_module_wrapper:
 	llgtr	%r2,%r2			# const char *
 	llgfr	%r3,%r3			# unsigned int
-	jg	sys32_delete_module	# branch to system call
+	jg	sys_delete_module	# branch to system call
 
 	.globl	sys32_quotactl_wrapper
 sys32_quotactl_wrapper:
@@ -1769,3 +1767,91 @@ sys_dup3_wrapper:
 sys_epoll_create1_wrapper:
 	lgfr	%r2,%r2			# int
 	jg	sys_epoll_create1	# branch to system call
+
+	.globl	sys32_readahead_wrapper
+sys32_readahead_wrapper:
+	lgfr	%r2,%r2			# int
+	llgfr	%r3,%r3			# u32
+	llgfr	%r4,%r4			# u32
+	lgfr	%r5,%r5			# s32
+	jg	sys32_readahead		# branch to system call
+
+	.globl	sys32_sendfile64_wrapper
+sys32_sendfile64_wrapper:
+	lgfr	%r2,%r2			# int
+	lgfr	%r3,%r3			# int
+	llgtr	%r4,%r4			# compat_loff_t *
+	lgfr	%r5,%r5			# s32
+	jg	sys32_sendfile64	# branch to system call
+
+	.globl	sys_tkill_wrapper
+sys_tkill_wrapper:
+	lgfr	%r2,%r2			# pid_t
+	lgfr	%r3,%r3			# int
+	jg	sys_tkill		# branch to system call
+
+	.globl	sys_tgkill_wrapper
+sys_tgkill_wrapper:
+	lgfr	%r2,%r2			# pid_t
+	lgfr	%r3,%r3			# pid_t
+	lgfr	%r4,%r4			# int
+	jg	sys_tgkill		# branch to system call
+
+	.globl	compat_sys_keyctl_wrapper
+compat_sys_keyctl_wrapper:
+	llgfr	%r2,%r2			# u32
+	llgfr	%r3,%r3			# u32
+	llgfr	%r4,%r4			# u32
+	llgfr	%r5,%r5			# u32
+	llgfr	%r6,%r6			# u32
+	jg	compat_sys_keyctl	# branch to system call
+
+	.globl	compat_sys_preadv_wrapper
+compat_sys_preadv_wrapper:
+	llgfr	%r2,%r2			# unsigned long
+	llgtr	%r3,%r3			# compat_iovec *
+	llgfr	%r4,%r4			# unsigned long
+	llgfr	%r5,%r5			# u32
+	llgfr	%r6,%r6			# u32
+	jg	compat_sys_preadv	# branch to system call
+
+	.globl	compat_sys_pwritev_wrapper
+compat_sys_pwritev_wrapper:
+	llgfr	%r2,%r2			# unsigned long
+	llgtr	%r3,%r3			# compat_iovec *
+	llgfr	%r4,%r4			# unsigned long
+	llgfr	%r5,%r5			# u32
+	llgfr	%r6,%r6			# u32
+	jg	compat_sys_pwritev	# branch to system call
+
+	.globl	compat_sys_rt_tgsigqueueinfo_wrapper
+compat_sys_rt_tgsigqueueinfo_wrapper:
+	lgfr	%r2,%r2			# compat_pid_t
+	lgfr	%r3,%r3			# compat_pid_t
+	lgfr	%r4,%r4			# int
+	llgtr	%r5,%r5			# struct compat_siginfo *
+	jg	compat_sys_rt_tgsigqueueinfo_wrapper # branch to system call
+
+	.globl	sys_perf_event_open_wrapper
+sys_perf_event_open_wrapper:
+	llgtr	%r2,%r2			# const struct perf_event_attr *
+	lgfr	%r3,%r3			# pid_t
+	lgfr	%r4,%r4			# int
+	lgfr	%r5,%r5			# int
+	llgfr	%r6,%r6			# unsigned long
+	jg	sys_perf_event_open	# branch to system call
+
+	.globl	sys_clone_wrapper
+sys_clone_wrapper:
+	llgfr	%r2,%r2			# unsigned long
+	llgfr	%r3,%r3			# unsigned long
+	llgtr	%r4,%r4			# int *
+	llgtr	%r5,%r5			# int *
+	jg	sys_clone		# branch to system call
+
+	.globl	sys32_execve_wrapper
+sys32_execve_wrapper:
+	llgtr	%r2,%r2			# char *
+	llgtr	%r3,%r3			# compat_uptr_t *
+	llgtr	%r4,%r4			# compat_uptr_t *
+	jg	sys32_execve		# branch to system call

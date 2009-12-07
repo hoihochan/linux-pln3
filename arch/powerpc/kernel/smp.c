@@ -57,23 +57,19 @@
 #define DBG(fmt...)
 #endif
 
-int smp_hw_index[NR_CPUS];
 struct thread_info *secondary_ti;
 
-cpumask_t cpu_possible_map = CPU_MASK_NONE;
-cpumask_t cpu_online_map = CPU_MASK_NONE;
 DEFINE_PER_CPU(cpumask_t, cpu_sibling_map) = CPU_MASK_NONE;
 DEFINE_PER_CPU(cpumask_t, cpu_core_map) = CPU_MASK_NONE;
 
-EXPORT_SYMBOL(cpu_online_map);
-EXPORT_SYMBOL(cpu_possible_map);
 EXPORT_PER_CPU_SYMBOL(cpu_sibling_map);
 EXPORT_PER_CPU_SYMBOL(cpu_core_map);
 
 /* SMP operations for this machine */
 struct smp_ops_t *smp_ops;
 
-static volatile unsigned int cpu_callin_map[NR_CPUS];
+/* Can't be static due to PowerMac hackery */
+volatile unsigned int cpu_callin_map[NR_CPUS];
 
 int smt_enabled_at_boot = 1;
 
@@ -101,8 +97,7 @@ void smp_message_recv(int msg)
 		generic_smp_call_function_interrupt();
 		break;
 	case PPC_MSG_RESCHEDULE:
-		/* XXX Do we have to do this? */
-		set_need_resched();
+		/* we notice need_resched on exit */
 		break;
 	case PPC_MSG_CALL_FUNC_SINGLE:
 		generic_smp_call_function_single_interrupt();
@@ -124,6 +119,65 @@ void smp_message_recv(int msg)
 	}
 }
 
+static irqreturn_t call_function_action(int irq, void *data)
+{
+	generic_smp_call_function_interrupt();
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t reschedule_action(int irq, void *data)
+{
+	/* we just need the return path side effect of checking need_resched */
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t call_function_single_action(int irq, void *data)
+{
+	generic_smp_call_function_single_interrupt();
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t debug_ipi_action(int irq, void *data)
+{
+	smp_message_recv(PPC_MSG_DEBUGGER_BREAK);
+	return IRQ_HANDLED;
+}
+
+static irq_handler_t smp_ipi_action[] = {
+	[PPC_MSG_CALL_FUNCTION] =  call_function_action,
+	[PPC_MSG_RESCHEDULE] = reschedule_action,
+	[PPC_MSG_CALL_FUNC_SINGLE] = call_function_single_action,
+	[PPC_MSG_DEBUGGER_BREAK] = debug_ipi_action,
+};
+
+const char *smp_ipi_name[] = {
+	[PPC_MSG_CALL_FUNCTION] =  "ipi call function",
+	[PPC_MSG_RESCHEDULE] = "ipi reschedule",
+	[PPC_MSG_CALL_FUNC_SINGLE] = "ipi call function single",
+	[PPC_MSG_DEBUGGER_BREAK] = "ipi debugger",
+};
+
+/* optional function to request ipi, for controllers with >= 4 ipis */
+int smp_request_message_ipi(int virq, int msg)
+{
+	int err;
+
+	if (msg < 0 || msg > PPC_MSG_DEBUGGER_BREAK) {
+		return -EINVAL;
+	}
+#if !defined(CONFIG_DEBUGGER) && !defined(CONFIG_KEXEC)
+	if (msg == PPC_MSG_DEBUGGER_BREAK) {
+		return 1;
+	}
+#endif
+	err = request_irq(virq, smp_ipi_action[msg], IRQF_DISABLED|IRQF_PERCPU,
+			  smp_ipi_name[msg], 0);
+	WARN(err < 0, "unable to request_irq %d for %s (rc %d)\n",
+		virq, smp_ipi_name[msg], err);
+
+	return err;
+}
+
 void smp_send_reschedule(int cpu)
 {
 	if (likely(smp_ops))
@@ -135,11 +189,11 @@ void arch_send_call_function_single_ipi(int cpu)
 	smp_ops->message_pass(cpu, PPC_MSG_CALL_FUNC_SINGLE);
 }
 
-void arch_send_call_function_ipi(cpumask_t mask)
+void arch_send_call_function_ipi_mask(const struct cpumask *mask)
 {
 	unsigned int cpu;
 
-	for_each_cpu_mask(cpu, mask)
+	for_each_cpu(cpu, mask)
 		smp_ops->message_pass(cpu, PPC_MSG_CALL_FUNCTION);
 }
 
@@ -215,7 +269,10 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 	cpu_callin_map[boot_cpuid] = 1;
 
 	if (smp_ops)
-		max_cpus = smp_ops->probe();
+		if (smp_ops->probe)
+			max_cpus = smp_ops->probe();
+		else
+			max_cpus = NR_CPUS;
 	else
 		max_cpus = 1;
  
@@ -230,7 +287,7 @@ void __devinit smp_prepare_boot_cpu(void)
 {
 	BUG_ON(smp_processor_id() != boot_cpuid);
 
-	cpu_set(boot_cpuid, cpu_online_map);
+	set_cpu_online(boot_cpuid, true);
 	cpu_set(boot_cpuid, per_cpu(cpu_sibling_map, boot_cpuid));
 	cpu_set(boot_cpuid, per_cpu(cpu_core_map, boot_cpuid));
 #ifdef CONFIG_PPC64
@@ -250,7 +307,7 @@ int generic_cpu_disable(void)
 	if (cpu == boot_cpuid)
 		return -EBUSY;
 
-	cpu_clear(cpu, cpu_online_map);
+	set_cpu_online(cpu, false);
 #ifdef CONFIG_PPC64
 	vdso_data->processorCount--;
 	fixup_irqs(cpu_online_map);
@@ -304,7 +361,7 @@ void generic_mach_cpu_die(void)
 	smp_wmb();
 	while (__get_cpu_var(cpu_state) != CPU_UP_PREPARE)
 		cpu_relax();
-	cpu_set(cpu, cpu_online_map);
+	set_cpu_online(cpu, true);
 	local_irq_enable();
 }
 #endif
@@ -358,9 +415,8 @@ int __cpuinit __cpu_up(unsigned int cpu)
 		 * CPUs can take much longer to come up in the
 		 * hotplug case.  Wait five seconds.
 		 */
-		for (c = 25; c && !cpu_callin_map[cpu]; c--) {
-			msleep(200);
-		}
+		for (c = 5000; c && !cpu_callin_map[cpu]; c--)
+			msleep(1);
 #endif
 
 	if (!cpu_callin_map[cpu]) {
@@ -409,8 +465,7 @@ out:
 static struct device_node *cpu_to_l2cache(int cpu)
 {
 	struct device_node *np;
-	const phandle *php;
-	phandle ph;
+	struct device_node *cache;
 
 	if (!cpu_present(cpu))
 		return NULL;
@@ -419,13 +474,11 @@ static struct device_node *cpu_to_l2cache(int cpu)
 	if (np == NULL)
 		return NULL;
 
-	php = of_get_property(np, "l2-cache", NULL);
-	if (php == NULL)
-		return NULL;
-	ph = *php;
+	cache = of_find_next_cache_node(np);
+
 	of_node_put(np);
 
-	return of_find_node_by_phandle(ph);
+	return cache;
 }
 
 /* Activate a secondary processor. */
@@ -443,7 +496,8 @@ int __devinit start_secondary(void *unused)
 	preempt_disable();
 	cpu_callin_map[cpu] = 1;
 
-	smp_ops->setup_cpu(cpu);
+	if (smp_ops->setup_cpu)
+		smp_ops->setup_cpu(cpu);
 	if (smp_ops->take_timebase)
 		smp_ops->take_timebase();
 
@@ -453,7 +507,8 @@ int __devinit start_secondary(void *unused)
 	secondary_cpu_time_init();
 
 	ipi_call_lock();
-	cpu_set(cpu, cpu_online_map);
+	notify_cpu_starting(cpu);
+	set_cpu_online(cpu, true);
 	/* Update sibling maps */
 	base = cpu_first_thread_in_core(cpu);
 	for (i = 0; i < threads_per_core; i++) {
@@ -505,7 +560,7 @@ void __init smp_cpus_done(unsigned int max_cpus)
 	old_mask = current->cpus_allowed;
 	set_cpus_allowed(current, cpumask_of_cpu(boot_cpuid));
 	
-	if (smp_ops)
+	if (smp_ops && smp_ops->setup_cpu)
 		smp_ops->setup_cpu(boot_cpuid);
 
 	set_cpus_allowed(current, old_mask);

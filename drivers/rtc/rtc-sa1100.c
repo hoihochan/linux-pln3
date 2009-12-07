@@ -9,7 +9,7 @@
  *
  * Modifications from:
  *   CIH <cih@coventive.com>
- *   Nicolas Pitre <nico@cam.org>
+ *   Nicolas Pitre <nico@fluxnic.net>
  *   Andrew Christian <andrew.christian@hp.com>
  *
  * Converted to the RTC subsystem and Driver Model
@@ -35,14 +35,15 @@
 #include <asm/irq.h>
 
 #ifdef CONFIG_ARCH_PXA
-#include <mach/pxa-regs.h>
+#include <mach/regs-rtc.h>
+#include <mach/regs-ost.h>
 #endif
 
-#define TIMER_FREQ		CLOCK_TICK_RATE
 #define RTC_DEF_DIVIDER		32768 - 1
 #define RTC_DEF_TRIM		0
 
 static unsigned long rtc_freq = 1024;
+static unsigned long timer_freq;
 static struct rtc_time rtc_alarm;
 static DEFINE_SPINLOCK(sa1100_rtc_lock);
 
@@ -157,7 +158,7 @@ static irqreturn_t timer1_interrupt(int irq, void *dev_id)
 	rtc_update_irq(rtc, rtc_timer1_count, RTC_PF | RTC_IRQF);
 
 	if (rtc_timer1_count == 1)
-		rtc_timer1_count = (rtc_freq * ((1<<30)/(TIMER_FREQ>>2)));
+		rtc_timer1_count = (rtc_freq * ((1 << 30) / (timer_freq >> 2)));
 
 	return IRQ_HANDLED;
 }
@@ -166,7 +167,7 @@ static int sa1100_rtc_read_callback(struct device *dev, int data)
 {
 	if (data & RTC_PF) {
 		/* interpolate missed periods and set match for the next */
-		unsigned long period = TIMER_FREQ/rtc_freq;
+		unsigned long period = timer_freq / rtc_freq;
 		unsigned long oscr = OSCR;
 		unsigned long osmr1 = OSMR1;
 		unsigned long missed = (oscr - osmr1)/period;
@@ -263,7 +264,7 @@ static int sa1100_rtc_ioctl(struct device *dev, unsigned int cmd,
 		return 0;
 	case RTC_PIE_ON:
 		spin_lock_irq(&sa1100_rtc_lock);
-		OSMR1 = TIMER_FREQ/rtc_freq + OSCR;
+		OSMR1 = timer_freq / rtc_freq + OSCR;
 		OIER |= OIER_E1;
 		rtc_timer1_count = 1;
 		spin_unlock_irq(&sa1100_rtc_lock);
@@ -271,7 +272,7 @@ static int sa1100_rtc_ioctl(struct device *dev, unsigned int cmd,
 	case RTC_IRQP_READ:
 		return put_user(rtc_freq, (unsigned long *)arg);
 	case RTC_IRQP_SET:
-		if (arg < 1 || arg > TIMER_FREQ)
+		if (arg < 1 || arg > timer_freq)
 			return -EINVAL;
 		rtc_freq = arg;
 		return 0;
@@ -352,6 +353,8 @@ static int sa1100_rtc_probe(struct platform_device *pdev)
 {
 	struct rtc_device *rtc;
 
+	timer_freq = get_clock_tick_rate();
+
 	/*
 	 * According to the manual we should be able to let RTTR be zero
 	 * and then a default diviser for a 32.768KHz clock is used.
@@ -390,31 +393,34 @@ static int sa1100_rtc_remove(struct platform_device *pdev)
 }
 
 #ifdef CONFIG_PM
-static int sa1100_rtc_suspend(struct platform_device *pdev, pm_message_t state)
+static int sa1100_rtc_suspend(struct device *dev)
 {
-	if (device_may_wakeup(&pdev->dev))
+	if (device_may_wakeup(dev))
 		enable_irq_wake(IRQ_RTCAlrm);
 	return 0;
 }
 
-static int sa1100_rtc_resume(struct platform_device *pdev)
+static int sa1100_rtc_resume(struct device *dev)
 {
-	if (device_may_wakeup(&pdev->dev))
+	if (device_may_wakeup(dev))
 		disable_irq_wake(IRQ_RTCAlrm);
 	return 0;
 }
-#else
-#define sa1100_rtc_suspend	NULL
-#define sa1100_rtc_resume	NULL
+
+static struct dev_pm_ops sa1100_rtc_pm_ops = {
+	.suspend	= sa1100_rtc_suspend,
+	.resume		= sa1100_rtc_resume,
+};
 #endif
 
 static struct platform_driver sa1100_rtc_driver = {
 	.probe		= sa1100_rtc_probe,
 	.remove		= sa1100_rtc_remove,
-	.suspend	= sa1100_rtc_suspend,
-	.resume		= sa1100_rtc_resume,
 	.driver		= {
-		.name		= "sa1100-rtc",
+		.name	= "sa1100-rtc",
+#ifdef CONFIG_PM
+		.pm	= &sa1100_rtc_pm_ops,
+#endif
 	},
 };
 

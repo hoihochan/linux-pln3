@@ -38,6 +38,7 @@
 #include "dlmglue.h"
 #include "file.h"
 #include "inode.h"
+#include "super.h"
 
 
 static int ocfs2_dentry_revalidate(struct dentry *dentry,
@@ -81,6 +82,17 @@ static int ocfs2_dentry_revalidate(struct dentry *dentry,
 		     "dir = %d\n",
 		     (unsigned long long)OCFS2_I(inode)->ip_blkno,
 		     S_ISDIR(inode->i_mode));
+		goto bail;
+	}
+
+	/*
+	 * If the last lookup failed to create dentry lock, let us
+	 * redo it.
+	 */
+	if (!dentry->d_fsdata) {
+		mlog(0, "Inode %llu doesn't have dentry lock, "
+		     "returning false\n",
+		     (unsigned long long)OCFS2_I(inode)->ip_blkno);
 		goto bail;
 	}
 
@@ -289,9 +301,70 @@ out_attach:
 	else
 		mlog_errno(ret);
 
+	/*
+	 * In case of error, manually free the allocation and do the iput().
+	 * We need to do this because error here means no d_instantiate(),
+	 * which means iput() will not be called during dput(dentry).
+	 */
+	if (ret < 0 && !alias) {
+		ocfs2_lock_res_free(&dl->dl_lockres);
+		BUG_ON(dl->dl_count != 1);
+		spin_lock(&dentry_attach_lock);
+		dentry->d_fsdata = NULL;
+		spin_unlock(&dentry_attach_lock);
+		kfree(dl);
+		iput(inode);
+	}
+
 	dput(alias);
 
 	return ret;
+}
+
+DEFINE_SPINLOCK(dentry_list_lock);
+
+/* We limit the number of dentry locks to drop in one go. We have
+ * this limit so that we don't starve other users of ocfs2_wq. */
+#define DL_INODE_DROP_COUNT 64
+
+/* Drop inode references from dentry locks */
+static void __ocfs2_drop_dl_inodes(struct ocfs2_super *osb, int drop_count)
+{
+	struct ocfs2_dentry_lock *dl;
+
+	spin_lock(&dentry_list_lock);
+	while (osb->dentry_lock_list && (drop_count < 0 || drop_count--)) {
+		dl = osb->dentry_lock_list;
+		osb->dentry_lock_list = dl->dl_next;
+		spin_unlock(&dentry_list_lock);
+		iput(dl->dl_inode);
+		kfree(dl);
+		spin_lock(&dentry_list_lock);
+	}
+	spin_unlock(&dentry_list_lock);
+}
+
+void ocfs2_drop_dl_inodes(struct work_struct *work)
+{
+	struct ocfs2_super *osb = container_of(work, struct ocfs2_super,
+					       dentry_lock_work);
+
+	__ocfs2_drop_dl_inodes(osb, DL_INODE_DROP_COUNT);
+	/*
+	 * Don't queue dropping if umount is in progress. We flush the
+	 * list in ocfs2_dismount_volume
+	 */
+	spin_lock(&dentry_list_lock);
+	if (osb->dentry_lock_list &&
+	    !ocfs2_test_osb_flag(osb, OCFS2_OSB_DROP_DENTRY_LOCK_IMMED))
+		queue_work(ocfs2_wq, &osb->dentry_lock_work);
+	spin_unlock(&dentry_list_lock);
+}
+
+/* Flush the whole work queue */
+void ocfs2_drop_all_dl_inodes(struct ocfs2_super *osb)
+{
+	__ocfs2_drop_dl_inodes(osb, -1);
 }
 
 /*
@@ -318,16 +391,24 @@ out_attach:
 static void ocfs2_drop_dentry_lock(struct ocfs2_super *osb,
 				   struct ocfs2_dentry_lock *dl)
 {
-	iput(dl->dl_inode);
 	ocfs2_simple_drop_lockres(osb, &dl->dl_lockres);
 	ocfs2_lock_res_free(&dl->dl_lockres);
-	kfree(dl);
+
+	/* We leave dropping of inode reference to ocfs2_wq as that can
+	 * possibly lead to inode deletion which gets tricky */
+	spin_lock(&dentry_list_lock);
+	if (!osb->dentry_lock_list &&
+	    !ocfs2_test_osb_flag(osb, OCFS2_OSB_DROP_DENTRY_LOCK_IMMED))
+		queue_work(ocfs2_wq, &osb->dentry_lock_work);
+	dl->dl_next = osb->dentry_lock_list;
+	osb->dentry_lock_list = dl;
+	spin_unlock(&dentry_list_lock);
 }
 
 void ocfs2_dentry_lock_put(struct ocfs2_super *osb,
 			   struct ocfs2_dentry_lock *dl)
 {
-	int unlock = 0;
+	int unlock;
 
 	BUG_ON(dl->dl_count == 0);
 
@@ -419,7 +500,7 @@ out_move:
 	d_move(dentry, target);
 }
 
-struct dentry_operations ocfs2_dentry_ops = {
+const struct dentry_operations ocfs2_dentry_ops = {
 	.d_revalidate		= ocfs2_dentry_revalidate,
 	.d_iput			= ocfs2_dentry_iput,
 };

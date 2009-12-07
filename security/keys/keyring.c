@@ -16,6 +16,7 @@
 #include <linux/security.h>
 #include <linux/seq_file.h>
 #include <linux/err.h>
+#include <keys/keyring-type.h>
 #include <asm/uaccess.h>
 #include "internal.h"
 
@@ -244,14 +245,14 @@ static long keyring_read(const struct key *keyring,
  * allocate a keyring and link into the destination keyring
  */
 struct key *keyring_alloc(const char *description, uid_t uid, gid_t gid,
-			  struct task_struct *ctx, unsigned long flags,
+			  const struct cred *cred, unsigned long flags,
 			  struct key *dest)
 {
 	struct key *keyring;
 	int ret;
 
 	keyring = key_alloc(&key_type_keyring, description,
-			    uid, gid, ctx,
+			    uid, gid, cred,
 			    (KEY_POS_ALL & ~KEY_POS_SETATTR) | KEY_USR_ALL,
 			    flags);
 
@@ -280,7 +281,7 @@ struct key *keyring_alloc(const char *description, uid_t uid, gid_t gid,
  * - we propagate the possession attribute from the keyring ref to the key ref
  */
 key_ref_t keyring_search_aux(key_ref_t keyring_ref,
-			     struct task_struct *context,
+			     const struct cred *cred,
 			     struct key_type *type,
 			     const void *description,
 			     key_match_func_t match)
@@ -303,7 +304,7 @@ key_ref_t keyring_search_aux(key_ref_t keyring_ref,
 	key_check(keyring);
 
 	/* top keyring must have search permission to begin the search */
-        err = key_task_permission(keyring_ref, context, KEY_SEARCH);
+        err = key_task_permission(keyring_ref, cred, KEY_SEARCH);
 	if (err < 0) {
 		key_ref = ERR_PTR(err);
 		goto error;
@@ -376,7 +377,7 @@ descend:
 
 		/* key must have search permissions */
 		if (key_task_permission(make_key_ref(key, possessed),
-					context, KEY_SEARCH) < 0)
+					cred, KEY_SEARCH) < 0)
 			continue;
 
 		/* we set a different error code if we pass a negative key */
@@ -403,7 +404,7 @@ ascend:
 			continue;
 
 		if (key_task_permission(make_key_ref(key, possessed),
-					context, KEY_SEARCH) < 0)
+					cred, KEY_SEARCH) < 0)
 			continue;
 
 		/* stack the current position */
@@ -458,7 +459,7 @@ key_ref_t keyring_search(key_ref_t keyring,
 	if (!type->match)
 		return ERR_PTR(-ENOKEY);
 
-	return keyring_search_aux(keyring, current,
+	return keyring_search_aux(keyring, current->cred,
 				  type, description, type->match);
 
 } /* end keyring_search() */
@@ -538,6 +539,9 @@ struct key *find_keyring_by_name(const char *name, bool skip_perm_check)
 				    &keyring_name_hash[bucket],
 				    type_data.link
 				    ) {
+			if (keyring->user->user_ns != current_user_ns())
+				continue;
+
 			if (test_bit(KEY_FLAG_REVOKED, &keyring->flags))
 				continue;
 
@@ -996,3 +1000,102 @@ static void keyring_revoke(struct key *keyring)
 	}
 
 } /* end keyring_revoke() */
+
+/*
+ * Determine whether a key is dead
+ */
+static bool key_is_dead(struct key *key, time_t limit)
+{
+	return test_bit(KEY_FLAG_DEAD, &key->flags) ||
+		(key->expiry > 0 && key->expiry <= limit);
+}
+
+/*
+ * Collect garbage from the contents of a keyring
+ */
+void keyring_gc(struct key *keyring, time_t limit)
+{
+	struct keyring_list *klist, *new;
+	struct key *key;
+	int loop, keep, max;
+
+	kenter("{%x,%s}", key_serial(keyring), keyring->description);
+
+	down_write(&keyring->sem);
+
+	klist = keyring->payload.subscriptions;
+	if (!klist)
+		goto no_klist;
+
+	/* work out how many subscriptions we're keeping */
+	keep = 0;
+	for (loop = klist->nkeys - 1; loop >= 0; loop--)
+		if (!key_is_dead(klist->keys[loop], limit))
+			keep++;
+
+	if (keep == klist->nkeys)
+		goto just_return;
+
+	/* allocate a new keyring payload */
+	max = roundup(keep, 4);
+	new = kmalloc(sizeof(struct keyring_list) + max * sizeof(struct key *),
+		      GFP_KERNEL);
+	if (!new)
+		goto nomem;
+	new->maxkeys = max;
+	new->nkeys = 0;
+	new->delkey = 0;
+
+	/* install the live keys
+	 * - must take care as expired keys may be updated back to life
+	 */
+	keep = 0;
+	for (loop = klist->nkeys - 1; loop >= 0; loop--) {
+		key = klist->keys[loop];
+		if (!key_is_dead(key, limit)) {
+			if (keep >= max)
+				goto discard_new;
+			new->keys[keep++] = key_get(key);
+		}
+	}
+	new->nkeys = keep;
+
+	/* adjust the quota */
+	key_payload_reserve(keyring,
+			    sizeof(struct keyring_list) +
+			    KEYQUOTA_LINK_BYTES * keep);
+
+	if (keep == 0) {
+		rcu_assign_pointer(keyring->payload.subscriptions, NULL);
+		kfree(new);
+	} else {
+		rcu_assign_pointer(keyring->payload.subscriptions, new);
+	}
+
+	up_write(&keyring->sem);
+
+	call_rcu(&klist->rcu, keyring_clear_rcu_disposal);
+	kleave(" [yes]");
+	return;
+
+discard_new:
+	new->nkeys = keep;
+	keyring_clear_rcu_disposal(&new->rcu);
+	up_write(&keyring->sem);
+	kleave(" [discard]");
+	return;
+
+just_return:
+	up_write(&keyring->sem);
+	kleave(" [no dead]");
+	return;
+
+no_klist:
+	up_write(&keyring->sem);
+	kleave(" [no_klist]");
+	return;
+
+nomem:
+	up_write(&keyring->sem);
+	kleave(" [oom]");
+}

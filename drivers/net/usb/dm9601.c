@@ -23,7 +23,7 @@
 #include <linux/usb/usbnet.h>
 
 /* datasheet:
- http://www.davicom.com.tw/big5/download/Data%20Sheet/DM9601-DS-P01-930914.pdf
+ http://ptm2.cc.utu.fi/ftp/network/cards/DM9601/From_NET/DM9601-DS-P01-930914.pdf
 */
 
 /* control requests */
@@ -123,10 +123,11 @@ static int dm_write_reg(struct usbnet *dev, u8 reg, u8 value)
 static void dm_write_async_callback(struct urb *urb)
 {
 	struct usb_ctrlrequest *req = (struct usb_ctrlrequest *)urb->context;
+	int status = urb->status;
 
-	if (urb->status < 0)
+	if (status < 0)
 		printk(KERN_DEBUG "dm_write_async_callback() failed with %d\n",
-		       urb->status);
+		       status);
 
 	kfree(req);
 	usb_free_urb(urb);
@@ -355,7 +356,7 @@ static int dm9601_ioctl(struct net_device *net, struct ifreq *rq, int cmd)
 	return generic_mii_ioctl(&dev->mii, if_mii(rq), cmd, NULL);
 }
 
-static struct ethtool_ops dm9601_ethtool_ops = {
+static const struct ethtool_ops dm9601_ethtool_ops = {
 	.get_drvinfo	= dm9601_get_drvinfo,
 	.get_link	= dm9601_get_link,
 	.get_msglevel	= usbnet_get_msglevel,
@@ -396,16 +397,50 @@ static void dm9601_set_multicast(struct net_device *net)
 	dm_write_reg_async(dev, DM_RX_CTRL, rx_ctl);
 }
 
+static void __dm9601_set_mac_address(struct usbnet *dev)
+{
+	dm_write_async(dev, DM_PHY_ADDR, ETH_ALEN, dev->net->dev_addr);
+}
+
+static int dm9601_set_mac_address(struct net_device *net, void *p)
+{
+	struct sockaddr *addr = p;
+	struct usbnet *dev = netdev_priv(net);
+
+	if (!is_valid_ether_addr(addr->sa_data)) {
+		dev_err(&net->dev, "not setting invalid mac address %pM\n",
+								addr->sa_data);
+		return -EINVAL;
+	}
+
+	memcpy(net->dev_addr, addr->sa_data, net->addr_len);
+	__dm9601_set_mac_address(dev);
+
+	return 0;
+}
+
+static const struct net_device_ops dm9601_netdev_ops = {
+	.ndo_open		= usbnet_open,
+	.ndo_stop		= usbnet_stop,
+	.ndo_start_xmit		= usbnet_start_xmit,
+	.ndo_tx_timeout		= usbnet_tx_timeout,
+	.ndo_change_mtu		= usbnet_change_mtu,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_do_ioctl 		= dm9601_ioctl,
+	.ndo_set_multicast_list = dm9601_set_multicast,
+	.ndo_set_mac_address	= dm9601_set_mac_address,
+};
+
 static int dm9601_bind(struct usbnet *dev, struct usb_interface *intf)
 {
 	int ret;
+	u8 mac[ETH_ALEN];
 
 	ret = usbnet_get_endpoints(dev, intf);
 	if (ret)
 		goto out;
 
-	dev->net->do_ioctl = dm9601_ioctl;
-	dev->net->set_multicast_list = dm9601_set_multicast;
+	dev->net->netdev_ops = &dm9601_netdev_ops;
 	dev->net->ethtool_ops = &dm9601_ethtool_ops;
 	dev->net->hard_header_len += DM_TX_OVERHEAD;
 	dev->hard_mtu = dev->net->mtu + dev->net->hard_header_len;
@@ -422,10 +457,22 @@ static int dm9601_bind(struct usbnet *dev, struct usb_interface *intf)
 	udelay(20);
 
 	/* read MAC */
-	if (dm_read(dev, DM_PHY_ADDR, ETH_ALEN, dev->net->dev_addr) < 0) {
+	if (dm_read(dev, DM_PHY_ADDR, ETH_ALEN, mac) < 0) {
 		printk(KERN_ERR "Error reading MAC address\n");
 		ret = -ENODEV;
 		goto out;
+	}
+
+	/*
+	 * Overwrite the auto-generated address only with good ones.
+	 */
+	if (is_valid_ether_addr(mac))
+		memcpy(dev->net->dev_addr, mac, ETH_ALEN);
+	else {
+		printk(KERN_WARNING
+			"dm9601: No valid MAC address in EEPROM, using %pM\n",
+			dev->net->dev_addr);
+		__dm9601_set_mac_address(dev);
 	}
 
 	/* power up phy */
@@ -450,10 +497,10 @@ static int dm9601_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 	int len;
 
 	/* format:
-	   b0: rx status
-	   b1: packet length (incl crc) low
-	   b2: packet length (incl crc) high
-	   b3..n-4: packet data
+	   b1: rx status
+	   b2: packet length (incl crc) low
+	   b3: packet length (incl crc) high
+	   b4..n-4: packet data
 	   bn-3..bn: ethernet crc
 	 */
 
@@ -466,11 +513,11 @@ static int dm9601_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 	len = (skb->data[1] | (skb->data[2] << 8)) - 4;
 
 	if (unlikely(status & 0xbf)) {
-		if (status & 0x01) dev->stats.rx_fifo_errors++;
-		if (status & 0x02) dev->stats.rx_crc_errors++;
-		if (status & 0x04) dev->stats.rx_frame_errors++;
-		if (status & 0x20) dev->stats.rx_missed_errors++;
-		if (status & 0x90) dev->stats.rx_length_errors++;
+		if (status & 0x01) dev->net->stats.rx_fifo_errors++;
+		if (status & 0x02) dev->net->stats.rx_crc_errors++;
+		if (status & 0x04) dev->net->stats.rx_frame_errors++;
+		if (status & 0x20) dev->net->stats.rx_missed_errors++;
+		if (status & 0x90) dev->net->stats.rx_length_errors++;
 		return 0;
 	}
 
@@ -486,8 +533,8 @@ static struct sk_buff *dm9601_tx_fixup(struct usbnet *dev, struct sk_buff *skb,
 	int len;
 
 	/* format:
-	   b0: packet length low
-	   b1: packet length high
+	   b1: packet length low
+	   b2: packet length high
 	   b3..n: packet data
 	*/
 
@@ -597,6 +644,14 @@ static const struct usb_device_id products[] = {
 	{
 	USB_DEVICE(0x0a47, 0x9601),	/* Hirose USB-100 */
 	.driver_info = (unsigned long)&dm9601_info,
+	 },
+	{
+	USB_DEVICE(0x0fe6, 0x8101),	/* DM9601 USB to Fast Ethernet Adapter */
+	.driver_info = (unsigned long)&dm9601_info,
+	 },
+	{
+	 USB_DEVICE(0x0a46, 0x9000),	/* DM9000E */
+	 .driver_info = (unsigned long)&dm9601_info,
 	 },
 	{},			// END
 };

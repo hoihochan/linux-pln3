@@ -13,10 +13,13 @@
 
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/gpio.h>
 #include <linux/i2c.h>
 #include <linux/i2c/pca953x.h>
-
-#include <asm/gpio.h>
+#ifdef CONFIG_OF_GPIO
+#include <linux/of_platform.h>
+#include <linux/of_gpio.h>
+#endif
 
 #define PCA953X_INPUT          0
 #define PCA953X_OUTPUT         1
@@ -32,8 +35,15 @@ static const struct i2c_device_id pca953x_id[] = {
 	{ "pca9539", 16, },
 	{ "pca9554", 8, },
 	{ "pca9555", 16, },
+	{ "pca9556", 8, },
 	{ "pca9557", 8, },
+
 	{ "max7310", 8, },
+	{ "max7315", 8, },
+	{ "pca6107", 8, },
+	{ "tca6408", 8, },
+	{ "tca6416", 16, },
+	/* NYET:  { "tca6424", 24, }, */
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, pca953x_id);
@@ -44,12 +54,11 @@ struct pca953x_chip {
 	uint16_t reg_direction;
 
 	struct i2c_client *client;
+	struct pca953x_platform_data *dyn_pdata;
 	struct gpio_chip gpio_chip;
+	char **names;
 };
 
-/* NOTE:  we can't currently rely on fault codes to come from SMBus
- * calls, so we map all errors to EIO here and return zero otherwise.
- */
 static int pca953x_write_reg(struct pca953x_chip *chip, int reg, uint16_t val)
 {
 	int ret;
@@ -61,7 +70,7 @@ static int pca953x_write_reg(struct pca953x_chip *chip, int reg, uint16_t val)
 
 	if (ret < 0) {
 		dev_err(&chip->client->dev, "failed writing register\n");
-		return -EIO;
+		return ret;
 	}
 
 	return 0;
@@ -78,7 +87,7 @@ static int pca953x_read_reg(struct pca953x_chip *chip, int reg, uint16_t *val)
 
 	if (ret < 0) {
 		dev_err(&chip->client->dev, "failed reading register\n");
-		return -EIO;
+		return ret;
 	}
 
 	*val = (uint16_t)ret;
@@ -190,7 +199,56 @@ static void pca953x_setup_gpio(struct pca953x_chip *chip, int gpios)
 	gc->label = chip->client->name;
 	gc->dev = &chip->client->dev;
 	gc->owner = THIS_MODULE;
+	gc->names = chip->names;
 }
+
+/*
+ * Handlers for alternative sources of platform_data
+ */
+#ifdef CONFIG_OF_GPIO
+/*
+ * Translate OpenFirmware node properties into platform_data
+ */
+static struct pca953x_platform_data *
+pca953x_get_alt_pdata(struct i2c_client *client)
+{
+	struct pca953x_platform_data *pdata;
+	struct device_node *node;
+	const uint16_t *val;
+
+	node = dev_archdata_get_node(&client->dev.archdata);
+	if (node == NULL)
+		return NULL;
+
+	pdata = kzalloc(sizeof(struct pca953x_platform_data), GFP_KERNEL);
+	if (pdata == NULL) {
+		dev_err(&client->dev, "Unable to allocate platform_data\n");
+		return NULL;
+	}
+
+	pdata->gpio_base = -1;
+	val = of_get_property(node, "linux,gpio-base", NULL);
+	if (val) {
+		if (*val < 0)
+			dev_warn(&client->dev,
+				 "invalid gpio-base in device tree\n");
+		else
+			pdata->gpio_base = *val;
+	}
+
+	val = of_get_property(node, "polarity", NULL);
+	if (val)
+		pdata->invert = *val;
+
+	return pdata;
+}
+#else
+static struct pca953x_platform_data *
+pca953x_get_alt_pdata(struct i2c_client *client)
+{
+	return NULL;
+}
+#endif
 
 static int __devinit pca953x_probe(struct i2c_client *client,
 				   const struct i2c_device_id *id)
@@ -199,17 +257,31 @@ static int __devinit pca953x_probe(struct i2c_client *client,
 	struct pca953x_chip *chip;
 	int ret;
 
-	pdata = client->dev.platform_data;
-	if (pdata == NULL)
-		return -ENODEV;
-
 	chip = kzalloc(sizeof(struct pca953x_chip), GFP_KERNEL);
 	if (chip == NULL)
 		return -ENOMEM;
 
+	pdata = client->dev.platform_data;
+	if (pdata == NULL) {
+		pdata = pca953x_get_alt_pdata(client);
+		/*
+		 * Unlike normal platform_data, this is allocated
+		 * dynamically and must be freed in the driver
+		 */
+		chip->dyn_pdata = pdata;
+	}
+
+	if (pdata == NULL) {
+		dev_dbg(&client->dev, "no platform data\n");
+		ret = -EINVAL;
+		goto out_failed;
+	}
+
 	chip->client = client;
 
 	chip->gpio_start = pdata->gpio_base;
+
+	chip->names = pdata->names;
 
 	/* initialize cached registers from their original values.
 	 * we can't share this chip with another i2c master.
@@ -245,6 +317,7 @@ static int __devinit pca953x_probe(struct i2c_client *client,
 	return 0;
 
 out_failed:
+	kfree(chip->dyn_pdata);
 	kfree(chip);
 	return ret;
 }
@@ -272,6 +345,7 @@ static int pca953x_remove(struct i2c_client *client)
 		return ret;
 	}
 
+	kfree(chip->dyn_pdata);
 	kfree(chip);
 	return 0;
 }
@@ -289,7 +363,10 @@ static int __init pca953x_init(void)
 {
 	return i2c_add_driver(&pca953x_driver);
 }
-module_init(pca953x_init);
+/* register after i2c postcore initcall and before
+ * subsys initcalls that may rely on these GPIOs
+ */
+subsys_initcall(pca953x_init);
 
 static void __exit pca953x_exit(void)
 {

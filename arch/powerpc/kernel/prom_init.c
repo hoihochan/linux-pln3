@@ -44,10 +44,7 @@
 #include <asm/sections.h>
 #include <asm/machdep.h>
 
-#ifdef CONFIG_LOGO_LINUX_CLUT224
 #include <linux/linux_logo.h>
-extern const struct linux_logo logo_linux_clut224;
-#endif
 
 /*
  * Properties whose value is longer than this get excluded from our
@@ -192,6 +189,8 @@ static unsigned long __initdata prom_tce_alloc_end;
 static int __initdata of_platform;
 
 static char __initdata prom_cmd_line[COMMAND_LINE_SIZE];
+
+static unsigned long __initdata prom_memory_limit;
 
 static unsigned long __initdata alloc_top;
 static unsigned long __initdata alloc_top_high;
@@ -555,9 +554,8 @@ unsigned long prom_memparse(const char *ptr, const char **retptr)
 static void __init early_cmdline_parse(void)
 {
 	struct prom_t *_prom = &RELOC(prom);
-#ifdef CONFIG_PPC64
 	const char *opt;
-#endif
+
 	char *p;
 	int l = 0;
 
@@ -585,6 +583,15 @@ static void __init early_cmdline_parse(void)
 			RELOC(prom_iommu_force_on) = 1;
 	}
 #endif
+	opt = strstr(RELOC(prom_cmd_line), RELOC("mem="));
+	if (opt) {
+		opt += 4;
+		RELOC(prom_memory_limit) = prom_memparse(opt, (const char **)&opt);
+#ifdef CONFIG_PPC64
+		/* Align to 16 MB == size of ppc64 large page */
+		RELOC(prom_memory_limit) = ALIGN(RELOC(prom_memory_limit), 0x1000000);
+#endif
+	}
 }
 
 #ifdef CONFIG_PPC_PSERIES
@@ -675,7 +682,7 @@ static unsigned char ibm_architecture_vec[] = {
 	W(0xffffffff),			/* virt_base */
 	W(0xffffffff),			/* virt_size */
 	W(0xffffffff),			/* load_base */
-	W(64),				/* 128MB min RMA */
+	W(64),				/* 64MB min RMA */
 	W(0xffffffff),			/* full client load */
 	0,				/* min RMA percentage of total RAM */
 	48,				/* max log_2(hash table size) */
@@ -793,18 +800,21 @@ static void __init prom_send_capabilities(void)
 	root = call_prom("open", 1, 1, ADDR("/"));
 	if (root != 0) {
 		/* try calling the ibm,client-architecture-support method */
+		prom_printf("Calling ibm,client-architecture-support...");
 		if (call_prom_ret("call-method", 3, 2, &ret,
 				  ADDR("ibm,client-architecture-support"),
 				  root,
 				  ADDR(ibm_architecture_vec)) == 0) {
 			/* the call exists... */
 			if (ret)
-				prom_printf("WARNING: ibm,client-architecture"
+				prom_printf("\nWARNING: ibm,client-architecture"
 					    "-support call FAILED!\n");
 			call_prom("close", 1, 0, root);
+			prom_printf(" done\n");
 			return;
 		}
 		call_prom("close", 1, 0, root);
+		prom_printf(" not implemented\n");
 	}
 
 	/* no ibm,client-architecture-support call, try the old way */
@@ -1089,6 +1099,29 @@ static void __init prom_init_mem(void)
 	}
 
 	/*
+	 * If prom_memory_limit is set we reduce the upper limits *except* for
+	 * alloc_top_high. This must be the real top of RAM so we can put
+	 * TCE's up there.
+	 */
+
+	RELOC(alloc_top_high) = RELOC(ram_top);
+
+	if (RELOC(prom_memory_limit)) {
+		if (RELOC(prom_memory_limit) <= RELOC(alloc_bottom)) {
+			prom_printf("Ignoring mem=%x <= alloc_bottom.\n",
+				RELOC(prom_memory_limit));
+			RELOC(prom_memory_limit) = 0;
+		} else if (RELOC(prom_memory_limit) >= RELOC(ram_top)) {
+			prom_printf("Ignoring mem=%x >= ram_top.\n",
+				RELOC(prom_memory_limit));
+			RELOC(prom_memory_limit) = 0;
+		} else {
+			RELOC(ram_top) = RELOC(prom_memory_limit);
+			RELOC(rmo_top) = min(RELOC(rmo_top), RELOC(prom_memory_limit));
+		}
+	}
+
+	/*
 	 * Setup our top alloc point, that is top of RMO or top of
 	 * segment 0 when running non-LPAR.
 	 * Some RS64 machines have buggy firmware where claims up at
@@ -1103,6 +1136,7 @@ static void __init prom_init_mem(void)
 	RELOC(alloc_top_high) = RELOC(ram_top);
 
 	prom_printf("memory layout at init:\n");
+	prom_printf("  memory_limit : %x (16 MB aligned)\n", RELOC(prom_memory_limit));
 	prom_printf("  alloc_bottom : %x\n", RELOC(alloc_bottom));
 	prom_printf("  alloc_top    : %x\n", RELOC(alloc_top));
 	prom_printf("  alloc_top_hi : %x\n", RELOC(alloc_top_high));
@@ -1144,7 +1178,7 @@ static void __init prom_instantiate_rtas(void)
 		return;
 	}
 
-	prom_printf("instantiating rtas at 0x%x ...", base);
+	prom_printf("instantiating rtas at 0x%x...", base);
 
 	if (call_prom_ret("call-method", 3, 2, &entry,
 			  ADDR("instantiate-rtas"),
@@ -1271,7 +1305,7 @@ static void __init prom_initialize_tce_table(void)
 		/* Initialize the table to have a one-to-one mapping
 		 * over the allocated size.
 		 */
-		tce_entryp = (unsigned long *)base;
+		tce_entryp = (u64 *)base;
 		for (i = 0; i < (minsize >> 3) ;tce_entryp++, i++) {
 			tce_entry = (i << PAGE_SHIFT);
 			tce_entry |= 0x3;
@@ -1321,10 +1355,6 @@ static void __init prom_initialize_tce_table(void)
  *
  * -- Cort
  */
-extern void __secondary_hold(void);
-extern unsigned long __secondary_hold_spinloop;
-extern unsigned long __secondary_hold_acknowledge;
-
 /*
  * We want to reference the copy of __secondary_hold_* in the
  * 0 - 0x100 address range
@@ -1342,13 +1372,7 @@ static void __init prom_hold_cpus(void)
 		= (void *) LOW_ADDR(__secondary_hold_spinloop);
 	unsigned long *acknowledge
 		= (void *) LOW_ADDR(__secondary_hold_acknowledge);
-#ifdef CONFIG_PPC64
-	/* __secondary_hold is actually a descriptor, not the text address */
-	unsigned long secondary_hold
-		= __pa(*PTRRELOC((unsigned long *)__secondary_hold));
-#else
 	unsigned long secondary_hold = LOW_ADDR(__secondary_hold);
-#endif
 
 	prom_debug("prom_hold_cpus: start...\n");
 	prom_debug("    1) spinloop       = 0x%x\n", (unsigned long)spinloop);
@@ -1562,7 +1586,7 @@ static int __init prom_find_machine_type(void)
 		return PLATFORM_GENERIC;
 	x = prom_getproplen(rtas, "ibm,hypertas-functions");
 	if (x != PROM_ERROR) {
-		prom_printf("Hypertas detected, assuming LPAR !\n");
+		prom_debug("Hypertas detected, assuming LPAR !\n");
 		return PLATFORM_PSERIES_LPAR;
 	}
 	return PLATFORM_PSERIES;
@@ -1611,7 +1635,7 @@ static void __init prom_check_displays(void)
 	};
 	const unsigned char *clut;
 
-	prom_printf("Looking for displays\n");
+	prom_debug("Looking for displays\n");
 	for (node = 0; prom_next_node(&node); ) {
 		memset(type, 0, sizeof(type));
 		prom_getprop(node, "device_type", type, sizeof(type));
@@ -1629,7 +1653,7 @@ static void __init prom_check_displays(void)
 		if (call_prom("package-to-path", 3, 1, node, path,
 			      PROM_SCRATCH_SIZE-10) == PROM_ERROR)
 			continue;
-		prom_printf("found display   : %s, opening ... ", path);
+		prom_printf("found display   : %s, opening... ", path);
 		
 		ih = call_prom("open", 1, 1, path);
 		if (ih == 0) {
@@ -2015,8 +2039,47 @@ static void __init fixup_device_tree_maple(void)
 	prom_setprop(isa, name, "ranges",
 			isa_ranges, sizeof(isa_ranges));
 }
+
+#define CPC925_MC_START		0xf8000000
+#define CPC925_MC_LENGTH	0x1000000
+/* The values for memory-controller don't have right number of cells */
+static void __init fixup_device_tree_maple_memory_controller(void)
+{
+	phandle mc;
+	u32 mc_reg[4];
+	char *name = "/hostbridge@f8000000";
+	struct prom_t *_prom = &RELOC(prom);
+	u32 ac, sc;
+
+	mc = call_prom("finddevice", 1, 1, ADDR(name));
+	if (!PHANDLE_VALID(mc))
+		return;
+
+	if (prom_getproplen(mc, "reg") != 8)
+		return;
+
+	prom_getprop(_prom->root, "#address-cells", &ac, sizeof(ac));
+	prom_getprop(_prom->root, "#size-cells", &sc, sizeof(sc));
+	if ((ac != 2) || (sc != 2))
+		return;
+
+	if (prom_getprop(mc, "reg", mc_reg, sizeof(mc_reg)) == PROM_ERROR)
+		return;
+
+	if (mc_reg[0] != CPC925_MC_START || mc_reg[1] != CPC925_MC_LENGTH)
+		return;
+
+	prom_printf("Fixing up bogus hostbridge on Maple...\n");
+
+	mc_reg[0] = 0x0;
+	mc_reg[1] = CPC925_MC_START;
+	mc_reg[2] = 0x0;
+	mc_reg[3] = CPC925_MC_LENGTH;
+	prom_setprop(mc, name, "reg", mc_reg, sizeof(mc_reg));
+}
 #else
 #define fixup_device_tree_maple()
+#define fixup_device_tree_maple_memory_controller()
 #endif
 
 #ifdef CONFIG_PPC_CHRP
@@ -2257,6 +2320,7 @@ static void __init fixup_device_tree_efika(void)
 static void __init fixup_device_tree(void)
 {
 	fixup_device_tree_maple();
+	fixup_device_tree_maple_memory_controller();
 	fixup_device_tree_chrp();
 	fixup_device_tree_pmac();
 	fixup_device_tree_efika();
@@ -2315,13 +2379,14 @@ static void __init prom_check_initrd(unsigned long r3, unsigned long r4)
 
 unsigned long __init prom_init(unsigned long r3, unsigned long r4,
 			       unsigned long pp,
-			       unsigned long r6, unsigned long r7)
+			       unsigned long r6, unsigned long r7,
+			       unsigned long kbase)
 {	
 	struct prom_t *_prom;
 	unsigned long hdr;
-	unsigned long offset = reloc_offset();
 
 #ifdef CONFIG_PPC32
+	unsigned long offset = reloc_offset();
 	reloc_got2(offset);
 #endif
 
@@ -2349,15 +2414,19 @@ unsigned long __init prom_init(unsigned long r3, unsigned long r4,
 	 */
 	prom_init_stdout();
 
+	prom_printf("Preparing to boot %s", RELOC(linux_banner));
+
 	/*
 	 * Get default machine type. At this point, we do not differentiate
 	 * between pSeries SMP and pSeries LPAR
 	 */
 	RELOC(of_platform) = prom_find_machine_type();
 
+#ifndef CONFIG_RELOCATABLE
 	/* Bail if this is a kdump kernel. */
 	if (PHYSICAL_START > 0)
 		prom_panic("Error: You can't boot a kdump kernel from OF!\n");
+#endif
 
 	/*
 	 * Check for an initrd
@@ -2377,7 +2446,7 @@ unsigned long __init prom_init(unsigned long r3, unsigned long r4,
 	 * Copy the CPU hold code
 	 */
 	if (RELOC(of_platform) != PLATFORM_POWERMAC)
-		copy_and_flush(0, KERNELBASE + offset, 0x100, 0);
+		copy_and_flush(0, kbase, 0x100, 0);
 
 	/*
 	 * Do early parsing of command line
@@ -2422,6 +2491,10 @@ unsigned long __init prom_init(unsigned long r3, unsigned long r4,
 	/*
 	 * Fill in some infos for use by the kernel later on
 	 */
+	if (RELOC(prom_memory_limit))
+		prom_setprop(_prom->chosen, "/chosen", "linux,memory-limit",
+			     &RELOC(prom_memory_limit),
+			     sizeof(prom_memory_limit));
 #ifdef CONFIG_PPC64
 	if (RELOC(prom_iommu_off))
 		prom_setprop(_prom->chosen, "/chosen", "linux,iommu-off",
@@ -2449,7 +2522,7 @@ unsigned long __init prom_init(unsigned long r3, unsigned long r4,
 	/*
 	 * Now finally create the flattened device-tree
 	 */
-	prom_printf("copying OF device tree ...\n");
+	prom_printf("copying OF device tree...\n");
 	flatten_device_tree();
 
 	/*
@@ -2464,7 +2537,7 @@ unsigned long __init prom_init(unsigned long r3, unsigned long r4,
 	 * Call OF "quiesce" method to shut down pending DMA's from
 	 * devices etc...
 	 */
-	prom_printf("Calling quiesce ...\n");
+	prom_printf("Calling quiesce...\n");
 	call_prom("quiesce", 0, 0);
 
 	/*
@@ -2480,7 +2553,7 @@ unsigned long __init prom_init(unsigned long r3, unsigned long r4,
 	reloc_got2(-offset);
 #endif
 
-	__start(hdr, KERNELBASE + offset, 0);
+	__start(hdr, kbase, 0);
 
 	return 0;
 }

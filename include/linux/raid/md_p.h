@@ -15,6 +15,8 @@
 #ifndef _MD_P_H
 #define _MD_P_H
 
+#include <linux/types.h>
+
 /*
  * RAID superblock.
  *
@@ -194,6 +196,8 @@ static inline __u64 md_event(mdp_super_t *sb) {
 	return (ev<<32)| sb->events_lo;
 }
 
+#define MD_SUPERBLOCK_1_TIME_SEC_MASK ((1ULL<<40) - 1)
+
 /*
  * The version-1 superblock :
  * All numeric fields are little-endian.
@@ -228,7 +232,7 @@ struct mdp_superblock_1 {
 	__le64	reshape_position;	/* next address in array-space for reshape */
 	__le32	delta_disks;	/* change in number of raid_disks		*/
 	__le32	new_layout;	/* new layout					*/
-	__le32	new_chunk;	/* new chunk size (bytes)			*/
+	__le32	new_chunk;	/* new chunk size (512byte sectors)		*/
 	__u8	pad1[128-124];	/* set to 0 when written */
 
 	/* constant this-device information - 64 bytes */

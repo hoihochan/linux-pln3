@@ -75,11 +75,10 @@ static int initial_wait;
 
 /* Function prototypes for an ipaq */
 static int  ipaq_open(struct tty_struct *tty,
-			struct usb_serial_port *port, struct file *filp);
-static void ipaq_close(struct tty_struct *tty,
-			struct usb_serial_port *port, struct file *filp);
+			struct usb_serial_port *port);
+static void ipaq_close(struct usb_serial_port *port);
+static int  ipaq_calc_num_ports(struct usb_serial *serial);
 static int  ipaq_startup(struct usb_serial *serial);
-static void ipaq_shutdown(struct usb_serial *serial);
 static int ipaq_write(struct tty_struct *tty, struct usb_serial_port *port,
 			const unsigned char *buf, int count);
 static int ipaq_write_bulk(struct usb_serial_port *port,
@@ -572,16 +571,10 @@ static struct usb_serial_driver ipaq_device = {
 	.description =		"PocketPC PDA",
 	.usb_driver = 		&ipaq_driver,
 	.id_table =		ipaq_id_table,
-	/*
-	 * some devices have an extra endpoint, which
-	 * must be ignored as it would make the core
-	 * create a second port which oopses when used
-	 */
-	.num_ports =		1,
 	.open =			ipaq_open,
 	.close =		ipaq_close,
 	.attach =		ipaq_startup,
-	.shutdown =		ipaq_shutdown,
+	.calc_num_ports =	ipaq_calc_num_ports,
 	.write =		ipaq_write,
 	.write_room =		ipaq_write_room,
 	.chars_in_buffer =	ipaq_chars_in_buffer,
@@ -594,7 +587,7 @@ static int		bytes_in;
 static int		bytes_out;
 
 static int ipaq_open(struct tty_struct *tty,
-			struct usb_serial_port *port, struct file *filp)
+			struct usb_serial_port *port)
 {
 	struct usb_serial	*serial = port->serial;
 	struct ipaq_private	*priv;
@@ -608,7 +601,7 @@ static int ipaq_open(struct tty_struct *tty,
 	bytes_out = 0;
 	priv = kmalloc(sizeof(struct ipaq_private), GFP_KERNEL);
 	if (priv == NULL) {
-		err("%s - Out of memory", __func__);
+		dev_err(&port->dev, "%s - Out of memory\n", __func__);
 		return -ENOMEM;
 	}
 	usb_set_serial_port_data(port, priv);
@@ -635,11 +628,6 @@ static int ipaq_open(struct tty_struct *tty,
 		priv->free_len += PACKET_SIZE;
 	}
 
-	if (tty) {
-		/* FIXME: These two are bogus */
-		tty->raw = 1;
-		tty->real_raw = 1;
-	}
 	/*
 	 * Lose the small buffers usbserial provides. Make larger ones.
 	 */
@@ -687,8 +675,7 @@ static int ipaq_open(struct tty_struct *tty,
 	}
 
 	if (!retries && result) {
-		err("%s - failed doing control urb, error %d", __func__,
-		    result);
+		dev_err(&port->dev, "%s - failed doing control urb, error %d\n",			__func__, result);
 		goto error;
 	}
 
@@ -701,8 +688,9 @@ static int ipaq_open(struct tty_struct *tty,
 
 	result = usb_submit_urb(port->read_urb, GFP_KERNEL);
 	if (result) {
-		err("%s - failed submitting read urb, error %d",
-						__func__, result);
+		dev_err(&port->dev,
+			"%s - failed submitting read urb, error %d\n",
+			__func__, result);
 		goto error;
 	}
 
@@ -710,7 +698,7 @@ static int ipaq_open(struct tty_struct *tty,
 
 enomem:
 	result = -ENOMEM;
-	err("%s - Out of memory", __func__);
+	dev_err(&port->dev, "%s - Out of memory\n", __func__);
 error:
 	ipaq_destroy_lists(port);
 	kfree(priv);
@@ -718,8 +706,7 @@ error:
 }
 
 
-static void ipaq_close(struct tty_struct *tty,
-			struct usb_serial_port *port, struct file *filp)
+static void ipaq_close(struct usb_serial_port *port)
 {
 	struct ipaq_private	*priv = usb_get_serial_port_data(port);
 
@@ -758,13 +745,14 @@ static void ipaq_read_bulk_callback(struct urb *urb)
 	usb_serial_debug_data(debug, &port->dev, __func__,
 						urb->actual_length, data);
 
-	tty = port->port.tty;
+	tty = tty_port_tty_get(&port->port);
 	if (tty && urb->actual_length) {
 		tty_buffer_request_room(tty, urb->actual_length);
 		tty_insert_flip_string(tty, data, urb->actual_length);
 		tty_flip_buffer_push(tty);
 		bytes_in += urb->actual_length;
 	}
+	tty_kref_put(tty);
 
 	/* Continue trying to always read  */
 	usb_fill_bulk_urb(port->read_urb, port->serial->dev,
@@ -774,8 +762,9 @@ static void ipaq_read_bulk_callback(struct urb *urb)
 	    ipaq_read_bulk_callback, port);
 	result = usb_submit_urb(port->read_urb, GFP_ATOMIC);
 	if (result)
-		err("%s - failed resubmitting read urb, error %d",
-							__func__, result);
+		dev_err(&port->dev,
+			"%s - failed resubmitting read urb, error %d\n",
+			__func__, result);
 	return;
 }
 
@@ -840,7 +829,8 @@ static int ipaq_write_bulk(struct usb_serial_port *port,
 		spin_unlock_irqrestore(&write_list_lock, flags);
 		result = usb_submit_urb(port->write_urb, GFP_ATOMIC);
 		if (result)
-			err("%s - failed submitting write urb, error %d",
+			dev_err(&port->dev,
+				"%s - failed submitting write urb, error %d\n",
 				__func__, result);
 	} else {
 		spin_unlock_irqrestore(&write_list_lock, flags);
@@ -902,8 +892,9 @@ static void ipaq_write_bulk_callback(struct urb *urb)
 		spin_unlock_irqrestore(&write_list_lock, flags);
 		result = usb_submit_urb(port->write_urb, GFP_ATOMIC);
 		if (result)
-			err("%s - failed submitting write urb, error %d",
-					__func__, result);
+			dev_err(&port->dev,
+				"%s - failed submitting write urb, error %d\n",
+				__func__, result);
 	} else {
 		priv->active = 0;
 		spin_unlock_irqrestore(&write_list_lock, flags);
@@ -946,20 +937,59 @@ static void ipaq_destroy_lists(struct usb_serial_port *port)
 }
 
 
+static int ipaq_calc_num_ports(struct usb_serial *serial)
+{
+	/*
+	 * some devices have 3 endpoints, the 3rd of which
+	 * must be ignored as it would make the core
+	 * create a second port which oopses when used
+	 */
+	int ipaq_num_ports = 1;
+
+	dbg("%s - numberofendpoints: %d", __FUNCTION__,
+		(int)serial->interface->cur_altsetting->desc.bNumEndpoints);
+
+	/*
+	 * a few devices have 4 endpoints, seemingly Yakuma devices,
+	 * and we need the second pair, so let them have 2 ports
+	 *
+	 * TODO: can we drop port 1 ?
+	 */
+	if (serial->interface->cur_altsetting->desc.bNumEndpoints > 3) {
+		ipaq_num_ports = 2;
+	}
+
+	return ipaq_num_ports;
+}
+
+
 static int ipaq_startup(struct usb_serial *serial)
 {
 	dbg("%s", __func__);
+
+	/* Some of the devices in ipaq_id_table[] are composite, and we
+	 * shouldn't bind to all the interfaces.  This test will rule out
+	 * some obviously invalid possibilities.
+	 */
+	if (serial->num_bulk_in < serial->num_ports ||
+			serial->num_bulk_out < serial->num_ports)
+		return -ENODEV;
+
 	if (serial->dev->actconfig->desc.bConfigurationValue != 1) {
-		err("active config #%d != 1 ??",
+		/*
+		 * FIXME: HP iPaq rx3715, possibly others, have 1 config that
+		 * is labeled as 2
+		 */
+
+		dev_err(&serial->dev->dev, "active config #%d != 1 ??\n",
 			serial->dev->actconfig->desc.bConfigurationValue);
 		return -ENODEV;
 	}
-	return usb_reset_configuration(serial->dev);
-}
 
-static void ipaq_shutdown(struct usb_serial *serial)
-{
-	dbg("%s", __func__);
+	dbg("%s - iPAQ module configured for %d ports",
+		__FUNCTION__, serial->num_ports);
+
+	return usb_reset_configuration(serial->dev);
 }
 
 static int __init ipaq_init(void)
@@ -969,7 +999,6 @@ static int __init ipaq_init(void)
 	retval = usb_serial_register(&ipaq_device);
 	if (retval)
 		goto failed_usb_serial_register;
-	info(DRIVER_DESC " " DRIVER_VERSION);
 	if (vendor) {
 		ipaq_id_table[0].idVendor = vendor;
 		ipaq_id_table[0].idProduct = product;
@@ -978,6 +1007,8 @@ static int __init ipaq_init(void)
 	if (retval)
 		goto failed_usb_register;
 
+	printk(KERN_INFO KBUILD_MODNAME ": " DRIVER_VERSION ":"
+	       DRIVER_DESC "\n");
 	return 0;
 failed_usb_register:
 	usb_serial_deregister(&ipaq_device);

@@ -54,7 +54,7 @@ struct driver_private {
  */
 struct class_private {
 	struct kset class_subsys;
-	struct list_head class_devices;
+	struct klist class_devices;
 	struct list_head class_interfaces;
 	struct kset class_dirs;
 	struct mutex class_mutex;
@@ -62,6 +62,37 @@ struct class_private {
 };
 #define to_class(obj)	\
 	container_of(obj, struct class_private, class_subsys.kobj)
+
+/**
+ * struct device_private - structure to hold the private to the driver core portions of the device structure.
+ *
+ * @klist_children - klist containing all children of this device
+ * @knode_parent - node in sibling list
+ * @knode_driver - node in driver list
+ * @knode_bus - node in bus list
+ * @driver_data - private pointer for driver specific info.  Will turn into a
+ * list soon.
+ * @device - pointer back to the struct class that this structure is
+ * associated with.
+ *
+ * Nothing outside of the driver core should ever touch these fields.
+ */
+struct device_private {
+	struct klist klist_children;
+	struct klist_node knode_parent;
+	struct klist_node knode_driver;
+	struct klist_node knode_bus;
+	void *driver_data;
+	struct device *device;
+};
+#define to_device_private_parent(obj)	\
+	container_of(obj, struct device_private, knode_parent)
+#define to_device_private_driver(obj)	\
+	container_of(obj, struct device_private, knode_driver)
+#define to_device_private_bus(obj)	\
+	container_of(obj, struct device_private, knode_bus)
+
+extern int device_private_init(struct device *dev);
 
 /* initialisation functions */
 extern int devices_init(void);
@@ -78,7 +109,7 @@ extern int system_bus_init(void);
 extern int cpu_dev_init(void);
 
 extern int bus_add_device(struct device *dev);
-extern void bus_attach_device(struct device *dev);
+extern void bus_probe_device(struct device *dev);
 extern void bus_remove_device(struct device *dev);
 
 extern int bus_add_driver(struct device_driver *drv);
@@ -86,10 +117,13 @@ extern void bus_remove_driver(struct device_driver *drv);
 
 extern void driver_detach(struct device_driver *drv);
 extern int driver_probe_device(struct device_driver *drv, struct device *dev);
+static inline int driver_match_device(struct device_driver *drv,
+				      struct device *dev)
+{
+	return drv->bus->match ? drv->bus->match(dev, drv) : 1;
+}
 
 extern void sysdev_shutdown(void);
-extern int sysdev_suspend(pm_message_t state);
-extern int sysdev_resume(void);
 
 extern char *make_class_name(const char *name, struct kobject *kobj);
 
@@ -104,4 +138,10 @@ extern void module_remove_driver(struct device_driver *drv);
 static inline void module_add_driver(struct module *mod,
 				     struct device_driver *drv) { }
 static inline void module_remove_driver(struct device_driver *drv) { }
+#endif
+
+#ifdef CONFIG_DEVTMPFS
+extern int devtmpfs_init(void);
+#else
+static inline int devtmpfs_init(void) { return 0; }
 #endif

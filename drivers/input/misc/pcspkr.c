@@ -17,6 +17,7 @@
 #include <linux/init.h>
 #include <linux/input.h>
 #include <linux/platform_device.h>
+#include <linux/timex.h>
 #include <asm/io.h>
 
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@ucw.cz>");
@@ -52,13 +53,13 @@ static int pcspkr_event(struct input_dev *dev, unsigned int type, unsigned int c
 	spin_lock_irqsave(&i8253_lock, flags);
 
 	if (count) {
-		/* enable counter 2 */
-		outb_p(inb_p(0x61) | 3, 0x61);
 		/* set command for counter 2, 2 byte write */
 		outb_p(0xB6, 0x43);
 		/* select desired HZ */
 		outb_p(count & 0xff, 0x42);
 		outb((count >> 8) & 0xff, 0x42);
+		/* enable counter 2 */
+		outb_p(inb_p(0x61) | 3, 0x61);
 	} else {
 		/* disable counter 2 */
 		outb(inb_p(0x61) & 0xFC, 0x61);
@@ -113,7 +114,7 @@ static int __devexit pcspkr_remove(struct platform_device *dev)
 	return 0;
 }
 
-static int pcspkr_suspend(struct platform_device *dev, pm_message_t state)
+static int pcspkr_suspend(struct device *dev)
 {
 	pcspkr_event(NULL, EV_SND, SND_BELL, 0);
 
@@ -126,14 +127,18 @@ static void pcspkr_shutdown(struct platform_device *dev)
 	pcspkr_event(NULL, EV_SND, SND_BELL, 0);
 }
 
+static struct dev_pm_ops pcspkr_pm_ops = {
+	.suspend = pcspkr_suspend,
+};
+
 static struct platform_driver pcspkr_platform_driver = {
 	.driver		= {
 		.name	= "pcspkr",
 		.owner	= THIS_MODULE,
+		.pm	= &pcspkr_pm_ops,
 	},
 	.probe		= pcspkr_probe,
 	.remove		= __devexit_p(pcspkr_remove),
-	.suspend	= pcspkr_suspend,
 	.shutdown	= pcspkr_shutdown,
 };
 

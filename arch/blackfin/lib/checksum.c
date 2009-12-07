@@ -1,34 +1,15 @@
 /*
- * File:         arch/blackfin/lib/checksum.c
- * Based on:     none - original work
- * Author:
+ * Copyright 2004-2009 Analog Devices Inc.
  *
- * Created:
- * Description:  An implementation of the TCP/IP protocol suite for the LINUX
- *               operating system.  INET is implemented using the  BSD Socket
- *               interface as the means of communication with the user level.
+ * Licensed under the GPL-2 or later.
  *
- * Modified:
- *               Copyright 2004-2006 Analog Devices Inc.
+ * An implementation of the TCP/IP protocol suite for the LINUX operating
+ * system. INET is implemented using the BSD Socket interface as the
+ * means of communication with the user level.
  *
- * Bugs:         Enter bugs at http://blackfin.uclinux.org/
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see the file COPYING, or write
- * to the Free Software Foundation, Inc.,
- * 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
+#include <linux/module.h>
 #include <net/checksum.h>
 #include <asm/checksum.h>
 
@@ -76,6 +57,7 @@ __sum16 ip_fast_csum(unsigned char *iph, unsigned int ihl)
 {
 	return (__force __sum16)~do_csum(iph, ihl * 4);
 }
+EXPORT_SYMBOL(ip_fast_csum);
 
 /*
  * computes the checksum of a memory block at buff, length len,
@@ -104,6 +86,7 @@ __wsum csum_partial(const void *buff, int len, __wsum sum)
 
 	return sum;
 }
+EXPORT_SYMBOL(csum_partial);
 
 /*
  * this routine is used for miscellaneous IP-like checksums, mainly
@@ -113,6 +96,7 @@ __sum16 ip_compute_csum(const void *buff, int len)
 {
 	return (__force __sum16)~do_csum(buff, len);
 }
+EXPORT_SYMBOL(ip_compute_csum);
 
 /*
  * copy from fs while checksumming, otherwise like csum_partial
@@ -127,6 +111,7 @@ csum_partial_copy_from_user(const void __user *src, void *dst,
 	memcpy(dst, (__force void *)src, len);
 	return csum_partial(dst, len, sum);
 }
+EXPORT_SYMBOL(csum_partial_copy_from_user);
 
 /*
  * copy from ds while checksumming, otherwise like csum_partial
@@ -137,3 +122,4 @@ __wsum csum_partial_copy(const void *src, void *dst, int len, __wsum sum)
 	memcpy(dst, src, len);
 	return csum_partial(dst, len, sum);
 }
+EXPORT_SYMBOL(csum_partial_copy);

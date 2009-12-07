@@ -256,7 +256,7 @@ struct sbmac_softc {
 	struct net_device	*sbm_dev;	/* pointer to linux device */
 	struct napi_struct	napi;
 	struct phy_device	*phy_dev;	/* the associated PHY device */
-	struct mii_bus		mii_bus;	/* the MII bus */
+	struct mii_bus		*mii_bus;	/* the MII bus */
 	int			phy_irq[PHY_MAX_ADDR];
 	spinlock_t		sbm_lock;	/* spin lock */
 	int			sbm_devflags;	/* current device flags */
@@ -2039,9 +2039,9 @@ static irqreturn_t sbmac_intr(int irq,void *dev_instance)
 		sbdma_tx_process(sc,&(sc->sbm_txdma), 0);
 
 	if (isr & (M_MAC_INT_CHANNEL << S_MAC_RX_CH0)) {
-		if (netif_rx_schedule_prep(dev, &sc->napi)) {
+		if (napi_schedule_prep(&sc->napi)) {
 			__raw_writeq(0, sc->sbm_imr);
-			__netif_rx_schedule(dev, &sc->napi);
+			__napi_schedule(&sc->napi);
 			/* Depend on the exit from poll to reenable intr */
 		}
 		else {
@@ -2069,9 +2069,10 @@ static irqreturn_t sbmac_intr(int irq,void *dev_instance)
 static int sbmac_start_tx(struct sk_buff *skb, struct net_device *dev)
 {
 	struct sbmac_softc *sc = netdev_priv(dev);
+	unsigned long flags;
 
 	/* lock eth irq */
-	spin_lock_irq (&sc->sbm_lock);
+	spin_lock_irqsave(&sc->sbm_lock, flags);
 
 	/*
 	 * Put the buffer on the transmit ring.  If we
@@ -2081,16 +2082,16 @@ static int sbmac_start_tx(struct sk_buff *skb, struct net_device *dev)
 	if (sbdma_add_txbuffer(&(sc->sbm_txdma),skb)) {
 		/* XXX save skb that we could not send */
 		netif_stop_queue(dev);
-		spin_unlock_irq(&sc->sbm_lock);
+		spin_unlock_irqrestore(&sc->sbm_lock, flags);
 
-		return 1;
+		return NETDEV_TX_BUSY;
 	}
 
 	dev->trans_start = jiffies;
 
-	spin_unlock_irq (&sc->sbm_lock);
+	spin_unlock_irqrestore(&sc->sbm_lock, flags);
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /**********************************************************************
@@ -2270,6 +2271,21 @@ static int sb1250_change_mtu(struct net_device *_dev, int new_mtu)
 	return 0;
 }
 
+static const struct net_device_ops sbmac_netdev_ops = {
+	.ndo_open		= sbmac_open,
+	.ndo_stop		= sbmac_close,
+	.ndo_start_xmit		= sbmac_start_tx,
+	.ndo_set_multicast_list	= sbmac_set_rx_mode,
+	.ndo_tx_timeout		= sbmac_tx_timeout,
+	.ndo_do_ioctl		= sbmac_mii_ioctl,
+	.ndo_change_mtu		= sb1250_change_mtu,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_set_mac_address	= eth_mac_addr,
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	.ndo_poll_controller	= sbmac_netpoll,
+#endif
+};
+
 /**********************************************************************
  *  SBMAC_INIT(dev)
  *
@@ -2284,14 +2300,13 @@ static int sb1250_change_mtu(struct net_device *_dev, int new_mtu)
 
 static int sbmac_init(struct platform_device *pldev, long long base)
 {
-	struct net_device *dev = pldev->dev.driver_data;
+	struct net_device *dev = dev_get_drvdata(&pldev->dev);
 	int idx = pldev->id;
 	struct sbmac_softc *sc = netdev_priv(dev);
 	unsigned char *eaddr;
 	uint64_t ea_reg;
 	int i;
 	int err;
-	DECLARE_MAC_BUF(mac);
 
 	sc->sbm_dev = dev;
 	sc->sbe_idx = idx;
@@ -2299,7 +2314,7 @@ static int sbmac_init(struct platform_device *pldev, long long base)
 	eaddr = sc->sbm_hwaddr;
 
 	/*
-	 * Read the ethernet address.  The firwmare left this programmed
+	 * Read the ethernet address.  The firmware left this programmed
 	 * for us in the ethernet address register for each mac.
 	 */
 
@@ -2327,30 +2342,27 @@ static int sbmac_init(struct platform_device *pldev, long long base)
 
 	spin_lock_init(&(sc->sbm_lock));
 
-	dev->open               = sbmac_open;
-	dev->hard_start_xmit    = sbmac_start_tx;
-	dev->stop               = sbmac_close;
-	dev->set_multicast_list = sbmac_set_rx_mode;
-	dev->do_ioctl           = sbmac_mii_ioctl;
-	dev->tx_timeout         = sbmac_tx_timeout;
-	dev->watchdog_timeo     = TX_TIMEOUT;
+	dev->netdev_ops = &sbmac_netdev_ops;
+	dev->watchdog_timeo = TX_TIMEOUT;
 
 	netif_napi_add(dev, &sc->napi, sbmac_poll, 16);
-
-	dev->change_mtu         = sb1250_change_mtu;
-#ifdef CONFIG_NET_POLL_CONTROLLER
-	dev->poll_controller = sbmac_netpoll;
-#endif
 
 	dev->irq		= UNIT_INT(idx);
 
 	/* This is needed for PASS2 for Rx H/W checksum feature */
 	sbmac_set_iphdr_offset(sc);
 
+	sc->mii_bus = mdiobus_alloc();
+	if (sc->mii_bus == NULL) {
+		sbmac_uninitctx(sc);
+		return -ENOMEM;
+	}
+
 	err = register_netdev(dev);
 	if (err) {
 		printk(KERN_ERR "%s.%d: unable to register netdev\n",
 		       sbmac_string, idx);
+		mdiobus_free(sc->mii_bus);
 		sbmac_uninitctx(sc);
 		return err;
 	}
@@ -2365,20 +2377,20 @@ static int sbmac_init(struct platform_device *pldev, long long base)
 	 * process so we need to finish off the config message that
 	 * was being displayed)
 	 */
-	pr_info("%s: SiByte Ethernet at 0x%08Lx, address: %s\n",
-	       dev->name, base, print_mac(mac, eaddr));
+	pr_info("%s: SiByte Ethernet at 0x%08Lx, address: %pM\n",
+	       dev->name, base, eaddr);
 
-	sc->mii_bus.name = sbmac_mdio_string;
-	snprintf(sc->mii_bus.id, MII_BUS_ID_SIZE, "%x", idx);
-	sc->mii_bus.priv = sc;
-	sc->mii_bus.read = sbmac_mii_read;
-	sc->mii_bus.write = sbmac_mii_write;
-	sc->mii_bus.irq = sc->phy_irq;
+	sc->mii_bus->name = sbmac_mdio_string;
+	snprintf(sc->mii_bus->id, MII_BUS_ID_SIZE, "%x", idx);
+	sc->mii_bus->priv = sc;
+	sc->mii_bus->read = sbmac_mii_read;
+	sc->mii_bus->write = sbmac_mii_write;
+	sc->mii_bus->irq = sc->phy_irq;
 	for (i = 0; i < PHY_MAX_ADDR; ++i)
-		sc->mii_bus.irq[i] = SBMAC_PHY_INT;
+		sc->mii_bus->irq[i] = SBMAC_PHY_INT;
 
-	sc->mii_bus.dev = &pldev->dev;
-	dev_set_drvdata(&pldev->dev, &sc->mii_bus);
+	sc->mii_bus->parent = &pldev->dev;
+	dev_set_drvdata(&pldev->dev, sc->mii_bus);
 
 	return 0;
 }
@@ -2409,7 +2421,7 @@ static int sbmac_open(struct net_device *dev)
 	/*
 	 * Probe PHY address
 	 */
-	err = mdiobus_register(&sc->mii_bus);
+	err = mdiobus_register(sc->mii_bus);
 	if (err) {
 		printk(KERN_ERR "%s: unable to register MDIO bus\n",
 		       dev->name);
@@ -2446,7 +2458,7 @@ static int sbmac_open(struct net_device *dev)
 	return 0;
 
 out_unregister:
-	mdiobus_unregister(&sc->mii_bus);
+	mdiobus_unregister(sc->mii_bus);
 
 out_unirq:
 	free_irq(dev->irq, dev);
@@ -2462,7 +2474,7 @@ static int sbmac_mii_probe(struct net_device *dev)
 	int i;
 
 	for (i = 0; i < PHY_MAX_ADDR; i++) {
-		phy_dev = sc->mii_bus.phy_map[i];
+		phy_dev = sc->mii_bus->phy_map[i];
 		if (phy_dev)
 			break;
 	}
@@ -2471,7 +2483,7 @@ static int sbmac_mii_probe(struct net_device *dev)
 		return -ENXIO;
 	}
 
-	phy_dev = phy_connect(dev, phy_dev->dev.bus_id, &sbmac_mii_poll, 0,
+	phy_dev = phy_connect(dev, dev_name(&phy_dev->dev), &sbmac_mii_poll, 0,
 			      PHY_INTERFACE_MODE_GMII);
 	if (IS_ERR(phy_dev)) {
 		printk(KERN_ERR "%s: could not attach to PHY\n", dev->name);
@@ -2493,7 +2505,7 @@ static int sbmac_mii_probe(struct net_device *dev)
 
 	pr_info("%s: attached PHY driver [%s] (mii_bus:phy_addr=%s, irq=%d)\n",
 		dev->name, phy_dev->drv->name,
-		phy_dev->dev.bus_id, phy_dev->irq);
+		dev_name(&phy_dev->dev), phy_dev->irq);
 
 	sc->phy_dev = phy_dev;
 
@@ -2568,14 +2580,15 @@ static void sbmac_mii_poll(struct net_device *dev)
 static void sbmac_tx_timeout (struct net_device *dev)
 {
 	struct sbmac_softc *sc = netdev_priv(dev);
+	unsigned long flags;
 
-	spin_lock_irq (&sc->sbm_lock);
+	spin_lock_irqsave(&sc->sbm_lock, flags);
 
 
 	dev->trans_start = jiffies;
 	dev->stats.tx_errors++;
 
-	spin_unlock_irq (&sc->sbm_lock);
+	spin_unlock_irqrestore(&sc->sbm_lock, flags);
 
 	printk (KERN_WARNING "%s: Transmit timed out\n",dev->name);
 }
@@ -2639,7 +2652,7 @@ static int sbmac_close(struct net_device *dev)
 	phy_disconnect(sc->phy_dev);
 	sc->phy_dev = NULL;
 
-	mdiobus_unregister(&sc->mii_bus);
+	mdiobus_unregister(sc->mii_bus);
 
 	free_irq(dev->irq, dev);
 
@@ -2659,7 +2672,7 @@ static int sbmac_poll(struct napi_struct *napi, int budget)
 	sbdma_tx_process(sc, &(sc->sbm_txdma), 1);
 
 	if (work_done < budget) {
-		netif_rx_complete(dev, napi);
+		napi_complete(napi);
 
 #ifdef CONFIG_SBMAC_COALESCE
 		__raw_writeq(((M_MAC_INT_EOP_COUNT | M_MAC_INT_EOP_TIMER) << S_MAC_TX_CH0) |
@@ -2675,7 +2688,7 @@ static int sbmac_poll(struct napi_struct *napi, int budget)
 }
 
 
-static int __init sbmac_probe(struct platform_device *pldev)
+static int __devinit sbmac_probe(struct platform_device *pldev)
 {
 	struct net_device *dev;
 	struct sbmac_softc *sc;
@@ -2689,7 +2702,7 @@ static int __init sbmac_probe(struct platform_device *pldev)
 	sbm_base = ioremap_nocache(res->start, res->end - res->start + 1);
 	if (!sbm_base) {
 		printk(KERN_ERR "%s: unable to map device registers\n",
-		       pldev->dev.bus_id);
+		       dev_name(&pldev->dev));
 		err = -ENOMEM;
 		goto out_out;
 	}
@@ -2700,7 +2713,7 @@ static int __init sbmac_probe(struct platform_device *pldev)
 	 * If we find a zero, skip this MAC.
 	 */
 	sbmac_orig_hwaddr = __raw_readq(sbm_base + R_MAC_ETHERNET_ADDR);
-	pr_debug("%s: %sconfiguring MAC at 0x%08Lx\n", pldev->dev.bus_id,
+	pr_debug("%s: %sconfiguring MAC at 0x%08Lx\n", dev_name(&pldev->dev),
 		 sbmac_orig_hwaddr ? "" : "not ", (long long)res->start);
 	if (sbmac_orig_hwaddr == 0) {
 		err = 0;
@@ -2713,12 +2726,12 @@ static int __init sbmac_probe(struct platform_device *pldev)
 	dev = alloc_etherdev(sizeof(struct sbmac_softc));
 	if (!dev) {
 		printk(KERN_ERR "%s: unable to allocate etherdev\n",
-		       pldev->dev.bus_id);
+		       dev_name(&pldev->dev));
 		err = -ENOMEM;
 		goto out_unmap;
 	}
 
-	pldev->dev.driver_data = dev;
+	dev_set_drvdata(&pldev->dev, dev);
 	SET_NETDEV_DEV(dev, &pldev->dev);
 
 	sc = netdev_priv(dev);
@@ -2743,11 +2756,12 @@ out_out:
 
 static int __exit sbmac_remove(struct platform_device *pldev)
 {
-	struct net_device *dev = pldev->dev.driver_data;
+	struct net_device *dev = dev_get_drvdata(&pldev->dev);
 	struct sbmac_softc *sc = netdev_priv(dev);
 
 	unregister_netdev(dev);
 	sbmac_uninitctx(sc);
+	mdiobus_free(sc->mii_bus);
 	iounmap(sc->sbm_base);
 	free_netdev(dev);
 

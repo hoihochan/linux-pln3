@@ -28,6 +28,7 @@
 #include <linux/delay.h>
 #include <linux/kdebug.h>
 #include <linux/utsname.h>
+#include <linux/tracehook.h>
 
 #include <asm/cpu.h>
 #include <asm/delay.h>
@@ -160,21 +161,13 @@ show_regs (struct pt_regs *regs)
 		show_stack(NULL, NULL);
 }
 
-void tsk_clear_notify_resume(struct task_struct *tsk)
+/* local support for deprecated console_print */
+void
+console_print(const char *s)
 {
-#ifdef CONFIG_PERFMON
-	if (tsk->thread.pfm_needs_checking)
-		return;
-#endif
-	if (test_ti_thread_flag(task_thread_info(tsk), TIF_RESTORE_RSE))
-		return;
-	clear_ti_thread_flag(task_thread_info(tsk), TIF_NOTIFY_RESUME);
+	printk(KERN_EMERG "%s", s);
 }
 
-/*
- * do_notify_resume_user():
- *	Called from notify_resume_user at entry.S, with interrupts disabled.
- */
 void
 do_notify_resume_user(sigset_t *unused, struct sigscratch *scr, long in_syscall)
 {
@@ -201,6 +194,13 @@ do_notify_resume_user(sigset_t *unused, struct sigscratch *scr, long in_syscall)
 	if (test_thread_flag(TIF_SIGPENDING)) {
 		local_irq_enable();	/* force interrupt enable */
 		ia64_do_signal(scr, in_syscall);
+	}
+
+	if (test_thread_flag(TIF_NOTIFY_RESUME)) {
+		clear_thread_flag(TIF_NOTIFY_RESUME);
+		tracehook_notify_resume(&scr->pt);
+		if (current->replacement_session_keyring)
+			key_replace_session_keyring();
 	}
 
 	/* copy user rbs to kernel rbs */
@@ -251,7 +251,6 @@ default_idle (void)
 /* We don't actually take CPU down, just spin without interrupts. */
 static inline void play_dead(void)
 {
-	extern void ia64_cpu_local_tick (void);
 	unsigned int this_cpu = smp_processor_id();
 
 	/* Ack it */
@@ -423,7 +422,7 @@ ia64_load_extra (struct task_struct *task)
  * so there is nothing to worry about.
  */
 int
-copy_thread (int nr, unsigned long clone_flags,
+copy_thread(unsigned long clone_flags,
 	     unsigned long user_stack_base, unsigned long user_stack_size,
 	     struct task_struct *p, struct pt_regs *regs)
 {

@@ -57,6 +57,17 @@ typedef void (*writerap_t)(void *, unsigned short);
 typedef void (*writerdp_t)(void *, unsigned short);
 typedef unsigned short (*readrdp_t)(void *);
 
+static const struct net_device_ops lance_netdev_ops = {
+	.ndo_open		= m147lance_open,
+	.ndo_stop		= m147lance_close,
+	.ndo_start_xmit		= lance_start_xmit,
+	.ndo_set_multicast_list	= lance_set_multicast,
+	.ndo_tx_timeout		= lance_tx_timeout,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_set_mac_address	= eth_mac_addr,
+};
+
 /* Initialise the one and only on-board 7990 */
 struct net_device * __init mvme147lance_probe(int unit)
 {
@@ -67,7 +78,6 @@ struct net_device * __init mvme147lance_probe(int unit)
 	u_long *addr;
 	u_long address;
 	int err;
-	DECLARE_MAC_BUF(mac);
 
 	if (!MACH_IS_MVME147 || called)
 		return ERR_PTR(-ENODEV);
@@ -82,11 +92,7 @@ struct net_device * __init mvme147lance_probe(int unit)
 
 	/* Fill the dev fields */
 	dev->base_addr = (unsigned long)MVME147_LANCE_BASE;
-	dev->open = &m147lance_open;
-	dev->stop = &m147lance_close;
-	dev->hard_start_xmit = &lance_start_xmit;
-	dev->set_multicast_list = &lance_set_multicast;
-	dev->tx_timeout = &lance_tx_timeout;
+	dev->netdev_ops = &lance_netdev_ops;
 	dev->dma = 0;
 
 	addr=(u_long *)ETHERNET_ADDRESS;
@@ -102,11 +108,11 @@ struct net_device * __init mvme147lance_probe(int unit)
 	dev->dev_addr[3]=address&0xff;
 
 	printk("%s: MVME147 at 0x%08lx, irq %d, "
-	       "Hardware Address %s\n",
+	       "Hardware Address %pM\n",
 	       dev->name, dev->base_addr, MVME147_LANCE_IRQ,
-	       print_mac(mac, dev->dev_addr));
+	       dev->dev_addr);
 
-	lp = (struct m147lance_private *)dev->priv;
+	lp = netdev_priv(dev);
 	lp->ram = __get_dma_pages(GFP_ATOMIC, 3);	/* 16K */
 	if (!lp->ram)
 	{
@@ -190,7 +196,7 @@ int __init init_module(void)
 
 void __exit cleanup_module(void)
 {
-	struct m147lance_private *lp = dev_mvme147_lance->priv;
+	struct m147lance_private *lp = netdev_priv(dev_mvme147_lance);
 	unregister_netdev(dev_mvme147_lance);
 	free_pages(lp->ram, 3);
 	free_netdev(dev_mvme147_lance);

@@ -260,7 +260,7 @@ static int edac_mc_assert_error_check_and_clear(void)
  */
 static void edac_mc_workq_function(struct work_struct *work_req)
 {
-	struct delayed_work *d_work = (struct delayed_work *)work_req;
+	struct delayed_work *d_work = to_delayed_work(work_req);
 	struct mem_ctl_info *mci = to_edac_mem_ctl_work(d_work);
 
 	mutex_lock(&mem_ctls_mutex);
@@ -401,7 +401,7 @@ static int add_mc_to_global_list(struct mem_ctl_info *mci)
 
 fail0:
 	edac_printk(KERN_WARNING, EDAC_MC,
-		"%s (%s) %s %s already assigned %d\n", p->dev->bus_id,
+		"%s (%s) %s %s already assigned %d\n", dev_name(p->dev),
 		edac_dev_name(mci), p->mod_name, p->ctl_name, p->mc_idx);
 	return 1;
 
@@ -418,16 +418,14 @@ static void complete_mc_list_del(struct rcu_head *head)
 
 	mci = container_of(head, struct mem_ctl_info, rcu);
 	INIT_LIST_HEAD(&mci->link);
-	complete(&mci->complete);
 }
 
 static void del_mc_from_global_list(struct mem_ctl_info *mci)
 {
 	atomic_dec(&edac_handlers);
 	list_del_rcu(&mci->link);
-	init_completion(&mci->complete);
 	call_rcu(&mci->rcu, complete_mc_list_del);
-	wait_for_completion(&mci->complete);
+	rcu_barrier();
 }
 
 /**

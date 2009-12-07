@@ -163,7 +163,7 @@ static void nst_seq_stop(struct seq_file *seq, void *v)
 {
 }
 
-static struct seq_operations nst_seq_ops = {
+static const struct seq_operations nst_seq_ops = {
 	.start = nst_seq_start,
 	.next = nst_seq_next,
 	.stop = nst_seq_stop,
@@ -207,7 +207,7 @@ static int nst_fop_release(struct inode *inode, struct file *file)
 	return seq_release_private(inode, file);
 }
 
-static struct file_operations nst_seq_fops = {
+static const struct file_operations nst_seq_fops = {
 	.open = nst_fop_open,
 	.read = seq_read,
 	.llseek = seq_lseek,
@@ -304,8 +304,8 @@ static int sc_seq_show(struct seq_file *seq, void *v)
 		 * use of it here generates a warning with -Wbitwise */
 		seq_printf(seq, "%p:\n"
 			   "  krefs:           %d\n"
-			   "  sock:            %u.%u.%u.%u:%u -> "
-					      "%u.%u.%u.%u:%u\n"
+			   "  sock:            %pI4:%u -> "
+					      "%pI4:%u\n"
 			   "  remote node:     %s\n"
 			   "  page off:        %zu\n"
 			   "  handshake ok:    %u\n"
@@ -319,8 +319,8 @@ static int sc_seq_show(struct seq_file *seq, void *v)
 			   "  func type:       %u\n",
 			   sc,
 			   atomic_read(&sc->sc_kref.refcount),
-			   NIPQUAD(saddr), inet ? ntohs(sport) : 0,
-			   NIPQUAD(daddr), inet ? ntohs(dport) : 0,
+			   &saddr, inet ? ntohs(sport) : 0,
+			   &daddr, inet ? ntohs(dport) : 0,
 			   sc->sc_node->nd_name,
 			   sc->sc_page_off,
 			   sc->sc_handshake_ok,
@@ -344,7 +344,7 @@ static void sc_seq_stop(struct seq_file *seq, void *v)
 {
 }
 
-static struct seq_operations sc_seq_ops = {
+static const struct seq_operations sc_seq_ops = {
 	.start = sc_seq_start,
 	.next = sc_seq_next,
 	.stop = sc_seq_stop,
@@ -388,7 +388,7 @@ static int sc_fop_release(struct inode *inode, struct file *file)
 	return seq_release_private(inode, file);
 }
 
-static struct file_operations sc_seq_fops = {
+static const struct file_operations sc_seq_fops = {
 	.open = sc_fop_open,
 	.read = seq_read,
 	.llseek = seq_lseek,

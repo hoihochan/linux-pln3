@@ -40,6 +40,7 @@
 #include <linux/ctype.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
+#include <linux/proc_fs.h>
 #include <linux/notifier.h>
 #include <linux/kthread.h>
 #include <linux/mutex.h>
@@ -55,7 +56,10 @@
 #include "xenbus_comms.h"
 #include "xenbus_probe.h"
 
+
 int xen_store_evtchn;
+EXPORT_SYMBOL(xen_store_evtchn);
+
 struct xenstore_domain_interface *xen_store_interface;
 static unsigned long xen_store_mfn;
 
@@ -66,6 +70,9 @@ static void wait_for_devices(struct xenbus_driver *xendrv);
 static int xenbus_probe_frontend(const char *type, const char *name);
 
 static void xenbus_dev_shutdown(struct device *_dev);
+
+static int xenbus_dev_suspend(struct device *dev, pm_message_t state);
+static int xenbus_dev_resume(struct device *dev);
 
 /* If something in array of ids matches this device, return it. */
 static const struct xenbus_device_id *
@@ -99,15 +106,15 @@ static int xenbus_uevent(struct device *_dev, struct kobj_uevent_env *env)
 }
 
 /* device/<type>/<id> => <type>-<id> */
-static int frontend_bus_id(char bus_id[BUS_ID_SIZE], const char *nodename)
+static int frontend_bus_id(char bus_id[XEN_BUS_ID_SIZE], const char *nodename)
 {
 	nodename = strchr(nodename, '/');
-	if (!nodename || strlen(nodename + 1) >= BUS_ID_SIZE) {
+	if (!nodename || strlen(nodename + 1) >= XEN_BUS_ID_SIZE) {
 		printk(KERN_WARNING "XENBUS: bad frontend %s\n", nodename);
 		return -EINVAL;
 	}
 
-	strlcpy(bus_id, nodename + 1, BUS_ID_SIZE);
+	strlcpy(bus_id, nodename + 1, XEN_BUS_ID_SIZE);
 	if (!strchr(bus_id, '/')) {
 		printk(KERN_WARNING "XENBUS: bus_id %s no slash\n", bus_id);
 		return -EINVAL;
@@ -166,6 +173,9 @@ static int read_backend_details(struct xenbus_device *xendev)
 	return read_otherend_details(xendev, "backend-id", "backend");
 }
 
+static struct device_attribute xenbus_dev_attrs[] = {
+	__ATTR_NULL
+};
 
 /* Bus type for frontend drivers. */
 static struct xen_bus_type xenbus_frontend = {
@@ -174,12 +184,16 @@ static struct xen_bus_type xenbus_frontend = {
 	.get_bus_id = frontend_bus_id,
 	.probe = xenbus_probe_frontend,
 	.bus = {
-		.name     = "xen",
-		.match    = xenbus_match,
-		.uevent   = xenbus_uevent,
-		.probe    = xenbus_dev_probe,
-		.remove   = xenbus_dev_remove,
-		.shutdown = xenbus_dev_shutdown,
+		.name      = "xen",
+		.match     = xenbus_match,
+		.uevent    = xenbus_uevent,
+		.probe     = xenbus_dev_probe,
+		.remove    = xenbus_dev_remove,
+		.shutdown  = xenbus_dev_shutdown,
+		.dev_attrs = xenbus_dev_attrs,
+
+		.suspend   = xenbus_dev_suspend,
+		.resume    = xenbus_dev_resume,
 	},
 };
 
@@ -460,6 +474,7 @@ int xenbus_probe_node(struct xen_bus_type *bus,
 		      const char *type,
 		      const char *nodename)
 {
+	char devname[XEN_BUS_ID_SIZE];
 	int err;
 	struct xenbus_device *xendev;
 	size_t stringlen;
@@ -494,9 +509,11 @@ int xenbus_probe_node(struct xen_bus_type *bus,
 	xendev->dev.bus = &bus->bus;
 	xendev->dev.release = xenbus_dev_release;
 
-	err = bus->get_bus_id(xendev->dev.bus_id, xendev->nodename);
+	err = bus->get_bus_id(devname, xendev->nodename);
 	if (err)
 		goto fail;
+
+	dev_set_name(&xendev->dev, devname);
 
 	/* Register with generic device framework. */
 	err = device_register(&xendev->dev);
@@ -611,7 +628,7 @@ void xenbus_dev_changed(const char *node, struct xen_bus_type *bus)
 {
 	int exists, rootlen;
 	struct xenbus_device *dev;
-	char type[BUS_ID_SIZE];
+	char type[XEN_BUS_ID_SIZE];
 	const char *p, *root;
 
 	if (char_count(node, '/') < 2)
@@ -625,8 +642,8 @@ void xenbus_dev_changed(const char *node, struct xen_bus_type *bus)
 
 	/* backend/<type>/... or device/<type>/... */
 	p = strchr(node, '/') + 1;
-	snprintf(type, BUS_ID_SIZE, "%.*s", (int)strcspn(p, "/"), p);
-	type[BUS_ID_SIZE-1] = '\0';
+	snprintf(type, XEN_BUS_ID_SIZE, "%.*s", (int)strcspn(p, "/"), p);
+	type[XEN_BUS_ID_SIZE-1] = '\0';
 
 	rootlen = strsep_len(node, '/', bus->levels);
 	if (rootlen < 0)
@@ -643,6 +660,7 @@ void xenbus_dev_changed(const char *node, struct xen_bus_type *bus)
 
 	kfree(root);
 }
+EXPORT_SYMBOL_GPL(xenbus_dev_changed);
 
 static void frontend_changed(struct xenbus_watch *watch,
 			     const char **vec, unsigned int len)
@@ -658,7 +676,7 @@ static struct xenbus_watch fe_watch = {
 	.callback = frontend_changed,
 };
 
-static int suspend_dev(struct device *dev, void *data)
+static int xenbus_dev_suspend(struct device *dev, pm_message_t state)
 {
 	int err = 0;
 	struct xenbus_driver *drv;
@@ -671,35 +689,14 @@ static int suspend_dev(struct device *dev, void *data)
 	drv = to_xenbus_driver(dev->driver);
 	xdev = container_of(dev, struct xenbus_device, dev);
 	if (drv->suspend)
-		err = drv->suspend(xdev);
+		err = drv->suspend(xdev, state);
 	if (err)
 		printk(KERN_WARNING
-		       "xenbus: suspend %s failed: %i\n", dev->bus_id, err);
+		       "xenbus: suspend %s failed: %i\n", dev_name(dev), err);
 	return 0;
 }
 
-static int suspend_cancel_dev(struct device *dev, void *data)
-{
-	int err = 0;
-	struct xenbus_driver *drv;
-	struct xenbus_device *xdev;
-
-	DPRINTK("");
-
-	if (dev->driver == NULL)
-		return 0;
-	drv = to_xenbus_driver(dev->driver);
-	xdev = container_of(dev, struct xenbus_device, dev);
-	if (drv->suspend_cancel)
-		err = drv->suspend_cancel(xdev);
-	if (err)
-		printk(KERN_WARNING
-		       "xenbus: suspend_cancel %s failed: %i\n",
-		       dev->bus_id, err);
-	return 0;
-}
-
-static int resume_dev(struct device *dev, void *data)
+static int xenbus_dev_resume(struct device *dev)
 {
 	int err;
 	struct xenbus_driver *drv;
@@ -717,7 +714,7 @@ static int resume_dev(struct device *dev, void *data)
 	if (err) {
 		printk(KERN_WARNING
 		       "xenbus: resume (talk_to_otherend) %s failed: %i\n",
-		       dev->bus_id, err);
+		       dev_name(dev), err);
 		return err;
 	}
 
@@ -728,7 +725,7 @@ static int resume_dev(struct device *dev, void *data)
 		if (err) {
 			printk(KERN_WARNING
 			       "xenbus: resume %s failed: %i\n",
-			       dev->bus_id, err);
+			       dev_name(dev), err);
 			return err;
 		}
 	}
@@ -737,39 +734,12 @@ static int resume_dev(struct device *dev, void *data)
 	if (err) {
 		printk(KERN_WARNING
 		       "xenbus_probe: resume (watch_otherend) %s failed: "
-		       "%d.\n", dev->bus_id, err);
+		       "%d.\n", dev_name(dev), err);
 		return err;
 	}
 
 	return 0;
 }
-
-void xenbus_suspend(void)
-{
-	DPRINTK("");
-
-	bus_for_each_dev(&xenbus_frontend.bus, NULL, NULL, suspend_dev);
-	xenbus_backend_suspend(suspend_dev);
-	xs_suspend();
-}
-EXPORT_SYMBOL_GPL(xenbus_suspend);
-
-void xenbus_resume(void)
-{
-	xb_init_comms();
-	xs_resume();
-	bus_for_each_dev(&xenbus_frontend.bus, NULL, NULL, resume_dev);
-	xenbus_backend_resume(resume_dev);
-}
-EXPORT_SYMBOL_GPL(xenbus_resume);
-
-void xenbus_suspend_cancel(void)
-{
-	xs_suspend_cancel();
-	bus_for_each_dev(&xenbus_frontend.bus, NULL, NULL, suspend_cancel_dev);
-	xenbus_backend_resume(suspend_cancel_dev);
-}
-EXPORT_SYMBOL_GPL(xenbus_suspend_cancel);
 
 /* A flag to determine if xenstored is 'ready' (i.e. has started) */
 int xenstored_ready = 0;
@@ -814,7 +784,7 @@ static int __init xenbus_probe_init(void)
 	DPRINTK("");
 
 	err = -ENODEV;
-	if (!is_running_on_xen())
+	if (!xen_domain())
 		goto out_error;
 
 	/* Register ourselves with the kernel bus subsystem */
@@ -829,7 +799,7 @@ static int __init xenbus_probe_init(void)
 	/*
 	 * Domain0 doesn't have a store_evtchn or store_mfn yet.
 	 */
-	if (is_initial_xendomain()) {
+	if (xen_initial_domain()) {
 		/* dom0 not yet supported */
 	} else {
 		xenstored_ready = 1;
@@ -846,8 +816,16 @@ static int __init xenbus_probe_init(void)
 		goto out_unreg_back;
 	}
 
-	if (!is_initial_xendomain())
+	if (!xen_initial_domain())
 		xenbus_probe(NULL);
+
+#ifdef CONFIG_XEN_COMPAT_XENFS
+	/*
+	 * Create xenfs mountpoint in /proc for compatibility with
+	 * utilities that expect to find "xenbus" under "/proc/xen".
+	 */
+	proc_mkdir("xen", NULL);
+#endif
 
 	return 0;
 
@@ -937,7 +915,7 @@ static void wait_for_devices(struct xenbus_driver *xendrv)
 	unsigned long timeout = jiffies + 10*HZ;
 	struct device_driver *drv = xendrv ? &xendrv->driver : NULL;
 
-	if (!ready_to_wait_for_devices || !is_running_on_xen())
+	if (!ready_to_wait_for_devices || !xen_domain())
 		return;
 
 	while (exists_disconnected_device(drv)) {

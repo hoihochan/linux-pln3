@@ -661,6 +661,7 @@ static void __init init_second_ohare(void)
 			pci_find_hose_for_OF_device(np);
 		if (!hose) {
 			printk(KERN_ERR "Can't find PCI hose for OHare2 !\n");
+			of_node_put(np);
 			return;
 		}
 		early_read_config_word(hose, bus, devfn, PCI_COMMAND, &cmd);
@@ -669,6 +670,7 @@ static void __init init_second_ohare(void)
 		early_write_config_word(hose, bus, devfn, PCI_COMMAND, cmd);
 	}
 	has_second_ohare = 1;
+	of_node_put(np);
 }
 
 /*
@@ -729,7 +731,7 @@ static void __init setup_bandit(struct pci_controller *hose,
 static int __init setup_uninorth(struct pci_controller *hose,
 				 struct resource *addr)
 {
-	ppc_pci_flags |= PPC_PCI_REASSIGN_ALL_BUS;
+	ppc_pci_add_flags(PPC_PCI_REASSIGN_ALL_BUS);
 	has_uninorth = 1;
 	hose->ops = &macrisc_pci_ops;
 	hose->cfg_addr = ioremap(addr->start + 0x800000, 0x1000);
@@ -996,7 +998,7 @@ void __init pmac_pci_init(void)
 	struct device_node *np, *root;
 	struct device_node *ht = NULL;
 
-	ppc_pci_flags = PPC_PCI_CAN_SKIP_ISA_ALIGN;
+	ppc_pci_set_flags(PPC_PCI_CAN_SKIP_ISA_ALIGN);
 
 	root = of_find_node_by_path("/");
 	if (root == NULL) {
@@ -1055,7 +1057,7 @@ void __init pmac_pci_init(void)
 	 * some offset between bus number and domains for now when we
 	 * assign all busses should help for now
 	 */
-	if (ppc_pci_flags & PPC_PCI_REASSIGN_ALL_BUS)
+	if (ppc_pci_has_flag(PPC_PCI_REASSIGN_ALL_BUS))
 		pcibios_assign_bus_offset = 0x10;
 #endif
 }
@@ -1284,3 +1286,64 @@ static void fixup_k2_sata(struct pci_dev* dev)
 }
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_SERVERWORKS, 0x0240, fixup_k2_sata);
 
+/*
+ * On U4 (aka CPC945) the PCIe root complex "P2P" bridge resource ranges aren't
+ * configured by the firmware. The bridge itself seems to ignore them but it
+ * causes problems with Linux which then re-assigns devices below the bridge,
+ * thus changing addresses of those devices from what was in the device-tree,
+ * which sucks when those are video cards using offb
+ *
+ * We could just mark it transparent but I prefer fixing up the resources to
+ * properly show what's going on here, as I have some doubts about having them
+ * badly configured potentially being an issue for DMA.
+ *
+ * We leave PIO alone, it seems to be fine
+ *
+ * Oh and there's another funny bug. The OF properties advertize the region
+ * 0xf1000000..0xf1ffffff as being forwarded as memory space. But that's
+ * actually not true, this region is the memory mapped config space. So we
+ * also need to filter it out or we'll map things in the wrong place.
+ */
+static void fixup_u4_pcie(struct pci_dev* dev)
+{
+	struct pci_controller *host = pci_bus_to_host(dev->bus);
+	struct resource *region = NULL;
+	u32 reg;
+	int i;
+
+	/* Only do that on PowerMac */
+	if (!machine_is(powermac))
+		return;
+
+	/* Find the largest MMIO region */
+	for (i = 0; i < 3; i++) {
+		struct resource *r = &host->mem_resources[i];
+		if (!(r->flags & IORESOURCE_MEM))
+			continue;
+		/* Skip the 0xf0xxxxxx..f2xxxxxx regions, we know they
+		 * are reserved by HW for other things
+		 */
+		if (r->start >= 0xf0000000 && r->start < 0xf3000000)
+			continue;
+		if (!region || (r->end - r->start) >
+		    (region->end - region->start))
+			region = r;
+	}
+	/* Nothing found, bail */
+	if (region == 0)
+		return;
+
+	/* Print things out */
+	printk(KERN_INFO "PCI: Fixup U4 PCIe bridge range: %pR\n", region);
+
+	/* Fixup bridge config space. We know it's a Mac, resource aren't
+	 * offset so let's just blast them as-is. We also know that they
+	 * fit in 32 bits
+	 */
+	reg = ((region->start >> 16) & 0xfff0) | (region->end & 0xfff00000);
+	pci_write_config_dword(dev, PCI_MEMORY_BASE, reg);
+	pci_write_config_dword(dev, PCI_PREF_BASE_UPPER32, 0);
+	pci_write_config_dword(dev, PCI_PREF_LIMIT_UPPER32, 0);
+	pci_write_config_dword(dev, PCI_PREF_MEMORY_BASE, 0);
+}
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_APPLE, PCI_DEVICE_ID_APPLE_U4_PCIE, fixup_u4_pcie);

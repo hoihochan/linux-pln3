@@ -22,6 +22,7 @@
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
+#include <linux/smp.h>
 #include <linux/spinlock.h>
 #include <linux/threads.h>
 #include <linux/module.h>
@@ -44,16 +45,9 @@
 #include <asm/mipsmtregs.h>
 #endif /* CONFIG_MIPS_MT_SMTC */
 
-cpumask_t phys_cpu_present_map;		/* Bitmask of available CPUs */
 volatile cpumask_t cpu_callin_map;	/* Bitmask of started secondaries */
-cpumask_t cpu_online_map;		/* Bitmask of currently online CPUs */
 int __cpu_number_map[NR_CPUS];		/* Map physical to logical */
 int __cpu_logical_map[NR_CPUS];		/* Map logical to physical */
-
-EXPORT_SYMBOL(phys_cpu_present_map);
-EXPORT_SYMBOL(cpu_online_map);
-
-extern void cpu_idle(void);
 
 /* Number of TCs (or siblings in Intel speak) per CPU core */
 int smp_num_siblings = 1;
@@ -121,6 +115,8 @@ asmlinkage __cpuinit void start_secondary(void)
 	cpu = smp_processor_id();
 	cpu_data[cpu].udelay_val = loops_per_jiffy;
 
+	notify_cpu_starting(cpu);
+
 	mp_ops->smp_finish();
 	set_cpu_sibling_map(cpu);
 
@@ -129,19 +125,6 @@ asmlinkage __cpuinit void start_secondary(void)
 	synchronise_count_slave();
 
 	cpu_idle();
-}
-
-void arch_send_call_function_ipi(cpumask_t mask)
-{
-	mp_ops->send_ipi_mask(mask, SMP_CALL_FUNCTION);
-}
-
-/*
- * We reuse the same vector for the single IPI
- */
-void arch_send_call_function_single_ipi(int cpu)
-{
-	mp_ops->send_ipi_mask(cpumask_of_cpu(cpu), SMP_CALL_FUNCTION);
 }
 
 /*
@@ -161,8 +144,10 @@ static void stop_this_cpu(void *dummy)
 	 * Remove this CPU:
 	 */
 	cpu_clear(smp_processor_id(), cpu_online_map);
-	local_irq_enable();	/* May need to service _machine_restart IPI */
-	for (;;);		/* Wait if available. */
+	for (;;) {
+		if (cpu_wait)
+			(*cpu_wait)();		/* Wait if available. */
+	}
 }
 
 void smp_send_stop(void)
@@ -184,21 +169,15 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 	mp_ops->prepare_cpus(max_cpus);
 	set_cpu_sibling_map(0);
 #ifndef CONFIG_HOTPLUG_CPU
-	cpu_present_map = cpu_possible_map;
+	init_cpu_present(&cpu_possible_map);
 #endif
 }
 
 /* preload SMP state for boot cpu */
 void __devinit smp_prepare_boot_cpu(void)
 {
-	/*
-	 * This assumes that bootup is always handled by the processor
-	 * with the logic and physical number 0.
-	 */
-	__cpu_number_map[0] = 0;
-	__cpu_logical_map[0] = 0;
-	cpu_set(0, phys_cpu_present_map);
-	cpu_set(0, cpu_online_map);
+	set_cpu_possible(0, true);
+	set_cpu_online(0, true);
 	cpu_set(0, cpu_callin_map);
 }
 
@@ -207,6 +186,8 @@ void __devinit smp_prepare_boot_cpu(void)
  * and keep control until "cpu_online(cpu)" is set.  Note: cpu is
  * physical, not logical.
  */
+static struct task_struct *cpu_idle_thread[NR_CPUS];
+
 int __cpuinit __cpu_up(unsigned int cpu)
 {
 	struct task_struct *idle;
@@ -216,9 +197,16 @@ int __cpuinit __cpu_up(unsigned int cpu)
 	 * The following code is purely to make sure
 	 * Linux can schedule processes on this slave.
 	 */
-	idle = fork_idle(cpu);
-	if (IS_ERR(idle))
-		panic(KERN_ERR "Fork failed for CPU %d", cpu);
+	if (!cpu_idle_thread[cpu]) {
+		idle = fork_idle(cpu);
+		cpu_idle_thread[cpu] = idle;
+
+		if (IS_ERR(idle))
+			panic(KERN_ERR "Fork failed for CPU %d", cpu);
+	} else {
+		idle = cpu_idle_thread[cpu];
+		init_idle(idle, cpu);
+	}
 
 	mp_ops->boot_secondary(cpu, idle);
 

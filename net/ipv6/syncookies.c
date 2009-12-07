@@ -74,12 +74,13 @@ static inline struct sock *get_cookie_sock(struct sock *sk, struct sk_buff *skb,
 	return child;
 }
 
-static DEFINE_PER_CPU(__u32, cookie_scratch)[16 + 5 + SHA_WORKSPACE_WORDS];
+static DEFINE_PER_CPU(__u32 [16 + 5 + SHA_WORKSPACE_WORDS],
+		      ipv6_cookie_scratch);
 
 static u32 cookie_hash(struct in6_addr *saddr, struct in6_addr *daddr,
 		       __be16 sport, __be16 dport, u32 count, int c)
 {
-	__u32 *tmp = __get_cpu_var(cookie_scratch);
+	__u32 *tmp = __get_cpu_var(ipv6_cookie_scratch);
 
 	/*
 	 * we have 320 bits of information to hash, copy in the remaining
@@ -131,7 +132,7 @@ __u32 cookie_v6_init_sequence(struct sock *sk, struct sk_buff *skb, __u16 *mssp)
 	int mssind;
 	const __u16 mss = *mssp;
 
-	tcp_sk(sk)->last_synq_overflow = jiffies;
+	tcp_synq_overflow(sk);
 
 	for (mssind = 0; mss > msstab[mssind + 1]; mssind++)
 		;
@@ -175,7 +176,7 @@ struct sock *cookie_v6_check(struct sock *sk, struct sk_buff *skb)
 	if (!sysctl_tcp_syncookies || !th->ack)
 		goto out;
 
-	if (time_after(jiffies, tp->last_synq_overflow + TCP_TIMEOUT_INIT) ||
+	if (tcp_synq_no_recent_overflow(sk) ||
 		(mss = cookie_check(skb, cookie)) == 0) {
 		NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_SYNCOOKIESFAILED);
 		goto out;
@@ -204,6 +205,7 @@ struct sock *cookie_v6_check(struct sock *sk, struct sk_buff *skb)
 
 	req->mss = mss;
 	ireq->rmt_port = th->source;
+	ireq->loc_port = th->dest;
 	ipv6_addr_copy(&ireq6->rmt_addr, &ipv6_hdr(skb)->saddr);
 	ipv6_addr_copy(&ireq6->loc_addr, &ipv6_hdr(skb)->daddr);
 	if (ipv6_opt_accepted(sk, skb) ||
@@ -258,7 +260,7 @@ struct sock *cookie_v6_check(struct sock *sk, struct sk_buff *skb)
 
 		if (final_p)
 			ipv6_addr_copy(&fl.fl6_dst, final_p);
-		if ((xfrm_lookup(&dst, &fl, sk, 0)) < 0)
+		if ((xfrm_lookup(sock_net(sk), &dst, &fl, sk, 0)) < 0)
 			goto out_free;
 	}
 

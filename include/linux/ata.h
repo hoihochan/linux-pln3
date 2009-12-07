@@ -29,7 +29,10 @@
 #ifndef __LINUX_ATA_H__
 #define __LINUX_ATA_H__
 
+#include <linux/kernel.h>
+#include <linux/string.h>
 #include <linux/types.h>
+#include <asm/byteorder.h>
 
 /* defines only for the constants which don't work well as enums */
 #define ATA_DMA_BOUNDARY	0xffffUL
@@ -88,6 +91,10 @@ enum {
 	ATA_ID_DLF		= 128,
 	ATA_ID_CSFO		= 129,
 	ATA_ID_CFA_POWER	= 160,
+	ATA_ID_CFA_KEY_MGMT	= 162,
+	ATA_ID_CFA_MODES	= 163,
+	ATA_ID_DATA_SET_MGMT	= 169,
+	ATA_ID_ROT_SPEED	= 217,
 	ATA_ID_PIO4		= (1 << 1),
 
 	ATA_ID_SERNO_LEN	= 20,
@@ -104,6 +111,8 @@ enum {
 	ATA_PIO5		= ATA_PIO4 | (1 << 5),
 	ATA_PIO6		= ATA_PIO5 | (1 << 6),
 
+	ATA_PIO4_ONLY		= (1 << 4),
+
 	ATA_SWDMA0		= (1 << 0),
 	ATA_SWDMA1		= ATA_SWDMA0 | (1 << 1),
 	ATA_SWDMA2		= ATA_SWDMA1 | (1 << 2),
@@ -113,6 +122,8 @@ enum {
 	ATA_MWDMA0		= (1 << 0),
 	ATA_MWDMA1		= ATA_MWDMA0 | (1 << 1),
 	ATA_MWDMA2		= ATA_MWDMA1 | (1 << 2),
+	ATA_MWDMA3		= ATA_MWDMA2 | (1 << 3),
+	ATA_MWDMA4		= ATA_MWDMA3 | (1 << 4),
 
 	ATA_MWDMA12_ONLY	= (1 << 1) | (1 << 2),
 	ATA_MWDMA2_ONLY		= (1 << 2),
@@ -126,6 +137,8 @@ enum {
 	ATA_UDMA6		= ATA_UDMA5 | (1 << 6),
 	ATA_UDMA7		= ATA_UDMA6 | (1 << 7),
 	/* ATA_UDMA7 is just for completeness... doesn't exist (yet?).  */
+
+	ATA_UDMA24_ONLY		= (1 << 2) | (1 << 4),
 
 	ATA_UDMA_MASK_40C	= ATA_UDMA2,	/* udma0-2 */
 
@@ -197,15 +210,25 @@ enum {
 	ATA_CMD_STANDBY		= 0xE2, /* place in standby power mode */
 	ATA_CMD_IDLE		= 0xE3, /* place in idle power mode */
 	ATA_CMD_EDD		= 0x90,	/* execute device diagnostic */
+	ATA_CMD_DOWNLOAD_MICRO  = 0x92,
+	ATA_CMD_NOP		= 0x00,
 	ATA_CMD_FLUSH		= 0xE7,
 	ATA_CMD_FLUSH_EXT	= 0xEA,
 	ATA_CMD_ID_ATA		= 0xEC,
 	ATA_CMD_ID_ATAPI	= 0xA1,
+	ATA_CMD_SERVICE		= 0xA2,
 	ATA_CMD_READ		= 0xC8,
 	ATA_CMD_READ_EXT	= 0x25,
+	ATA_CMD_READ_QUEUED	= 0x26,
+	ATA_CMD_READ_STREAM_EXT	= 0x2B,
+	ATA_CMD_READ_STREAM_DMA_EXT = 0x2A,
 	ATA_CMD_WRITE		= 0xCA,
 	ATA_CMD_WRITE_EXT	= 0x35,
+	ATA_CMD_WRITE_QUEUED	= 0x36,
+	ATA_CMD_WRITE_STREAM_EXT = 0x3B,
+	ATA_CMD_WRITE_STREAM_DMA_EXT = 0x3A,
 	ATA_CMD_WRITE_FUA_EXT	= 0x3D,
+	ATA_CMD_WRITE_QUEUED_FUA_EXT = 0x3E,
 	ATA_CMD_FPDMA_READ	= 0x60,
 	ATA_CMD_FPDMA_WRITE	= 0x61,
 	ATA_CMD_PIO_READ	= 0x20,
@@ -222,6 +245,7 @@ enum {
 	ATA_CMD_PACKET		= 0xA0,
 	ATA_CMD_VERIFY		= 0x40,
 	ATA_CMD_VERIFY_EXT	= 0x42,
+	ATA_CMD_WRITE_UNCORR_EXT = 0x45,
 	ATA_CMD_STANDBYNOW1	= 0xE0,
 	ATA_CMD_IDLEIMMEDIATE	= 0xE1,
 	ATA_CMD_SLEEP		= 0xE6,
@@ -230,18 +254,36 @@ enum {
 	ATA_CMD_READ_NATIVE_MAX_EXT = 0x27,
 	ATA_CMD_SET_MAX		= 0xF9,
 	ATA_CMD_SET_MAX_EXT	= 0x37,
-	ATA_CMD_READ_LOG_EXT	= 0x2f,
+	ATA_CMD_READ_LOG_EXT	= 0x2F,
+	ATA_CMD_WRITE_LOG_EXT	= 0x3F,
+	ATA_CMD_READ_LOG_DMA_EXT = 0x47,
+	ATA_CMD_WRITE_LOG_DMA_EXT = 0x57,
+	ATA_CMD_TRUSTED_RCV	= 0x5C,
+	ATA_CMD_TRUSTED_RCV_DMA = 0x5D,
+	ATA_CMD_TRUSTED_SND	= 0x5E,
+	ATA_CMD_TRUSTED_SND_DMA = 0x5F,
 	ATA_CMD_PMP_READ	= 0xE4,
 	ATA_CMD_PMP_WRITE	= 0xE8,
 	ATA_CMD_CONF_OVERLAY	= 0xB1,
+	ATA_CMD_SEC_SET_PASS	= 0xF1,
+	ATA_CMD_SEC_UNLOCK	= 0xF2,
+	ATA_CMD_SEC_ERASE_PREP	= 0xF3,
+	ATA_CMD_SEC_ERASE_UNIT	= 0xF4,
 	ATA_CMD_SEC_FREEZE_LOCK	= 0xF5,
+	ATA_CMD_SEC_DISABLE_PASS = 0xF6,
+	ATA_CMD_CONFIG_STREAM	= 0x51,
 	ATA_CMD_SMART		= 0xB0,
 	ATA_CMD_MEDIA_LOCK	= 0xDE,
 	ATA_CMD_MEDIA_UNLOCK	= 0xDF,
+	ATA_CMD_DSM		= 0x06,
+	ATA_CMD_CHK_MED_CRD_TYP = 0xD1,
+	ATA_CMD_CFA_REQ_EXT_ERR = 0x03,
+	ATA_CMD_CFA_WRITE_NE	= 0x38,
+	ATA_CMD_CFA_TRANS_SECT	= 0x87,
+	ATA_CMD_CFA_ERASE	= 0xC0,
+	ATA_CMD_CFA_WRITE_MULT_NE = 0xCD,
 	/* marked obsolete in the ATA/ATAPI-7 spec */
 	ATA_CMD_RESTORE		= 0x10,
-	/* EXABYTE specific */
-	ATA_EXABYTE_ENABLE_NEST	= 0xF0,
 
 	/* READ_LOG_EXT pages */
 	ATA_LOG_SATA_NCQ	= 0x10,
@@ -292,8 +334,12 @@ enum {
 	SETFEATURES_SATA_DISABLE = 0x90, /* Disable use of SATA feature */
 
 	/* SETFEATURE Sector counts for SATA features */
-	SATA_AN			= 0x05,  /* Asynchronous Notification */
-	SATA_DIPM		= 0x03,  /* Device Initiated Power Management */
+	SATA_FPDMA_OFFSET	= 0x01,	/* FPDMA non-zero buffer offsets */
+	SATA_FPDMA_AA		= 0x02, /* FPDMA Setup FIS Auto-Activate */
+	SATA_DIPM		= 0x03,	/* Device Initiated Power Management */
+	SATA_FPDMA_IN_ORDER	= 0x04,	/* FPDMA in-order data delivery */
+	SATA_AN			= 0x05,	/* Asynchronous Notification */
+	SATA_SSP		= 0x06,	/* Software Settings Preservation */
 
 	/* feature values for SET_MAX */
 	ATA_SET_MAX_ADDR	= 0x00,
@@ -312,6 +358,9 @@ enum {
 	ATA_SMART_ENABLE	= 0xD8,
 	ATA_SMART_READ_VALUES	= 0xD0,
 	ATA_SMART_READ_THRESHOLDS = 0xD1,
+
+	/* feature values for Data Set Management */
+	ATA_DSM_TRIM		= 0x01,
 
 	/* password used in LBA Mid / LBA High for executing SMART commands */
 	ATA_SMART_LBAM_PASS	= 0x4F,
@@ -510,6 +559,9 @@ static inline int ata_is_data(u8 prot)
 #define ata_id_has_atapi_AN(id)	\
 	( (((id)[76] != 0x0000) && ((id)[76] != 0xffff)) && \
 	  ((id)[78] & (1 << 5)) )
+#define ata_id_has_fpdma_aa(id)	\
+	( (((id)[76] != 0x0000) && ((id)[76] != 0xffff)) && \
+	  ((id)[78] & (1 << 2)) )
 #define ata_id_iordy_disable(id) ((id)[ATA_ID_CAPABILITY] & (1 << 10))
 #define ata_id_has_iordy(id) ((id)[ATA_ID_CAPABILITY] & (1 << 11))
 #define ata_id_u32(id,n)	\
@@ -557,11 +609,33 @@ static inline int ata_id_has_flush(const u16 *id)
 	return id[ATA_ID_COMMAND_SET_2] & (1 << 12);
 }
 
+static inline int ata_id_flush_enabled(const u16 *id)
+{
+	if (ata_id_has_flush(id) == 0)
+		return 0;
+	if ((id[ATA_ID_CSF_DEFAULT] & 0xC000) != 0x4000)
+		return 0;
+	return id[ATA_ID_CFS_ENABLE_2] & (1 << 12);
+}
+
 static inline int ata_id_has_flush_ext(const u16 *id)
 {
 	if ((id[ATA_ID_COMMAND_SET_2] & 0xC000) != 0x4000)
 		return 0;
 	return id[ATA_ID_COMMAND_SET_2] & (1 << 13);
+}
+
+static inline int ata_id_flush_ext_enabled(const u16 *id)
+{
+	if (ata_id_has_flush_ext(id) == 0)
+		return 0;
+	if ((id[ATA_ID_CSF_DEFAULT] & 0xC000) != 0x4000)
+		return 0;
+	/*
+	 * some Maxtor disks have bit 13 defined incorrectly
+	 * so check bit 10 too
+	 */
+	return (id[ATA_ID_CFS_ENABLE_2] & 0x2400) == 0x2400;
 }
 
 static inline int ata_id_has_lba48(const u16 *id)
@@ -571,6 +645,15 @@ static inline int ata_id_has_lba48(const u16 *id)
 	if (!ata_id_u64(id, ATA_ID_LBA_CAPACITY_2))
 		return 0;
 	return id[ATA_ID_COMMAND_SET_2] & (1 << 10);
+}
+
+static inline int ata_id_lba48_enabled(const u16 *id)
+{
+	if (ata_id_has_lba48(id) == 0)
+		return 0;
+	if ((id[ATA_ID_CSF_DEFAULT] & 0xC000) != 0x4000)
+		return 0;
+	return id[ATA_ID_CFS_ENABLE_2] & (1 << 10);
 }
 
 static inline int ata_id_hpa_enabled(const u16 *id)
@@ -644,7 +727,15 @@ static inline unsigned int ata_id_major_version(const u16 *id)
 
 static inline int ata_id_is_sata(const u16 *id)
 {
-	return ata_id_major_version(id) >= 5 && id[ATA_ID_HW_CONFIG] == 0;
+	/*
+	 * See if word 93 is 0 AND drive is at least ATA-5 compatible
+	 * verifying that word 80 by casting it to a signed type --
+	 * this trick allows us to filter out the reserved values of
+	 * 0x0000 and 0xffff along with the earlier ATA revisions...
+	 */
+	if (id[ATA_ID_HW_CONFIG] == 0 && (short)id[ATA_ID_MAJOR_VER] >= 0x0020)
+		return 1;
+	return 0;
 }
 
 static inline int ata_id_has_tpm(const u16 *id)
@@ -663,6 +754,51 @@ static inline int ata_id_has_dword_io(const u16 *id)
 	if (ata_id_major_version(id) > 7)
 		return 0;
 	if (id[ATA_ID_DWORD_IO] & (1 << 0))
+		return 1;
+	return 0;
+}
+
+static inline int ata_id_has_unload(const u16 *id)
+{
+	if (ata_id_major_version(id) >= 7 &&
+	    (id[ATA_ID_CFSSE] & 0xC000) == 0x4000 &&
+	    id[ATA_ID_CFSSE] & (1 << 13))
+		return 1;
+	return 0;
+}
+
+static inline int ata_id_form_factor(const u16 *id)
+{
+	u16 val = id[168];
+
+	if (ata_id_major_version(id) < 7 || val == 0 || val == 0xffff)
+		return 0;
+
+	val &= 0xf;
+
+	if (val > 5)
+		return 0;
+
+	return val;
+}
+
+static inline int ata_id_rotation_rate(const u16 *id)
+{
+	u16 val = id[217];
+
+	if (ata_id_major_version(id) < 7 || val == 0 || val == 0xffff)
+		return 0;
+
+	if (val > 1 && val < 0x401)
+		return 0;
+
+	return val;
+}
+
+static inline int ata_id_has_trim(const u16 *id)
+{
+	if (ata_id_major_version(id) >= 7 &&
+	    (id[ATA_ID_DATA_SET_MGMT] & 1))
 		return 1;
 	return 0;
 }
@@ -692,6 +828,25 @@ static inline int ata_id_is_cfa(const u16 *id)
 	 * sort of quirk list, it seems impractical for the ones that do...
 	 */
 	if ((id[ATA_ID_COMMAND_SET_2] & 0xC004) == 0x4004)
+		return 1;
+	return 0;
+}
+
+static inline int ata_id_is_ssd(const u16 *id)
+{
+	return id[ATA_ID_ROT_SPEED] == 0x01;
+}
+
+static inline int ata_id_pio_need_iordy(const u16 *id, const u8 pio)
+{
+	/* CF spec. r4.1 Table 22 says no IORDY on PIO5 and PIO6. */
+	if (pio > 4 && ata_id_is_cfa(id))
+		return 0;
+	/* For PIO3 and higher it is mandatory. */
+	if (pio > 2)
+		return 1;
+	/* Turn it on when possible. */
+	if (ata_id_has_iordy(id))
 		return 1;
 	return 0;
 }
@@ -730,6 +885,102 @@ static inline int atapi_command_packet_set(const u16 *dev_id)
 static inline int atapi_id_dmadir(const u16 *dev_id)
 {
 	return ata_id_major_version(dev_id) >= 7 && (dev_id[62] & 0x8000);
+}
+
+/*
+ * ata_id_is_lba_capacity_ok() performs a sanity check on
+ * the claimed LBA capacity value for the device.
+ *
+ * Returns 1 if LBA capacity looks sensible, 0 otherwise.
+ *
+ * It is called only once for each device.
+ */
+static inline int ata_id_is_lba_capacity_ok(u16 *id)
+{
+	unsigned long lba_sects, chs_sects, head, tail;
+
+	/* No non-LBA info .. so valid! */
+	if (id[ATA_ID_CYLS] == 0)
+		return 1;
+
+	lba_sects = ata_id_u32(id, ATA_ID_LBA_CAPACITY);
+
+	/*
+	 * The ATA spec tells large drives to return
+	 * C/H/S = 16383/16/63 independent of their size.
+	 * Some drives can be jumpered to use 15 heads instead of 16.
+	 * Some drives can be jumpered to use 4092 cyls instead of 16383.
+	 */
+	if ((id[ATA_ID_CYLS] == 16383 ||
+	     (id[ATA_ID_CYLS] == 4092 && id[ATA_ID_CUR_CYLS] == 16383)) &&
+	    id[ATA_ID_SECTORS] == 63 &&
+	    (id[ATA_ID_HEADS] == 15 || id[ATA_ID_HEADS] == 16) &&
+	    (lba_sects >= 16383 * 63 * id[ATA_ID_HEADS]))
+		return 1;
+
+	chs_sects = id[ATA_ID_CYLS] * id[ATA_ID_HEADS] * id[ATA_ID_SECTORS];
+
+	/* perform a rough sanity check on lba_sects: within 10% is OK */
+	if (lba_sects - chs_sects < chs_sects/10)
+		return 1;
+
+	/* some drives have the word order reversed */
+	head = (lba_sects >> 16) & 0xffff;
+	tail = lba_sects & 0xffff;
+	lba_sects = head | (tail << 16);
+
+	if (lba_sects - chs_sects < chs_sects/10) {
+		*(__le32 *)&id[ATA_ID_LBA_CAPACITY] = __cpu_to_le32(lba_sects);
+		return 1;	/* LBA capacity is (now) good */
+	}
+
+	return 0;	/* LBA capacity value may be bad */
+}
+
+static inline void ata_id_to_hd_driveid(u16 *id)
+{
+#ifdef __BIG_ENDIAN
+	/* accessed in struct hd_driveid as 8-bit values */
+	id[ATA_ID_MAX_MULTSECT]	 = __cpu_to_le16(id[ATA_ID_MAX_MULTSECT]);
+	id[ATA_ID_CAPABILITY]	 = __cpu_to_le16(id[ATA_ID_CAPABILITY]);
+	id[ATA_ID_OLD_PIO_MODES] = __cpu_to_le16(id[ATA_ID_OLD_PIO_MODES]);
+	id[ATA_ID_OLD_DMA_MODES] = __cpu_to_le16(id[ATA_ID_OLD_DMA_MODES]);
+	id[ATA_ID_MULTSECT]	 = __cpu_to_le16(id[ATA_ID_MULTSECT]);
+
+	/* as 32-bit values */
+	*(u32 *)&id[ATA_ID_LBA_CAPACITY] = ata_id_u32(id, ATA_ID_LBA_CAPACITY);
+	*(u32 *)&id[ATA_ID_SPG]		 = ata_id_u32(id, ATA_ID_SPG);
+
+	/* as 64-bit value */
+	*(u64 *)&id[ATA_ID_LBA_CAPACITY_2] =
+		ata_id_u64(id, ATA_ID_LBA_CAPACITY_2);
+#endif
+}
+
+/*
+ * Write up to 'max' LBA Range Entries to the buffer that will cover the
+ * extent from sector to sector + count.  This is used for TRIM and for
+ * ADD LBA(S) TO NV CACHE PINNED SET.
+ */
+static inline unsigned ata_set_lba_range_entries(void *_buffer, unsigned max,
+						u64 sector, unsigned long count)
+{
+	__le64 *buffer = _buffer;
+	unsigned i = 0;
+
+	while (i < max) {
+		u64 entry = sector |
+			((u64)(count > 0xffff ? 0xffff : count) << 48);
+		buffer[i++] = __cpu_to_le64(entry);
+		if (count <= 0xffff)
+			break;
+		count -= 0xffff;
+		sector += 0xffff;
+	}
+
+	max = ALIGN(i * 8, 512);
+	memset(buffer + i, 0, max - i * 8);
+	return max;
 }
 
 static inline int is_multi_taskfile(struct ata_taskfile *tf)

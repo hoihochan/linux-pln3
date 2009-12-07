@@ -16,8 +16,8 @@
 #include <linux/list.h>
 #include <linux/timer.h>
 #include <linux/init.h>
+#include <linux/gpio.h>
 #include <linux/sysdev.h>
-#include <linux/delay.h>
 #include <linux/serial_core.h>
 #include <linux/platform_device.h>
 #include <linux/i2c.h>
@@ -30,9 +30,9 @@
 #include <asm/mach/map.h>
 #include <asm/mach/irq.h>
 
-#include <asm/plat-s3c/regs-serial.h>
-#include <asm/plat-s3c/nand.h>
-#include <asm/plat-s3c/iic.h>
+#include <plat/regs-serial.h>
+#include <plat/nand.h>
+#include <plat/iic.h>
 
 #include <mach/regs-power.h>
 #include <mach/regs-gpio.h>
@@ -48,11 +48,11 @@
 #include <linux/mtd/nand_ecc.h>
 #include <linux/mtd/partitions.h>
 
-#include <asm/plat-s3c24xx/clock.h>
-#include <asm/plat-s3c24xx/devs.h>
-#include <asm/plat-s3c24xx/cpu.h>
-#include <asm/plat-s3c24xx/pm.h>
-#include <asm/plat-s3c24xx/udc.h>
+#include <plat/clock.h>
+#include <plat/devs.h>
+#include <plat/cpu.h>
+#include <plat/pm.h>
+#include <plat/udc.h>
 
 static struct map_desc jive_iodesc[] __initdata = {
 };
@@ -278,7 +278,7 @@ __setup("mtdset=", jive_mtdset);
 #define LCD_HTOT (LCD_HSYNC + LCD_LEFT_MARGIN + LCD_XRES + LCD_RIGHT_MARGIN)
 #define LCD_VTOT (LCD_VSYNC + LCD_LOWER_MARGIN + LCD_YRES + LCD_UPPER_MARGIN)
 
-struct s3c2410fb_display jive_vgg2432a4_display[] = {
+static struct s3c2410fb_display jive_vgg2432a4_display[] = {
 	[0] = {
 		.width		= LCD_XRES,
 		.height		= LCD_YRES,
@@ -311,7 +311,7 @@ struct s3c2410fb_display jive_vgg2432a4_display[] = {
 #define S3C2410_GPCCON_MASK(x)	(3 << ((x) * 2))
 #define S3C2410_GPDCON_MASK(x)	(3 << ((x) * 2))
 
-struct s3c2410fb_mach_info jive_lcd_config = {
+static struct s3c2410fb_mach_info jive_lcd_config = {
 	.displays	 = jive_vgg2432a4_display,
 	.num_displays	 = ARRAY_SIZE(jive_vgg2432a4_display),
 	.default_display = 0,
@@ -357,8 +357,8 @@ static void jive_lcm_reset(unsigned int set)
 {
 	printk(KERN_DEBUG "%s(%d)\n", __func__, set);
 
-	s3c2410_gpio_setpin(S3C2410_GPG13, set);
-	s3c2410_gpio_cfgpin(S3C2410_GPG13, S3C2410_GPIO_OUTPUT);
+	s3c2410_gpio_setpin(S3C2410_GPG(13), set);
+	s3c2410_gpio_cfgpin(S3C2410_GPG(13), S3C2410_GPIO_OUTPUT);
 }
 
 #undef LCD_UPPER_MARGIN
@@ -391,18 +391,19 @@ static struct ili9320_platdata jive_lcm_config = {
 
 static void jive_lcd_spi_chipselect(struct s3c2410_spigpio_info *spi, int cs)
 {
-	s3c2410_gpio_setpin(S3C2410_GPB7, cs ? 0 : 1);
+	s3c2410_gpio_setpin(S3C2410_GPB(7), cs ? 0 : 1);
 }
 
 static struct s3c2410_spigpio_info jive_lcd_spi = {
 	.bus_num	= 1,
-	.pin_clk	= S3C2410_GPG8,
-	.pin_mosi	= S3C2410_GPB8,
+	.pin_clk	= S3C2410_GPG(8),
+	.pin_mosi	= S3C2410_GPB(8),
+	.num_chipselect	= 1,
 	.chip_select	= jive_lcd_spi_chipselect,
 };
 
 static struct platform_device jive_device_lcdspi = {
-	.name		= "s3c24xx-spi-gpio",
+	.name		= "spi_s3c24xx_gpio",
 	.id		= 1,
 	.num_resources  = 0,
 	.dev.platform_data = &jive_lcd_spi,
@@ -412,18 +413,19 @@ static struct platform_device jive_device_lcdspi = {
 
 static void jive_wm8750_chipselect(struct s3c2410_spigpio_info *spi, int cs)
 {
-	s3c2410_gpio_setpin(S3C2410_GPH10, cs ? 0 : 1);
+	s3c2410_gpio_setpin(S3C2410_GPH(10), cs ? 0 : 1);
 }
 
 static struct s3c2410_spigpio_info jive_wm8750_spi = {
 	.bus_num	= 2,
-	.pin_clk	= S3C2410_GPB4,
-	.pin_mosi	= S3C2410_GPB9,
+	.pin_clk	= S3C2410_GPB(4),
+	.pin_mosi	= S3C2410_GPB(9),
+	.num_chipselect	= 1,
 	.chip_select	= jive_wm8750_chipselect,
 };
 
 static struct platform_device jive_device_wm8750 = {
-	.name		= "s3c24xx-spi-gpio",
+	.name		= "spi_s3c24xx_gpio",
 	.id		= 2,
 	.num_resources  = 0,
 	.dev.platform_data = &jive_wm8750_spi,
@@ -450,14 +452,13 @@ static struct spi_board_info __initdata jive_spi_devs[] = {
 
 /* I2C bus and device configuration. */
 
-static struct s3c2410_platform_i2c jive_i2c_cfg = {
-	.max_freq	= 80 * 1000,
-	.bus_freq	= 50 * 1000,
+static struct s3c2410_platform_i2c jive_i2c_cfg __initdata = {
+	.frequency	= 80 * 1000,
 	.flags		= S3C_IICFLG_FILTER,
 	.sda_delay	= 2,
 };
 
-static struct i2c_board_info jive_i2c_devs[] = {
+static struct i2c_board_info jive_i2c_devs[] __initdata = {
 	[0] = {
 		I2C_BOARD_INFO("lis302dl", 0x1c),
 		.irq	= IRQ_EINT14,
@@ -470,7 +471,7 @@ static struct platform_device *jive_devices[] __initdata = {
 	&s3c_device_usb,
 	&s3c_device_rtc,
 	&s3c_device_wdt,
-	&s3c_device_i2c,
+	&s3c_device_i2c0,
 	&s3c_device_lcd,
 	&jive_device_lcdspi,
 	&jive_device_wm8750,
@@ -479,7 +480,7 @@ static struct platform_device *jive_devices[] __initdata = {
 };
 
 static struct s3c2410_udc_mach_info jive_udc_cfg __initdata = {
-	.vbus_pin	= S3C2410_GPG1,		/* detect is on GPG1 */
+	.vbus_pin	= S3C2410_GPG(1),		/* detect is on GPG1 */
 };
 
 /* Jive power management device */
@@ -492,7 +493,7 @@ static int jive_pm_suspend(struct sys_device *sd, pm_message_t state)
 	 * correct address to resume from. */
 
 	__raw_writel(0x2BED, S3C2412_INFORM0);
-	__raw_writel(virt_to_phys(s3c2410_cpu_resume), S3C2412_INFORM1);
+	__raw_writel(virt_to_phys(s3c_cpu_resume), S3C2412_INFORM1);
 
 	return 0;
 }
@@ -529,8 +530,8 @@ static void jive_power_off(void)
 {
 	printk(KERN_INFO "powering system down...\n");
 
-	s3c2410_gpio_setpin(S3C2410_GPC5, 1);
-	s3c2410_gpio_cfgpin(S3C2410_GPC5, S3C2410_GPIO_OUTPUT);
+	s3c2410_gpio_setpin(S3C2410_GPC(5), 1);
+	s3c2410_gpio_cfgpin(S3C2410_GPC(5), S3C2410_GPIO_OUTPUT);
 }
 
 static void __init jive_machine_init(void)
@@ -628,28 +629,28 @@ static void __init jive_machine_init(void)
 
 	/* initialise the power management now we've setup everything. */
 
-	s3c2410_pm_init();
+	s3c_pm_init();
 
 	s3c_device_nand.dev.platform_data = &jive_nand_info;
 
 	/* initialise the spi */
 
-	s3c2410_gpio_setpin(S3C2410_GPG13, 0);
-	s3c2410_gpio_cfgpin(S3C2410_GPG13, S3C2410_GPIO_OUTPUT);
+	s3c2410_gpio_setpin(S3C2410_GPG(13), 0);
+	s3c2410_gpio_cfgpin(S3C2410_GPG(13), S3C2410_GPIO_OUTPUT);
 
-	s3c2410_gpio_setpin(S3C2410_GPB7, 1);
-	s3c2410_gpio_cfgpin(S3C2410_GPB7, S3C2410_GPIO_OUTPUT);
+	s3c2410_gpio_setpin(S3C2410_GPB(7), 1);
+	s3c2410_gpio_cfgpin(S3C2410_GPB(7), S3C2410_GPIO_OUTPUT);
 
-	s3c2410_gpio_setpin(S3C2410_GPB6, 0);
-	s3c2410_gpio_cfgpin(S3C2410_GPB6, S3C2410_GPIO_OUTPUT);
+	s3c2410_gpio_setpin(S3C2410_GPB(6), 0);
+	s3c2410_gpio_cfgpin(S3C2410_GPB(6), S3C2410_GPIO_OUTPUT);
 
-	s3c2410_gpio_setpin(S3C2410_GPG8, 1);
-	s3c2410_gpio_cfgpin(S3C2410_GPG8, S3C2410_GPIO_OUTPUT);
+	s3c2410_gpio_setpin(S3C2410_GPG(8), 1);
+	s3c2410_gpio_cfgpin(S3C2410_GPG(8), S3C2410_GPIO_OUTPUT);
 
 	/* initialise the WM8750 spi */
 
-	s3c2410_gpio_setpin(S3C2410_GPH10, 1);
-	s3c2410_gpio_cfgpin(S3C2410_GPH10, S3C2410_GPIO_OUTPUT);
+	s3c2410_gpio_setpin(S3C2410_GPH(10), 1);
+	s3c2410_gpio_cfgpin(S3C2410_GPH(10), S3C2410_GPIO_OUTPUT);
 
 	/* Turn off suspend on both USB ports, and switch the
 	 * selectable USB port to USB device mode. */
@@ -663,7 +664,7 @@ static void __init jive_machine_init(void)
 
 	spi_register_board_info(jive_spi_devs, ARRAY_SIZE(jive_spi_devs));
 
-	s3c_device_i2c.dev.platform_data = &jive_i2c_cfg;
+	s3c_i2c0_set_platdata(&jive_i2c_cfg);
 	i2c_register_board_info(0, jive_i2c_devs, ARRAY_SIZE(jive_i2c_devs));
 
 	pm_power_off = jive_power_off;

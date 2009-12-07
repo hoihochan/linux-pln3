@@ -106,7 +106,7 @@ void svc_seq_show(struct seq_file *seq, const struct svc_stat *statp) {
 		seq_putc(seq, '\n');
 	}
 }
-EXPORT_SYMBOL(svc_seq_show);
+EXPORT_SYMBOL_GPL(svc_seq_show);
 
 /**
  * rpc_alloc_iostats - allocate an rpc_iostats structure
@@ -141,12 +141,14 @@ EXPORT_SYMBOL_GPL(rpc_free_iostats);
 void rpc_count_iostats(struct rpc_task *task)
 {
 	struct rpc_rqst *req = task->tk_rqstp;
-	struct rpc_iostats *stats = task->tk_client->cl_metrics;
+	struct rpc_iostats *stats;
 	struct rpc_iostats *op_metrics;
 	long rtt, execute, queue;
 
-	if (!stats || !req)
+	if (!task->tk_client || !task->tk_client->cl_metrics || !req)
 		return;
+
+	stats = task->tk_client->cl_metrics;
 	op_metrics = &stats[task->tk_msg.rpc_proc->p_statidx];
 
 	op_metrics->om_ops++;
@@ -154,7 +156,7 @@ void rpc_count_iostats(struct rpc_task *task)
 	op_metrics->om_timeouts += task->tk_timeouts;
 
 	op_metrics->om_bytes_sent += task->tk_bytes_sent;
-	op_metrics->om_bytes_recv += req->rq_received;
+	op_metrics->om_bytes_recv += req->rq_reply_bytes_recvd;
 
 	queue = (long)req->rq_xtime - task->tk_start;
 	if (queue < 0)
@@ -249,27 +251,21 @@ svc_proc_register(struct svc_stat *statp, const struct file_operations *fops)
 {
 	return do_register(statp->program->pg_name, statp, fops);
 }
-EXPORT_SYMBOL(svc_proc_register);
+EXPORT_SYMBOL_GPL(svc_proc_register);
 
 void
 svc_proc_unregister(const char *name)
 {
 	remove_proc_entry(name, proc_net_rpc);
 }
-EXPORT_SYMBOL(svc_proc_unregister);
+EXPORT_SYMBOL_GPL(svc_proc_unregister);
 
 void
 rpc_proc_init(void)
 {
 	dprintk("RPC:       registering /proc/net/rpc\n");
-	if (!proc_net_rpc) {
-		struct proc_dir_entry *ent;
-		ent = proc_mkdir("rpc", init_net.proc_net);
-		if (ent) {
-			ent->owner = THIS_MODULE;
-			proc_net_rpc = ent;
-		}
-	}
+	if (!proc_net_rpc)
+		proc_net_rpc = proc_mkdir("rpc", init_net.proc_net);
 }
 
 void

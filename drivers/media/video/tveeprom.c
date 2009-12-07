@@ -184,7 +184,7 @@ hauppauge_tuner[] =
 	{ TUNER_ABSENT,        		"Silicon TDA8275C1 8290 FM"},
 	{ TUNER_ABSENT,        		"Thompson DTT757"},
 	/* 80-89 */
-	{ TUNER_PHILIPS_FM1216ME_MK3, 	"Philips FQ1216LME MK3"},
+	{ TUNER_PHILIPS_FQ1216LME_MK3, 	"Philips FQ1216LME MK3"},
 	{ TUNER_LG_PAL_NEW_TAPC, 	"LG TAPC G701D"},
 	{ TUNER_LG_NTSC_NEW_TAPC, 	"LG TAPC H791F"},
 	{ TUNER_LG_PAL_NEW_TAPC, 	"TCL 2002MB 3"},
@@ -210,7 +210,7 @@ hauppauge_tuner[] =
 	{ TUNER_TEA5767,       		"Philips TEA5768HL FM Radio"},
 	{ TUNER_ABSENT,        		"Panasonic ENV57H12D5"},
 	{ TUNER_PHILIPS_FM1236_MK3, 	"TCL MFNM05-4"},
-	{ TUNER_ABSENT,        		"TCL MNM05-4"},
+	{ TUNER_PHILIPS_FM1236_MK3,	"TCL MNM05-4"},
 	{ TUNER_PHILIPS_FM1216ME_MK3, 	"TCL MPE05-2"},
 	{ TUNER_ABSENT,        		"TCL MQNM05-4"},
 	{ TUNER_ABSENT,        		"LG TAPC-W701D"},
@@ -229,7 +229,7 @@ hauppauge_tuner[] =
 	{ TUNER_ABSENT,        		"Samsung THPD5222FG30A"},
 	/* 120-129 */
 	{ TUNER_XC2028,        		"Xceive XC3028"},
-	{ TUNER_ABSENT,        		"Philips FQ1216LME MK5"},
+	{ TUNER_PHILIPS_FQ1216LME_MK3,	"Philips FQ1216LME MK5"},
 	{ TUNER_ABSENT,        		"Philips FQD1216LME"},
 	{ TUNER_ABSENT,        		"Conexant CX24118A"},
 	{ TUNER_ABSENT,        		"TCL DMF11WIP"},
@@ -242,7 +242,7 @@ hauppauge_tuner[] =
 	{ TUNER_ABSENT,        		"TCL M2523_3DBH_E"},
 	{ TUNER_ABSENT,        		"TCL M2523_3DIH_E"},
 	{ TUNER_ABSENT,        		"TCL MFPE05_2_U"},
-	{ TUNER_PHILIPS_FMD1216ME_MK3,	"Philips FMD1216MEX"},
+	{ TUNER_PHILIPS_FMD1216MEX_MK3,	"Philips FMD1216MEX"},
 	{ TUNER_ABSENT,        		"Philips FRH2036B"},
 	{ TUNER_ABSENT,        		"Panasonic ENGF75_01GF"},
 	{ TUNER_ABSENT,        		"MaxLinear MXL5005"},
@@ -261,7 +261,12 @@ hauppauge_tuner[] =
 	{ TUNER_ABSENT,        		"MaxLinear MXL5005_v2"},
 	{ TUNER_PHILIPS_TDA8290, 	"Philips 18271_8295"},
 	/* 150-159 */
-	{ TUNER_ABSENT,                 "Xceive XC5000"},
+	{ TUNER_XC5000,                 "Xceive XC5000"},
+	{ TUNER_ABSENT,                 "Xceive XC3028L"},
+	{ TUNER_ABSENT,                 "NXP 18271C2_716x"},
+	{ TUNER_ABSENT,                 "Xceive XC4000"},
+	{ TUNER_ABSENT,                 "Dibcom 7070"},
+	{ TUNER_PHILIPS_TDA8290,        "NXP 18271C2"},
 };
 
 /* Use V4L2_IDENT_AMBIGUOUS for those audio 'chips' that are
@@ -427,6 +432,9 @@ void tveeprom_hauppauge_analog(struct i2c_client *c, struct tveeprom *tvee,
 	const char *t_fmt_name2[8] = { " none", "", "", "", "", "", "", "" };
 
 	memset(tvee, 0, sizeof(*tvee));
+	tvee->tuner_type = TUNER_ABSENT;
+	tvee->tuner2_type = TUNER_ABSENT;
+
 	done = len = beenhere = 0;
 
 	/* Different eeprom start offsets for em28xx, cx2388x and cx23418 */
@@ -638,14 +646,14 @@ void tveeprom_hauppauge_analog(struct i2c_client *c, struct tveeprom *tvee,
 		tvee->has_radio = 1;
 	}
 
-	if (tuner1 < sizeof(hauppauge_tuner)/sizeof(struct HAUPPAUGE_TUNER)) {
+	if (tuner1 < ARRAY_SIZE(hauppauge_tuner)) {
 		tvee->tuner_type = hauppauge_tuner[tuner1].id;
 		t_name1 = hauppauge_tuner[tuner1].name;
 	} else {
 		t_name1 = "unknown";
 	}
 
-	if (tuner2 < sizeof(hauppauge_tuner)/sizeof(struct HAUPPAUGE_TUNER)) {
+	if (tuner2 < ARRAY_SIZE(hauppauge_tuner)) {
 		tvee->tuner2_type = hauppauge_tuner[tuner2].id;
 		t_name2 = hauppauge_tuner[tuner2].name;
 	} else {

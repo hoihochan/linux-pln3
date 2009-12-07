@@ -10,19 +10,22 @@
  * for more details.
  */
 #include <linux/mm.h>
+#include <linux/init.h>
 #include <linux/platform_device.h>
 #include <linux/dma-mapping.h>
+#include <linux/dma-debug.h>
+#include <linux/io.h>
 #include <asm/cacheflush.h>
 #include <asm/addrspace.h>
-#include <asm/io.h>
 
-struct dma_coherent_mem {
-	void		*virt_base;
-	u32		device_base;
-	int		size;
-	int		flags;
-	unsigned long	*bitmap;
-};
+#define PREALLOC_DMA_DEBUG_ENTRIES	4096
+
+static int __init dma_init(void)
+{
+	dma_debug_init(PREALLOC_DMA_DEBUG_ENTRIES);
+	return 0;
+}
+fs_initcall(dma_init);
 
 void *dma_alloc_coherent(struct device *dev, size_t size,
 			   dma_addr_t *dma_handle, gfp_t gfp)
@@ -44,13 +47,18 @@ void *dma_alloc_coherent(struct device *dev, size_t size,
 	 */
 	dma_cache_sync(dev, ret, size, DMA_BIDIRECTIONAL);
 
-	ret_nocache = ioremap_nocache(virt_to_phys(ret), size);
+	ret_nocache = (void __force *)ioremap_nocache(virt_to_phys(ret), size);
 	if (!ret_nocache) {
 		free_pages((unsigned long)ret, order);
 		return NULL;
 	}
 
+	split_page(pfn_to_page(virt_to_phys(ret) >> PAGE_SHIFT), order);
+
 	*dma_handle = virt_to_phys(ret);
+
+	debug_dma_alloc_coherent(dev, size, *dma_handle, ret_nocache);
+
 	return ret_nocache;
 }
 EXPORT_SYMBOL(dma_alloc_coherent);
@@ -58,15 +66,19 @@ EXPORT_SYMBOL(dma_alloc_coherent);
 void dma_free_coherent(struct device *dev, size_t size,
 			 void *vaddr, dma_addr_t dma_handle)
 {
-	struct dma_coherent_mem *mem = dev ? dev->dma_mem : NULL;
 	int order = get_order(size);
+	unsigned long pfn = dma_handle >> PAGE_SHIFT;
+	int k;
 
-	if (!dma_release_from_coherent(dev, order, vaddr)) {
-		WARN_ON(irqs_disabled());	/* for portability */
-		BUG_ON(mem && mem->flags & DMA_MEMORY_EXCLUSIVE);
-		free_pages((unsigned long)phys_to_virt(dma_handle), order);
-		iounmap(vaddr);
-	}
+	WARN_ON(irqs_disabled());	/* for portability */
+
+	if (dma_release_from_coherent(dev, order, vaddr))
+		return;
+
+	debug_dma_free_coherent(dev, size, vaddr, dma_handle);
+	for (k = 0; k < (1 << order); k++)
+		__free_pages(pfn_to_page(pfn + k), 0);
+	iounmap(vaddr);
 }
 EXPORT_SYMBOL(dma_free_coherent);
 

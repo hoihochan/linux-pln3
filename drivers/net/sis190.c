@@ -47,7 +47,7 @@
 #define PHY_ID_ANY		0x1f
 #define MII_REG_ANY		0x1f
 
-#define DRV_VERSION		"1.2"
+#define DRV_VERSION		"1.3"
 #define DRV_NAME		"sis190"
 #define SIS190_DRIVER_NAME	DRV_NAME " Gigabit Ethernet driver " DRV_VERSION
 #define PFX DRV_NAME ": "
@@ -317,6 +317,7 @@ static struct mii_chip_info {
         unsigned int type;
 	u32 feature;
 } mii_chip_table[] = {
+	{ "Atheros PHY",          { 0x004d, 0xd010 }, LAN, 0 },
 	{ "Atheros PHY AR8012",   { 0x004d, 0xd020 }, LAN, 0 },
 	{ "Broadcom PHY BCM5461", { 0x0020, 0x60c0 }, LAN, F_PHY_BCM5461 },
 	{ "Broadcom PHY AC131",   { 0x0143, 0xbc70 }, LAN, 0 },
@@ -347,7 +348,7 @@ static struct {
 	u32 msg_enable;
 } debug = { -1 };
 
-MODULE_DESCRIPTION("SiS sis190 Gigabit Ethernet driver");
+MODULE_DESCRIPTION("SiS sis190/191 Gigabit Ethernet driver");
 module_param(rx_copybreak, int, 0);
 MODULE_PARM_DESC(rx_copybreak, "Copy breakpoint for copy-only-tiny-frames");
 module_param_named(debug, debug.msg_enable, int, 0);
@@ -539,8 +540,8 @@ static bool sis190_try_rx_copy(struct sis190_private *tp,
 	if (!skb)
 		goto out;
 
-	pci_dma_sync_single_for_device(tp->pci_dev, addr, pkt_size,
-				       PCI_DMA_FROMDEVICE);
+	pci_dma_sync_single_for_cpu(tp->pci_dev, addr, tp->rx_buf_sz,
+				PCI_DMA_FROMDEVICE);
 	skb_reserve(skb, 2);
 	skb_copy_to_linear_data(skb, sk_buff[0]->data, pkt_size);
 	*sk_buff = skb;
@@ -627,7 +628,6 @@ static int sis190_rx_interrupt(struct net_device *dev,
 
 			sis190_rx_skb(skb);
 
-			dev->last_rx = jiffies;
 			stats->rx_packets++;
 			stats->rx_bytes += pkt_size;
 			if ((status & BCAST) == MCAST)
@@ -943,9 +943,9 @@ static void sis190_phy_task(struct work_struct *work)
 			u32 ctl;
 			const char *msg;
 		} reg31[] = {
-			{ LPA_1000XFULL | LPA_SLCT, 0x07000c00 | 0x00001000,
+			{ LPA_1000FULL, 0x07000c00 | 0x00001000,
 				"1000 Mbps Full Duplex" },
-			{ LPA_1000XHALF | LPA_SLCT, 0x07000c00,
+			{ LPA_1000HALF, 0x07000c00,
 				"1000 Mbps Half Duplex" },
 			{ LPA_100FULL, 0x04000800 | 0x00001000,
 				"100 Mbps Full Duplex" },
@@ -956,22 +956,35 @@ static void sis190_phy_task(struct work_struct *work)
 			{ LPA_10HALF, 0x04000400,
 				"10 Mbps Half Duplex" },
 			{ 0, 0x04000400, "unknown" }
- 		}, *p;
-		u16 adv;
+		}, *p = NULL;
+		u16 adv, autoexp, gigadv, gigrec;
 
 		val = mdio_read(ioaddr, phy_id, 0x1f);
 		net_link(tp, KERN_INFO "%s: mii ext = %04x.\n", dev->name, val);
 
 		val = mdio_read(ioaddr, phy_id, MII_LPA);
 		adv = mdio_read(ioaddr, phy_id, MII_ADVERTISE);
-		net_link(tp, KERN_INFO "%s: mii lpa = %04x adv = %04x.\n",
-			 dev->name, val, adv);
+		autoexp = mdio_read(ioaddr, phy_id, MII_EXPANSION);
+		net_link(tp, KERN_INFO "%s: mii lpa=%04x adv=%04x exp=%04x.\n",
+			 dev->name, val, adv, autoexp);
 
-		val &= adv;
+		if (val & LPA_NPAGE && autoexp & EXPANSION_NWAY) {
+			/* check for gigabit speed */
+			gigadv = mdio_read(ioaddr, phy_id, MII_CTRL1000);
+			gigrec = mdio_read(ioaddr, phy_id, MII_STAT1000);
+			val = (gigadv & (gigrec >> 2));
+			if (val & ADVERTISE_1000FULL)
+				p = reg31;
+			else if (val & ADVERTISE_1000HALF)
+				p = reg31 + 1;
+		}
+		if (!p) {
+			val &= adv;
 
-		for (p = reg31; p->val; p++) {
-			if ((val & p->val) == p->val)
-				break;
+			for (p = reg31; p->val; p++) {
+				if ((val & p->val) == p->val)
+					break;
+			}
 		}
 
 		p->ctl |= SIS_R32(StationControl) & ~0x0f001c00;
@@ -1155,7 +1168,8 @@ static int sis190_close(struct net_device *dev)
 	return 0;
 }
 
-static int sis190_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t sis190_start_xmit(struct sk_buff *skb,
+				     struct net_device *dev)
 {
 	struct sis190_private *tp = netdev_priv(dev);
 	void __iomem *ioaddr = tp->mmio_addr;
@@ -1204,8 +1218,6 @@ static int sis190_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	smp_wmb();
 
 	SIS_W32(TxControl, 0x1a00 | CmdReset | CmdTxEnb);
-
-	dev->trans_start = jiffies;
 
 	dirty_tx = tp->dirty_tx;
 	if ((tp->cur_tx - NUM_TX_DESC) == dirty_tx) {
@@ -1270,7 +1282,7 @@ static u16 sis190_default_phy(struct net_device *dev)
 		else if (phy_lan)
 			phy_default = phy_lan;
 		else
-			phy_default = list_entry(&tp->first_phy,
+			phy_default = list_first_entry(&tp->first_phy,
 						 struct sis190_phy, list);
 	}
 
@@ -1316,12 +1328,15 @@ static void sis190_init_phy(struct net_device *dev, struct sis190_private *tp,
 			((mii_status & (BMSR_100FULL | BMSR_100HALF)) ?
 				LAN : HOME) : p->type;
 		tp->features |= p->feature;
-	} else
+		net_probe(tp, KERN_INFO "%s: %s transceiver at address %d.\n",
+			pci_name(tp->pci_dev), p->name, phy_id);
+	} else {
 		phy->type = UNKNOWN;
-
-	net_probe(tp, KERN_INFO "%s: %s transceiver at address %d.\n",
-		  pci_name(tp->pci_dev),
-		  (phy->type == UNKNOWN) ? "Unknown PHY" : p->name, phy_id);
+		net_probe(tp, KERN_INFO
+			"%s: unknown PHY 0x%x:0x%x transceiver at address %d\n",
+			pci_name(tp->pci_dev),
+			phy->id[0], (phy->id[1] & 0xfff0), phy_id);
+	}
 }
 
 static void sis190_mii_probe_88e1111_fixup(struct sis190_private *tp)
@@ -1468,7 +1483,7 @@ static struct net_device * __devinit sis190_init_board(struct pci_dev *pdev)
 		goto err_pci_disable_2;
 	}
 
-	rc = pci_set_dma_mask(pdev, DMA_32BIT_MASK);
+	rc = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
 	if (rc < 0) {
 		net_probe(tp, KERN_ERR "%s: DMA configuration failed.\n",
 			  pci_name(pdev));
@@ -1783,6 +1798,21 @@ static int sis190_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		generic_mii_ioctl(&tp->mii_if, if_mii(ifr), cmd, NULL);
 }
 
+static const struct net_device_ops sis190_netdev_ops = {
+	.ndo_open		= sis190_open,
+	.ndo_stop		= sis190_close,
+	.ndo_do_ioctl		= sis190_ioctl,
+	.ndo_start_xmit		= sis190_start_xmit,
+	.ndo_tx_timeout		= sis190_tx_timeout,
+	.ndo_set_multicast_list = sis190_set_rx_mode,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	.ndo_poll_controller	 = sis190_netpoll,
+#endif
+};
+
 static int __devinit sis190_init_one(struct pci_dev *pdev,
 				     const struct pci_device_id *ent)
 {
@@ -1791,7 +1821,6 @@ static int __devinit sis190_init_one(struct pci_dev *pdev,
 	struct net_device *dev;
 	void __iomem *ioaddr;
 	int rc;
-	DECLARE_MAC_BUF(mac);
 
 	if (!printed_version) {
 		net_drv(&debug, KERN_INFO SIS190_DRIVER_NAME " loaded.\n");
@@ -1817,19 +1846,12 @@ static int __devinit sis190_init_one(struct pci_dev *pdev,
 
 	INIT_WORK(&tp->phy_task, sis190_phy_task);
 
-	dev->open = sis190_open;
-	dev->stop = sis190_close;
-	dev->do_ioctl = sis190_ioctl;
-	dev->tx_timeout = sis190_tx_timeout;
-	dev->watchdog_timeo = SIS190_TX_TIMEOUT;
-	dev->hard_start_xmit = sis190_start_xmit;
-#ifdef CONFIG_NET_POLL_CONTROLLER
-	dev->poll_controller = sis190_netpoll;
-#endif
-	dev->set_multicast_list = sis190_set_rx_mode;
+	dev->netdev_ops = &sis190_netdev_ops;
+
 	SET_ETHTOOL_OPS(dev, &sis190_ethtool_ops);
 	dev->irq = pdev->irq;
 	dev->base_addr = (unsigned long) 0xdead;
+	dev->watchdog_timeo = SIS190_TX_TIMEOUT;
 
 	spin_lock_init(&tp->lock);
 
@@ -1841,10 +1863,9 @@ static int __devinit sis190_init_one(struct pci_dev *pdev,
 	if (rc < 0)
 		goto err_remove_mii;
 
-	net_probe(tp, KERN_INFO "%s: %s at %p (IRQ: %d), "
-		  "%s\n",
+	net_probe(tp, KERN_INFO "%s: %s at %p (IRQ: %d), %pM\n",
 		  pci_name(pdev), sis_chip_info[ent->driver_data].name,
-		  ioaddr, dev->irq, print_mac(mac, dev->dev_addr));
+		  ioaddr, dev->irq, dev->dev_addr);
 
 	net_probe(tp, KERN_INFO "%s: %s mode.\n", dev->name,
 		  (tp->features & F_HAS_RGMII) ? "RGMII" : "GMII");

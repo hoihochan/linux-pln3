@@ -102,8 +102,8 @@ struct thread_info {
 #define TI_KERN_CNTD1	0x00000488
 #define TI_PCR		0x00000490
 #define TI_RESTART_BLOCK 0x00000498
-#define TI_KUNA_REGS	0x000004c0
-#define TI_KUNA_INSN	0x000004c8
+#define TI_KUNA_REGS	0x000004c8
+#define TI_KUNA_INSN	0x000004d0
 #define TI_FPREGS	0x00000500
 
 /* We embed this in the uppermost byte of thread_info->flags */
@@ -125,8 +125,6 @@ struct thread_info {
 
 /*
  * macros/functions for gaining access to the thread information structure
- *
- * preempt_count needs to be 1 initially, until the scheduler is functional.
  */
 #ifndef __ASSEMBLY__
 
@@ -135,7 +133,7 @@ struct thread_info {
 	.task		=	&tsk,			\
 	.flags		= ((unsigned long)ASI_P) << TI_FLAG_CURRENT_DS_SHIFT,	\
 	.exec_domain	=	&default_exec_domain,	\
-	.preempt_count	=	1,			\
+	.preempt_count	=	INIT_PREEMPT_COUNT,	\
 	.restart_block	= {				\
 		.fn	=	do_no_restart_syscall,	\
 	},						\
@@ -237,6 +235,7 @@ register struct thread_info *current_thread_info_reg asm("g6");
 #define TIF_ABI_PENDING		12
 #define TIF_MEMDIE		13
 #define TIF_POLLING_NRFLAG	14
+#define TIF_FREEZE		15	/* is freezing for suspend */
 
 #define _TIF_SYSCALL_TRACE	(1<<TIF_SYSCALL_TRACE)
 #define _TIF_NOTIFY_RESUME	(1<<TIF_NOTIFY_RESUME)
@@ -249,6 +248,7 @@ register struct thread_info *current_thread_info_reg asm("g6");
 #define _TIF_SYSCALL_AUDIT	(1<<TIF_SYSCALL_AUDIT)
 #define _TIF_ABI_PENDING	(1<<TIF_ABI_PENDING)
 #define _TIF_POLLING_NRFLAG	(1<<TIF_POLLING_NRFLAG)
+#define _TIF_FREEZE		(1<<TIF_FREEZE)
 
 #define _TIF_USER_WORK_MASK	((0xff << TI_FLAG_WSAVED_SHIFT) | \
 				 _TIF_DO_NOTIFY_RESUME_MASK | \

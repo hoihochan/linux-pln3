@@ -1,27 +1,7 @@
 /*
- * File:         include/asm-blackfin/thread_info.h
- * Based on:     include/asm-m68knommu/thread_info.h
- * Author:       LG Soft India
- *               Copyright (C) 2004-2005 Analog Devices Inc.
- * Created:      Tue Sep 21 2004
- * Description:  Blackfin low-level thread information
- * Modified:
- * Bugs:         Enter bugs at http://blackfin.uclinux.org/
+ * Copyright 2004-2009 Analog Devices Inc.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; see the file COPYING.
- * If not, write to the Free Software Foundation,
- * 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+ * Licensed under the GPL-2 or later.
  */
 
 #ifndef _ASM_THREAD_INFO_H
@@ -44,6 +24,7 @@
  */
 #define THREAD_SIZE_ORDER	1
 #define THREAD_SIZE		8192	/* 2 pages */
+#define STACK_WARN		(THREAD_SIZE/8)
 
 #ifndef __ASSEMBLY__
 
@@ -62,7 +43,9 @@ struct thread_info {
 	int preempt_count;	/* 0 => preemptable, <0 => BUG */
 	mm_segment_t addr_limit;	/* address limit */
 	struct restart_block restart_block;
+#ifndef CONFIG_SMP
 	struct l1_scratch_task_info l1_task_info;
+#endif
 };
 
 /*
@@ -74,7 +57,7 @@ struct thread_info {
 	.exec_domain	= &default_exec_domain,	\
 	.flags		= 0,			\
 	.cpu		= 0,			\
-	.preempt_count  = 1,                    \
+	.preempt_count  = INIT_PREEMPT_COUNT,   \
 	.restart_block	= {			\
 		.fn = do_no_restart_syscall,	\
 	},					\
@@ -90,7 +73,7 @@ __attribute_const__
 static inline struct thread_info *current_thread_info(void)
 {
 	struct thread_info *ti;
-      __asm__("%0 = sp;": "=&d"(ti):
+      __asm__("%0 = sp;" : "=da"(ti) :
 	);
 	return (struct thread_info *)((long)ti & ~((long)THREAD_SIZE-1));
 }
@@ -119,6 +102,7 @@ static inline struct thread_info *current_thread_info(void)
 #define TIF_MEMDIE              4
 #define TIF_RESTORE_SIGMASK	5	/* restore signal mask in do_signal() */
 #define TIF_FREEZE              6       /* is freezing for suspend */
+#define TIF_IRQ_SYNC            7       /* sync pipeline stage */
 
 /* as above, but as bit values */
 #define _TIF_SYSCALL_TRACE	(1<<TIF_SYSCALL_TRACE)
@@ -127,6 +111,7 @@ static inline struct thread_info *current_thread_info(void)
 #define _TIF_POLLING_NRFLAG	(1<<TIF_POLLING_NRFLAG)
 #define _TIF_RESTORE_SIGMASK	(1<<TIF_RESTORE_SIGMASK)
 #define _TIF_FREEZE             (1<<TIF_FREEZE)
+#define _TIF_IRQ_SYNC           (1<<TIF_IRQ_SYNC)
 
 #define _TIF_WORK_MASK		0x0000FFFE	/* work to do on interrupt/exception return */
 

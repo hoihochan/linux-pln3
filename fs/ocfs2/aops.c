@@ -27,6 +27,7 @@
 #include <linux/swap.h>
 #include <linux/pipe_fs_i.h>
 #include <linux/mpage.h>
+#include <linux/quotaops.h>
 
 #define MLOG_MASK_PREFIX ML_FILE_IO
 #include <cluster/masklog.h>
@@ -43,6 +44,7 @@
 #include "suballoc.h"
 #include "super.h"
 #include "symlink.h"
+#include "refcounttree.h"
 
 #include "buffer_head_io.h"
 
@@ -68,21 +70,12 @@ static int ocfs2_symlink_get_block(struct inode *inode, sector_t iblock,
 		goto bail;
 	}
 
-	status = ocfs2_read_block(OCFS2_SB(inode->i_sb),
-				  OCFS2_I(inode)->ip_blkno,
-				  &bh, OCFS2_BH_CACHED, inode);
+	status = ocfs2_read_inode_block(inode, &bh);
 	if (status < 0) {
 		mlog_errno(status);
 		goto bail;
 	}
 	fe = (struct ocfs2_dinode *) bh->b_data;
-
-	if (!OCFS2_IS_VALID_DINODE(fe)) {
-		mlog(ML_ERROR, "Invalid dinode #%llu: signature = %.*s\n",
-		     (unsigned long long)le64_to_cpu(fe->i_blkno), 7,
-		     fe->i_signature);
-		goto bail;
-	}
 
 	if ((u64)iblock >= ocfs2_clusters_to_blocks(inode->i_sb,
 						    le32_to_cpu(fe->i_clusters))) {
@@ -128,15 +121,14 @@ static int ocfs2_symlink_get_block(struct inode *inode, sector_t iblock,
 	err = 0;
 
 bail:
-	if (bh)
-		brelse(bh);
+	brelse(bh);
 
 	mlog_exit(err);
 	return err;
 }
 
-static int ocfs2_get_block(struct inode *inode, sector_t iblock,
-			   struct buffer_head *bh_result, int create)
+int ocfs2_get_block(struct inode *inode, sector_t iblock,
+		    struct buffer_head *bh_result, int create)
 {
 	int err = 0;
 	unsigned int ext_flags;
@@ -202,6 +194,7 @@ static int ocfs2_get_block(struct inode *inode, sector_t iblock,
 			     (unsigned long long)OCFS2_I(inode)->ip_blkno);
 			mlog(ML_ERROR, "Size %llu, clusters %u\n", (unsigned long long)i_size_read(inode), OCFS2_I(inode)->ip_clusters);
 			dump_stack();
+			goto bail;
 		}
 
 		past_eof = ocfs2_blocks_for_bytes(inode->i_sb, i_size_read(inode));
@@ -236,7 +229,7 @@ int ocfs2_read_inline_data(struct inode *inode, struct page *page,
 	size = i_size_read(inode);
 
 	if (size > PAGE_CACHE_SIZE ||
-	    size > ocfs2_max_inline_data(inode->i_sb)) {
+	    size > ocfs2_max_inline_data_with_xattr(inode->i_sb, di)) {
 		ocfs2_error(inode->i_sb,
 			    "Inode %llu has with inline data has bad size: %Lu",
 			    (unsigned long long)OCFS2_I(inode)->ip_blkno,
@@ -261,13 +254,11 @@ static int ocfs2_readpage_inline(struct inode *inode, struct page *page)
 {
 	int ret;
 	struct buffer_head *di_bh = NULL;
-	struct ocfs2_super *osb = OCFS2_SB(inode->i_sb);
 
 	BUG_ON(!PageLocked(page));
 	BUG_ON(!(OCFS2_I(inode)->ip_dyn_features & OCFS2_INLINE_DATA_FL));
 
-	ret = ocfs2_read_block(osb, OCFS2_I(inode)->ip_blkno, &di_bh,
-			       OCFS2_BH_CACHED, inode);
+	ret = ocfs2_read_inode_block(inode, &di_bh);
 	if (ret) {
 		mlog_errno(ret);
 		goto out;
@@ -485,11 +476,8 @@ handle_t *ocfs2_start_walk_page_trans(struct inode *inode,
 	}
 
 	if (ocfs2_should_order_data(inode)) {
-		ret = walk_page_buffers(handle,
-					page_buffers(page),
-					from, to, NULL,
-					ocfs2_journal_dirty_data);
-		if (ret < 0) 
+		ret = ocfs2_jbd2_file_inode(handle, inode);
+		if (ret < 0)
 			mlog_errno(ret);
 	}
 out:
@@ -603,6 +591,8 @@ static int ocfs2_direct_IO_get_blocks(struct inode *inode, sector_t iblock,
 		goto bail;
 	}
 
+	/* We should already CoW the refcounted extent. */
+	BUG_ON(ext_flags & OCFS2_EXT_REFCOUNTED);
 	/*
 	 * get_more_blocks() expects us to describe a hole by clearing
 	 * the mapped bit on bh_result().
@@ -669,7 +659,7 @@ static void ocfs2_invalidatepage(struct page *page, unsigned long offset)
 {
 	journal_t *journal = OCFS2_SB(page->mapping->host->i_sb)->journal->j_journal;
 
-	journal_invalidatepage(journal, page, offset);
+	jbd2_journal_invalidatepage(journal, page, offset);
 }
 
 static int ocfs2_releasepage(struct page *page, gfp_t wait)
@@ -678,7 +668,7 @@ static int ocfs2_releasepage(struct page *page, gfp_t wait)
 
 	if (!page_has_buffers(page))
 		return 0;
-	return journal_try_to_free_buffers(journal, page, wait);
+	return jbd2_journal_try_to_free_buffers(journal, page, wait);
 }
 
 static ssize_t ocfs2_direct_IO(int rw,
@@ -698,6 +688,10 @@ static ssize_t ocfs2_direct_IO(int rw,
 	 * extents.
 	 */
 	if (OCFS2_I(inode)->ip_dyn_features & OCFS2_INLINE_DATA_FL)
+		return 0;
+
+	/* Fallback to buffered I/O if we are appending. */
+	if (i_size_read(inode) <= offset)
 		return 0;
 
 	ret = blockdev_direct_IO_no_locking(rw, iocb, inode,
@@ -1075,10 +1069,7 @@ static void ocfs2_write_failure(struct inode *inode,
 
 		if (page_has_buffers(tmppage)) {
 			if (ocfs2_should_order_data(inode))
-				walk_page_buffers(wc->w_handle,
-						  page_buffers(tmppage),
-						  from, to, NULL,
-						  ocfs2_journal_dirty_data);
+				ocfs2_jbd2_file_inode(wc->w_handle, inode);
 
 			block_commit_write(tmppage, from, to);
 		}
@@ -1243,9 +1234,9 @@ static int ocfs2_write_cluster(struct address_space *mapping,
 	int ret, i, new;
 	u64 v_blkno, p_blkno;
 	struct inode *inode = mapping->host;
+	struct ocfs2_extent_tree et;
 
 	new = phys == 0 ? 1 : 0;
-
 	if (new) {
 		u32 tmp_pos;
 
@@ -1254,10 +1245,10 @@ static int ocfs2_write_cluster(struct address_space *mapping,
 		 * any additional semaphores or cluster locks.
 		 */
 		tmp_pos = cpos;
-		ret = ocfs2_do_extend_allocation(OCFS2_SB(inode->i_sb), inode,
-						 &tmp_pos, 1, 0, wc->w_di_bh,
-						 wc->w_handle, data_ac,
-						 meta_ac, NULL);
+		ret = ocfs2_add_inode_data(OCFS2_SB(inode->i_sb), inode,
+					   &tmp_pos, 1, 0, wc->w_di_bh,
+					   wc->w_handle, data_ac,
+					   meta_ac, NULL);
 		/*
 		 * This shouldn't happen because we must have already
 		 * calculated the correct meta data allocation required. The
@@ -1275,7 +1266,9 @@ static int ocfs2_write_cluster(struct address_space *mapping,
 			goto out;
 		}
 	} else if (unwritten) {
-		ret = ocfs2_mark_extent_written(inode, wc->w_di_bh,
+		ocfs2_init_dinode_extent_tree(&et, INODE_CACHE(inode),
+					      wc->w_di_bh);
+		ret = ocfs2_mark_extent_written(inode, &et,
 						wc->w_handle, cpos, 1, phys,
 						meta_ac, &wc->w_dealloc);
 		if (ret < 0) {
@@ -1315,7 +1308,7 @@ static int ocfs2_write_cluster(struct address_space *mapping,
 		if (tmpret) {
 			mlog_errno(tmpret);
 			if (ret == 0)
-				tmpret = ret;
+				ret = tmpret;
 		}
 	}
 
@@ -1463,6 +1456,9 @@ static int ocfs2_populate_write_desc(struct inode *inode,
 				goto out;
 			}
 
+			/* We should already CoW the refcountd extent. */
+			BUG_ON(ext_flags & OCFS2_EXT_REFCOUNTED);
+
 			/*
 			 * Assume worst case - that we're writing in
 			 * the middle of the extent.
@@ -1543,8 +1539,8 @@ static int ocfs2_write_begin_inline(struct address_space *mapping,
 		goto out;
 	}
 
-	ret = ocfs2_journal_access(handle, inode, wc->w_di_bh,
-				   OCFS2_JOURNAL_ACCESS_WRITE);
+	ret = ocfs2_journal_access_di(handle, INODE_CACHE(inode), wc->w_di_bh,
+				      OCFS2_JOURNAL_ACCESS_WRITE);
 	if (ret) {
 		ocfs2_commit_trans(osb, handle);
 
@@ -1586,6 +1582,7 @@ static int ocfs2_try_to_write_inline_data(struct address_space *mapping,
 	int ret, written = 0;
 	loff_t end = pos + len;
 	struct ocfs2_inode_info *oi = OCFS2_I(inode);
+	struct ocfs2_dinode *di = NULL;
 
 	mlog(0, "Inode %llu, write of %u bytes at off %llu. features: 0x%x\n",
 	     (unsigned long long)oi->ip_blkno, len, (unsigned long long)pos,
@@ -1618,7 +1615,9 @@ static int ocfs2_try_to_write_inline_data(struct address_space *mapping,
 	/*
 	 * Check whether the write can fit.
 	 */
-	if (mmap_page || end > ocfs2_max_inline_data(inode->i_sb))
+	di = (struct ocfs2_dinode *)wc->w_di_bh->b_data;
+	if (mmap_page ||
+	    end > ocfs2_max_inline_data_with_xattr(inode->i_sb, di))
 		return 0;
 
 do_inline_write:
@@ -1684,6 +1683,7 @@ int ocfs2_write_begin_nolock(struct address_space *mapping,
 	struct ocfs2_alloc_context *data_ac = NULL;
 	struct ocfs2_alloc_context *meta_ac = NULL;
 	handle_t *handle;
+	struct ocfs2_extent_tree et;
 
 	ret = ocfs2_alloc_write_ctxt(&wc, osb, pos, len, di_bh);
 	if (ret) {
@@ -1710,6 +1710,19 @@ int ocfs2_write_begin_nolock(struct address_space *mapping,
 		goto out;
 	}
 
+	ret = ocfs2_check_range_for_refcount(inode, pos, len);
+	if (ret < 0) {
+		mlog_errno(ret);
+		goto out;
+	} else if (ret == 1) {
+		ret = ocfs2_refcount_cow(inode, di_bh,
+					 wc->w_cpos, wc->w_clen, UINT_MAX);
+		if (ret) {
+			mlog_errno(ret);
+			goto out;
+		}
+	}
+
 	ret = ocfs2_populate_write_desc(inode, wc, &clusters_to_alloc,
 					&extents_to_split);
 	if (ret) {
@@ -1731,14 +1744,24 @@ int ocfs2_write_begin_nolock(struct address_space *mapping,
 		 * ocfs2_lock_allocators(). It greatly over-estimates
 		 * the work to be done.
 		 */
-		ret = ocfs2_lock_allocators(inode, di, clusters_to_alloc,
-					    extents_to_split, &data_ac, &meta_ac);
+		mlog(0, "extend inode %llu, i_size = %lld, di->i_clusters = %u,"
+		     " clusters_to_add = %u, extents_to_split = %u\n",
+		     (unsigned long long)OCFS2_I(inode)->ip_blkno,
+		     (long long)i_size_read(inode), le32_to_cpu(di->i_clusters),
+		     clusters_to_alloc, extents_to_split);
+
+		ocfs2_init_dinode_extent_tree(&et, INODE_CACHE(inode),
+					      wc->w_di_bh);
+		ret = ocfs2_lock_allocators(inode, &et,
+					    clusters_to_alloc, extents_to_split,
+					    &data_ac, &meta_ac);
 		if (ret) {
 			mlog_errno(ret);
 			goto out;
 		}
 
-		credits = ocfs2_calc_extend_credits(inode->i_sb, di,
+		credits = ocfs2_calc_extend_credits(inode->i_sb,
+						    &di->id2.i_list,
 						    clusters_to_alloc);
 
 	}
@@ -1766,15 +1789,20 @@ int ocfs2_write_begin_nolock(struct address_space *mapping,
 
 	wc->w_handle = handle;
 
+	if (clusters_to_alloc && vfs_dq_alloc_space_nodirty(inode,
+			ocfs2_clusters_to_bytes(osb->sb, clusters_to_alloc))) {
+		ret = -EDQUOT;
+		goto out_commit;
+	}
 	/*
 	 * We don't want this to fail in ocfs2_write_end(), so do it
 	 * here.
 	 */
-	ret = ocfs2_journal_access(handle, inode, wc->w_di_bh,
-				   OCFS2_JOURNAL_ACCESS_WRITE);
+	ret = ocfs2_journal_access_di(handle, INODE_CACHE(inode), wc->w_di_bh,
+				      OCFS2_JOURNAL_ACCESS_WRITE);
 	if (ret) {
 		mlog_errno(ret);
-		goto out_commit;
+		goto out_quota;
 	}
 
 	/*
@@ -1786,14 +1814,14 @@ int ocfs2_write_begin_nolock(struct address_space *mapping,
 					 cluster_of_pages, mmap_page);
 	if (ret) {
 		mlog_errno(ret);
-		goto out_commit;
+		goto out_quota;
 	}
 
 	ret = ocfs2_write_cluster_by_desc(mapping, data_ac, meta_ac, wc, pos,
 					  len);
 	if (ret) {
 		mlog_errno(ret);
-		goto out_commit;
+		goto out_quota;
 	}
 
 	if (data_ac)
@@ -1805,6 +1833,10 @@ success:
 	*pagep = wc->w_target_page;
 	*fsdata = wc;
 	return 0;
+out_quota:
+	if (clusters_to_alloc)
+		vfs_dq_free_space(inode,
+			  ocfs2_clusters_to_bytes(osb->sb, clusters_to_alloc));
 out_commit:
 	ocfs2_commit_trans(osb, handle);
 
@@ -1935,10 +1967,7 @@ int ocfs2_write_end_nolock(struct address_space *mapping,
 
 		if (page_has_buffers(tmppage)) {
 			if (ocfs2_should_order_data(inode))
-				walk_page_buffers(wc->w_handle,
-						  page_buffers(tmppage),
-						  from, to, NULL,
-						  ocfs2_journal_dirty_data);
+				ocfs2_jbd2_file_inode(wc->w_handle, inode);
 			block_commit_write(tmppage, from, to);
 		}
 	}
@@ -1981,15 +2010,17 @@ static int ocfs2_write_end(struct file *file, struct address_space *mapping,
 }
 
 const struct address_space_operations ocfs2_aops = {
-	.readpage	= ocfs2_readpage,
-	.readpages	= ocfs2_readpages,
-	.writepage	= ocfs2_writepage,
-	.write_begin	= ocfs2_write_begin,
-	.write_end	= ocfs2_write_end,
-	.bmap		= ocfs2_bmap,
-	.sync_page	= block_sync_page,
-	.direct_IO	= ocfs2_direct_IO,
-	.invalidatepage	= ocfs2_invalidatepage,
-	.releasepage	= ocfs2_releasepage,
-	.migratepage	= buffer_migrate_page,
+	.readpage		= ocfs2_readpage,
+	.readpages		= ocfs2_readpages,
+	.writepage		= ocfs2_writepage,
+	.write_begin		= ocfs2_write_begin,
+	.write_end		= ocfs2_write_end,
+	.bmap			= ocfs2_bmap,
+	.sync_page		= block_sync_page,
+	.direct_IO		= ocfs2_direct_IO,
+	.invalidatepage		= ocfs2_invalidatepage,
+	.releasepage		= ocfs2_releasepage,
+	.migratepage		= buffer_migrate_page,
+	.is_partially_uptodate	= block_is_partially_uptodate,
+	.error_remove_page	= generic_error_remove_page,
 };

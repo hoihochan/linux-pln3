@@ -1,34 +1,12 @@
 /*
- * File:         arch/blackfin/mach-bf533/ip0x.c
- * Based on:     arch/blackfin/mach-bf533/bf1.c
- * Based on:     arch/blackfin/mach-bf533/stamp.c
- * Author:       Ivan Danov <idanov@gmail.com>
- *               Modified for IP0X David Rowe
+ * Copyright 2004-2009 Analog Devices Inc.
+ *                2007 David Rowe
+ *                2006 Intratrade Ltd.
+ *                     Ivan Danov <idanov@gmail.com>
+ *                2005 National ICT Australia (NICTA)
+ *                     Aidan Williams <aidan@nicta.com.au>
  *
- * Created:      2007
- * Description:  Board info file for the IP04/IP08 boards, which
- *               are derived from the BlackfinOne V2.0 boards.
- *
- * Modified:
- *               COpyright 2007 David Rowe
- *               Copyright 2006 Intratrade Ltd.
- *               Copyright 2005 National ICT Australia (NICTA)
- *               Copyright 2004-2006 Analog Devices Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see the file COPYING, or write
- * to the Free Software Foundation, Inc.,
- * 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ * Licensed under the GPL-2 or later.
  */
 
 #include <linux/device.h>
@@ -127,8 +105,8 @@ static struct platform_device dm9000_device2 = {
 #if defined(CONFIG_SPI_BFIN) || defined(CONFIG_SPI_BFIN_MODULE)
 /* all SPI peripherals info goes here */
 
-#if defined(CONFIG_SPI_MMC) || defined(CONFIG_SPI_MMC_MODULE)
-static struct bfin5xx_spi_chip spi_mmc_chip_info = {
+#if defined(CONFIG_MMC_SPI) || defined(CONFIG_MMC_SPI_MODULE)
+static struct bfin5xx_spi_chip mmc_spi_chip_info = {
 /*
  * CPOL (Clock Polarity)
  *  0 - Active high SCK
@@ -145,21 +123,19 @@ static struct bfin5xx_spi_chip spi_mmc_chip_info = {
 	.ctl_reg = 0x1000,		/* CPOL=0,CPHA=0,Sandisk 1G work */
 	.enable_dma = 0,		/* if 1 - block!!! */
 	.bits_per_word = 8,
-	.cs_change_per_word = 0,
 };
 #endif
 
 /* Notice: for blackfin, the speed_hz is the value of register
  * SPI_BAUD, not the real baudrate */
 static struct spi_board_info bfin_spi_board_info[] __initdata = {
-#if defined(CONFIG_SPI_MMC) || defined(CONFIG_SPI_MMC_MODULE)
+#if defined(CONFIG_MMC_SPI) || defined(CONFIG_MMC_SPI_MODULE)
 	{
-		.modalias = "spi_mmc",
+		.modalias = "mmc_spi",
 		.max_speed_hz = 2,
 		.bus_num = 1,
-		.chip_select = CONFIG_SPI_MMC_CS_CHAN,
-		.platform_data = NULL,
-		.controller_data = &spi_mmc_chip_info,
+		.chip_select = 5,
+		.controller_data = &mmc_spi_chip_info,
 	},
 #endif
 };
@@ -197,22 +173,32 @@ static struct platform_device bfin_uart_device = {
 #endif
 
 #if defined(CONFIG_BFIN_SIR) || defined(CONFIG_BFIN_SIR_MODULE)
-static struct resource bfin_sir_resources[] = {
 #ifdef CONFIG_BFIN_SIR0
+static struct resource bfin_sir0_resources[] = {
 	{
 		.start = 0xFFC00400,
 		.end = 0xFFC004FF,
 		.flags = IORESOURCE_MEM,
 	},
-#endif
+	{
+		.start = IRQ_UART0_RX,
+		.end = IRQ_UART0_RX+1,
+		.flags = IORESOURCE_IRQ,
+	},
+	{
+		.start = CH_UART0_RX,
+		.end = CH_UART0_RX+1,
+		.flags = IORESOURCE_DMA,
+	},
 };
 
-static struct platform_device bfin_sir_device = {
+static struct platform_device bfin_sir0_device = {
 	.name = "bfin_sir",
 	.id = 0,
-	.num_resources = ARRAY_SIZE(bfin_sir_resources),
-	.resource = bfin_sir_resources,
+	.num_resources = ARRAY_SIZE(bfin_sir0_resources),
+	.resource = bfin_sir0_resources,
 };
+#endif
 #endif
 
 #if defined(CONFIG_USB_ISP1362_HCD) || defined(CONFIG_USB_ISP1362_HCD_MODULE)
@@ -272,7 +258,9 @@ static struct platform_device *ip0x_devices[] __initdata = {
 #endif
 
 #if defined(CONFIG_BFIN_SIR) || defined(CONFIG_BFIN_SIR_MODULE)
-	&bfin_sir_device,
+#ifdef CONFIG_BFIN_SIR0
+	&bfin_sir0_device,
+#endif
 #endif
 
 #if defined(CONFIG_USB_ISP1362_HCD) || defined(CONFIG_USB_ISP1362_HCD_MODULE)

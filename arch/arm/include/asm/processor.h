@@ -23,7 +23,7 @@
 #include <asm/types.h>
 
 #ifdef __KERNEL__
-#define STACK_TOP	((current->personality == PER_LINUX_32BIT) ? \
+#define STACK_TOP	((current->personality & ADDR_LIMIT_32BIT) ? \
 			 TASK_SIZE : TASK_SIZE_26)
 #define STACK_TOP_MAX	TASK_SIZE
 #endif
@@ -64,13 +64,14 @@ struct thread_struct {
 ({									\
 	unsigned long *stack = (unsigned long *)sp;			\
 	set_fs(USER_DS);						\
-	memzero(regs->uregs, sizeof(regs->uregs));			\
+	memset(regs->uregs, 0, sizeof(regs->uregs));			\
 	if (current->personality & ADDR_LIMIT_32BIT)			\
 		regs->ARM_cpsr = USR_MODE;				\
 	else								\
 		regs->ARM_cpsr = USR26_MODE;				\
 	if (elf_hwcap & HWCAP_THUMB && pc & 1)				\
 		regs->ARM_cpsr |= PSR_T_BIT;				\
+	regs->ARM_cpsr |= PSR_ENDSTATE;					\
 	regs->ARM_pc = pc & ~1;		/* pc */			\
 	regs->ARM_sp = sp;		/* sp */			\
 	regs->ARM_r2 = stack[2];	/* r2 (envp) */			\

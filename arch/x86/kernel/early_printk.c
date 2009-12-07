@@ -3,11 +3,19 @@
 #include <linux/init.h>
 #include <linux/string.h>
 #include <linux/screen_info.h>
+#include <linux/usb/ch9.h>
+#include <linux/pci_regs.h>
+#include <linux/pci_ids.h>
+#include <linux/errno.h>
 #include <asm/io.h>
 #include <asm/processor.h>
 #include <asm/fcntl.h>
 #include <asm/setup.h>
 #include <xen/hvc-console.h>
+#include <asm/pci-direct.h>
+#include <asm/fixmap.h>
+#include <asm/pgtable.h>
+#include <linux/usb/ehci_def.h>
 
 /* Simple VGA output */
 #define VGABASE		(__ISA_IO_base + 0xb8000)
@@ -78,6 +86,7 @@ static int early_serial_base = 0x3f8;  /* ttyS0 */
 static int early_serial_putc(unsigned char ch)
 {
 	unsigned timeout = 0xffff;
+
 	while ((inb(early_serial_base + LSR) & XMTRDY) == 0 && --timeout)
 		cpu_relax();
 	outb(ch, early_serial_base + TXR);
@@ -111,7 +120,7 @@ static __init void early_serial_init(char *s)
 		if (!strncmp(s, "0x", 2)) {
 			early_serial_base = simple_strtoul(s, &e, 16);
 		} else {
-			static int bases[] = { 0x3f8, 0x2f8 };
+			static const int __initconst bases[] = { 0x3f8, 0x2f8 };
 
 			if (!strncmp(s, "ttyS", 4))
 				s += 4;
@@ -151,50 +160,9 @@ static struct console early_serial_console = {
 	.index =	-1,
 };
 
-/* Console interface to a host file on AMD's SimNow! */
-
-static int simnow_fd;
-
-enum {
-	MAGIC1 = 0xBACCD00A,
-	MAGIC2 = 0xCA110000,
-	XOPEN = 5,
-	XWRITE = 4,
-};
-
-static noinline long simnow(long cmd, long a, long b, long c)
-{
-	long ret;
-	asm volatile("cpuid" :
-		     "=a" (ret) :
-		     "b" (a), "c" (b), "d" (c), "0" (MAGIC1), "D" (cmd + MAGIC2));
-	return ret;
-}
-
-static void __init simnow_init(char *str)
-{
-	char *fn = "klog";
-	if (*str == '=')
-		fn = ++str;
-	/* error ignored */
-	simnow_fd = simnow(XOPEN, (unsigned long)fn, O_WRONLY|O_APPEND|O_CREAT, 0644);
-}
-
-static void simnow_write(struct console *con, const char *s, unsigned n)
-{
-	simnow(XWRITE, simnow_fd, (unsigned long)s, n);
-}
-
-static struct console simnow_console = {
-	.name =		"simnow",
-	.write =	simnow_write,
-	.flags =	CON_PRINTBUFFER,
-	.index =	-1,
-};
-
 /* Direct interface for emergencies */
 static struct console *early_console = &early_vga_console;
-static int early_console_initialized;
+static int __initdata early_console_initialized;
 
 asmlinkage void early_printk(const char *fmt, ...)
 {
@@ -203,15 +171,30 @@ asmlinkage void early_printk(const char *fmt, ...)
 	va_list ap;
 
 	va_start(ap, fmt);
-	n = vscnprintf(buf, 512, fmt, ap);
+	n = vscnprintf(buf, sizeof(buf), fmt, ap);
 	early_console->write(early_console, buf, n);
 	va_end(ap);
 }
 
-static int __initdata keep_early;
+static inline void early_console_register(struct console *con, int keep_early)
+{
+	if (early_console->index != -1) {
+		printk(KERN_CRIT "ERROR: earlyprintk= %s already used\n",
+		       con->name);
+		return;
+	}
+	early_console = con;
+	if (keep_early)
+		early_console->flags &= ~CON_BOOT;
+	else
+		early_console->flags |= CON_BOOT;
+	register_console(early_console);
+}
 
 static int __init setup_early_printk(char *buf)
 {
+	int keep;
+
 	if (!buf)
 		return 0;
 
@@ -219,36 +202,38 @@ static int __init setup_early_printk(char *buf)
 		return 0;
 	early_console_initialized = 1;
 
-	if (strstr(buf, "keep"))
-		keep_early = 1;
+	keep = (strstr(buf, "keep") != NULL);
 
-	if (!strncmp(buf, "serial", 6)) {
-		early_serial_init(buf + 6);
-		early_console = &early_serial_console;
-	} else if (!strncmp(buf, "ttyS", 4)) {
-		early_serial_init(buf);
-		early_console = &early_serial_console;
-	} else if (!strncmp(buf, "vga", 3)
-		&& boot_params.screen_info.orig_video_isVGA == 1) {
-		max_xpos = boot_params.screen_info.orig_video_cols;
-		max_ypos = boot_params.screen_info.orig_video_lines;
-		current_ypos = boot_params.screen_info.orig_y;
-		early_console = &early_vga_console;
-	} else if (!strncmp(buf, "simnow", 6)) {
-		simnow_init(buf + 6);
-		early_console = &simnow_console;
-		keep_early = 1;
-#ifdef CONFIG_HVC_XEN
-	} else if (!strncmp(buf, "xen", 3)) {
-		early_console = &xenboot_console;
+	while (*buf != '\0') {
+		if (!strncmp(buf, "serial", 6)) {
+			buf += 6;
+			early_serial_init(buf);
+			early_console_register(&early_serial_console, keep);
+			if (!strncmp(buf, ",ttyS", 5))
+				buf += 5;
+		}
+		if (!strncmp(buf, "ttyS", 4)) {
+			early_serial_init(buf + 4);
+			early_console_register(&early_serial_console, keep);
+		}
+		if (!strncmp(buf, "vga", 3) &&
+		    boot_params.screen_info.orig_video_isVGA == 1) {
+			max_xpos = boot_params.screen_info.orig_video_cols;
+			max_ypos = boot_params.screen_info.orig_video_lines;
+			current_ypos = boot_params.screen_info.orig_y;
+			early_console_register(&early_vga_console, keep);
+		}
+#ifdef CONFIG_EARLY_PRINTK_DBGP
+		if (!strncmp(buf, "dbgp", 4) && !early_dbgp_init(buf + 4))
+			early_console_register(&early_dbgp_console, keep);
 #endif
+#ifdef CONFIG_HVC_XEN
+		if (!strncmp(buf, "xen", 3))
+			early_console_register(&xenboot_console, keep);
+#endif
+		buf++;
 	}
-
-	if (keep_early)
-		early_console->flags &= ~CON_BOOT;
-	else
-		early_console->flags |= CON_BOOT;
-	register_console(early_console);
 	return 0;
 }
+
 early_param("earlyprintk", setup_early_printk);

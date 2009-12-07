@@ -45,7 +45,6 @@
 #include <asm/mmu.h>
 #include <asm/processor.h>
 #include <asm/io.h>
-#include <asm/kexec.h>
 #include <asm/prom.h>
 #include <asm/machdep.h>
 #include <asm/cputable.h>
@@ -81,8 +80,7 @@ static void celleb_show_cpuinfo(struct seq_file *m)
 
 static int __init celleb_machine_type_hack(char *ptr)
 {
-	strncpy(celleb_machine_type, ptr, sizeof(celleb_machine_type));
-	celleb_machine_type[sizeof(celleb_machine_type)-1] = 0;
+	strlcpy(celleb_machine_type, ptr, sizeof(celleb_machine_type));
 	return 0;
 }
 
@@ -226,9 +224,6 @@ define_machine(celleb_beat) {
 	.pci_setup_phb		= celleb_setup_phb,
 #ifdef CONFIG_KEXEC
 	.kexec_cpu_down		= beat_kexec_cpu_down,
-	.machine_kexec		= default_machine_kexec,
-	.machine_kexec_prepare	= default_machine_kexec_prepare,
-	.machine_crash_shutdown	= default_machine_crash_shutdown,
 #endif
 };
 
@@ -248,9 +243,4 @@ define_machine(celleb_native) {
 	.pci_probe_mode 	= celleb_pci_probe_mode,
 	.pci_setup_phb		= celleb_setup_phb,
 	.init_IRQ		= celleb_init_IRQ_native,
-#ifdef CONFIG_KEXEC
-	.machine_kexec		= default_machine_kexec,
-	.machine_kexec_prepare	= default_machine_kexec_prepare,
-	.machine_crash_shutdown	= default_machine_crash_shutdown,
-#endif
 };

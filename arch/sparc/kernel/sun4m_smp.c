@@ -17,6 +17,7 @@
 #include <linux/swap.h>
 #include <linux/profile.h>
 #include <linux/delay.h>
+#include <linux/cpu.h>
 
 #include <asm/cacheflush.h>
 #include <asm/tlbflush.h>
@@ -53,7 +54,8 @@ extern int __smp4m_processor_id(void);
 #define SMP_PRINTK(x)
 #endif
 
-static inline unsigned long swap(volatile unsigned long *ptr, unsigned long val)
+static inline unsigned long
+swap_ulong(volatile unsigned long *ptr, unsigned long val)
 {
 	__asm__ __volatile__("swap [%1], %0\n\t" :
 			     "=&r" (val), "=&r" (ptr) :
@@ -71,6 +73,8 @@ void __cpuinit smp4m_callin(void)
 	local_flush_cache_all();
 	local_flush_tlb_all();
 
+	notify_cpu_starting(cpuid);
+
 	/* Get our local ticker going. */
 	smp_setup_percpu_timer();
 
@@ -87,7 +91,7 @@ void __cpuinit smp4m_callin(void)
 	 * to call the scheduler code.
 	 */
 	/* Allow master to continue. */
-	swap(&cpu_callin_map[cpuid], 1);
+	swap_ulong(&cpu_callin_map[cpuid], 1);
 
 	/* XXX: What's up with all the flushes? */
 	local_flush_cache_all();
@@ -109,7 +113,7 @@ void __cpuinit smp4m_callin(void)
 
 	local_irq_enable();
 
-	cpu_set(cpuid, cpu_online_map);
+	set_cpu_online(cpuid, true);
 }
 
 /*
@@ -117,9 +121,6 @@ void __cpuinit smp4m_callin(void)
  */
  
 extern struct linux_prom_registers smp_penguin_ctable;
-extern unsigned long trapbase_cpu1[];
-extern unsigned long trapbase_cpu2[];
-extern unsigned long trapbase_cpu3[];
 
 void __init smp4m_boot_cpus(void)
 {
@@ -182,37 +183,12 @@ void __init smp4m_smp_done(void)
 	/* setup cpu list for irq rotation */
 	first = 0;
 	prev = &first;
-	for (i = 0; i < NR_CPUS; i++) {
-		if (cpu_online(i)) {
-			*prev = i;
-			prev = &cpu_data(i).next;
-		}
+	for_each_online_cpu(i) {
+		*prev = i;
+		prev = &cpu_data(i).next;
 	}
 	*prev = first;
 	local_flush_cache_all();
-
-	/* Free unneeded trap tables */
-	if (!cpu_isset(1, cpu_present_map)) {
-		ClearPageReserved(virt_to_page(trapbase_cpu1));
-		init_page_count(virt_to_page(trapbase_cpu1));
-		free_page((unsigned long)trapbase_cpu1);
-		totalram_pages++;
-		num_physpages++;
-	}
-	if (!cpu_isset(2, cpu_present_map)) {
-		ClearPageReserved(virt_to_page(trapbase_cpu2));
-		init_page_count(virt_to_page(trapbase_cpu2));
-		free_page((unsigned long)trapbase_cpu2);
-		totalram_pages++;
-		num_physpages++;
-	}
-	if (!cpu_isset(3, cpu_present_map)) {
-		ClearPageReserved(virt_to_page(trapbase_cpu3));
-		init_page_count(virt_to_page(trapbase_cpu3));
-		free_page((unsigned long)trapbase_cpu3);
-		totalram_pages++;
-		num_physpages++;
-	}
 
 	/* Ok, they are spinning and ready to go. */
 }
@@ -313,6 +289,8 @@ void smp4m_cross_call_irq(void)
 	ccall_info.processors_out[i] = 1;
 }
 
+extern void sun4m_clear_profile_irq(int cpu);
+
 void smp4m_percpu_timer_interrupt(struct pt_regs *regs)
 {
 	struct pt_regs *old_regs;
@@ -320,7 +298,7 @@ void smp4m_percpu_timer_interrupt(struct pt_regs *regs)
 
 	old_regs = set_irq_regs(regs);
 
-	clear_profile_irq(cpu);
+	sun4m_clear_profile_irq(cpu);
 
 	profile_tick(CPU_PROFILING);
 
@@ -338,7 +316,7 @@ void smp4m_percpu_timer_interrupt(struct pt_regs *regs)
 
 extern unsigned int lvl14_resolution;
 
-static void __init smp_setup_percpu_timer(void)
+static void __cpuinit smp_setup_percpu_timer(void)
 {
 	int cpu = smp_processor_id();
 

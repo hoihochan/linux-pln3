@@ -12,18 +12,18 @@
 
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <linux/mm.h>
-#include <linux/sched.h>
-#include <linux/interrupt.h>
-#include <linux/ioport.h>
-#include <linux/mtd/physmap.h>
 #include <linux/platform_device.h>
+#include <linux/io.h>
 #include <linux/m48t86.h>
-#include <asm/io.h>
+#include <linux/mtd/physmap.h>
+
 #include <mach/hardware.h>
+#include <mach/ts72xx.h>
+
 #include <asm/mach-types.h>
-#include <asm/mach/arch.h>
 #include <asm/mach/map.h>
+#include <asm/mach/arch.h>
+
 
 static struct map_desc ts72xx_io_desc[] __initdata = {
 	{
@@ -111,13 +111,16 @@ static void __init ts72xx_map_io(void)
 	}
 }
 
+/*************************************************************************
+ * NOR flash (TS-7200 only)
+ *************************************************************************/
 static struct physmap_flash_data ts72xx_flash_data = {
-	.width		= 1,
+	.width		= 2,
 };
 
 static struct resource ts72xx_flash_resource = {
-	.start		= TS72XX_NOR_PHYS_BASE,
-	.end		= TS72XX_NOR_PHYS_BASE + 0x00ffffff,
+	.start		= EP93XX_CS6_PHYS_BASE,
+	.end		= EP93XX_CS6_PHYS_BASE + SZ_16M - 1,
 	.flags		= IORESOURCE_MEM,
 };
 
@@ -130,6 +133,12 @@ static struct platform_device ts72xx_flash = {
 	.num_resources	= 1,
 	.resource	= &ts72xx_flash_resource,
 };
+
+static void __init ts72xx_register_flash(void)
+{
+	if (board_is_ts7200())
+		platform_device_register(&ts72xx_flash);
+}
 
 static unsigned char ts72xx_rtc_readbyte(unsigned long addr)
 {
@@ -144,62 +153,37 @@ static void ts72xx_rtc_writebyte(unsigned char value, unsigned long addr)
 }
 
 static struct m48t86_ops ts72xx_rtc_ops = {
-	.readbyte		= ts72xx_rtc_readbyte,
-	.writebyte		= ts72xx_rtc_writebyte,
+	.readbyte	= ts72xx_rtc_readbyte,
+	.writebyte	= ts72xx_rtc_writebyte,
 };
 
 static struct platform_device ts72xx_rtc_device = {
-	.name			= "rtc-m48t86",
-	.id			= -1,
-	.dev			= {
-		.platform_data		= &ts72xx_rtc_ops,
+	.name		= "rtc-m48t86",
+	.id		= -1,
+	.dev		= {
+		.platform_data	= &ts72xx_rtc_ops,
 	},
-	.num_resources		= 0,
+	.num_resources	= 0,
 };
 
 static struct ep93xx_eth_data ts72xx_eth_data = {
-	.phy_id			= 1,
-};
-
-static struct resource ts72xx_eth_resource[] = {
-	{
-		.start	= EP93XX_ETHERNET_PHYS_BASE,
-		.end	= EP93XX_ETHERNET_PHYS_BASE + 0xffff,
-		.flags	= IORESOURCE_MEM,
-	}, {
-		.start	= IRQ_EP93XX_ETHERNET,
-		.end	= IRQ_EP93XX_ETHERNET,
-		.flags	= IORESOURCE_IRQ,
-	}
-};
-
-static struct platform_device ts72xx_eth_device = {
-	.name		= "ep93xx-eth",
-	.id		= -1,
-	.dev		= {
-		.platform_data	= &ts72xx_eth_data,
-	},
-	.num_resources	= 2,
-	.resource	= ts72xx_eth_resource,
+	.phy_id		= 1,
 };
 
 static void __init ts72xx_init_machine(void)
 {
 	ep93xx_init_devices();
-	if (board_is_ts7200())
-		platform_device_register(&ts72xx_flash);
+	ts72xx_register_flash();
 	platform_device_register(&ts72xx_rtc_device);
 
-	memcpy(ts72xx_eth_data.dev_addr,
-		(void *)(EP93XX_ETHERNET_BASE + 0x50), 6);
-	platform_device_register(&ts72xx_eth_device);
+	ep93xx_register_eth(&ts72xx_eth_data, 1);
 }
 
 MACHINE_START(TS72XX, "Technologic Systems TS-72xx SBC")
 	/* Maintainer: Lennert Buytenhek <buytenh@wantstofly.org> */
 	.phys_io	= EP93XX_APB_PHYS_BASE,
 	.io_pg_offst	= ((EP93XX_APB_VIRT_BASE) >> 18) & 0xfffc,
-	.boot_params	= 0x00000100,
+	.boot_params	= EP93XX_SDCE3_PHYS_BASE_SYNC + 0x100,
 	.map_io		= ts72xx_map_io,
 	.init_irq	= ep93xx_init_irq,
 	.timer		= &ep93xx_timer,

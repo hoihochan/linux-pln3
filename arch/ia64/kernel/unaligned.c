@@ -59,7 +59,7 @@ dump (const char *str, void *vp, size_t len)
  *  (i.e. don't allow attacker to fill up logs with unaligned accesses).
  */
 int no_unaligned_warning;
-static int noprint_warning;
+int unaligned_dump_stack;
 
 /*
  * For M-unit:
@@ -1356,9 +1356,8 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 			/* watch for command names containing %s */
 			printk(KERN_WARNING "%s", buf);
 		} else {
-			if (no_unaligned_warning && !noprint_warning) {
-				noprint_warning = 1;
-				printk(KERN_WARNING "%s(%d) encountered an "
+			if (no_unaligned_warning) {
+				printk_once(KERN_WARNING "%s(%d) encountered an "
 				       "unaligned exception which required\n"
 				       "kernel assistance, which degrades "
 				       "the performance of the application.\n"
@@ -1371,9 +1370,12 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 			}
 		}
 	} else {
-		if (within_logging_rate_limit())
+		if (within_logging_rate_limit()) {
 			printk(KERN_WARNING "kernel unaligned access to 0x%016lx, ip=0x%016lx\n",
 			       ifa, regs->cr_iip + ipsr->ri);
+			if (unaligned_dump_stack)
+				dump_stack();
+		}
 		set_fs(KERNEL_DS);
 	}
 

@@ -15,7 +15,6 @@
 
 #include <crypto/algapi.h>
 #include <crypto/skcipher.h>
-#include <linux/init.h>
 #include <linux/types.h>
 
 struct rtattr;
@@ -65,11 +64,6 @@ void skcipher_geniv_free(struct crypto_instance *inst);
 int skcipher_geniv_init(struct crypto_tfm *tfm);
 void skcipher_geniv_exit(struct crypto_tfm *tfm);
 
-int __init eseqiv_module_init(void);
-void __exit eseqiv_module_exit(void);
-int __init chainiv_module_init(void);
-void chainiv_module_exit(void);
-
 static inline struct crypto_ablkcipher *skcipher_geniv_cipher(
 	struct crypto_ablkcipher *geniv)
 {
@@ -85,8 +79,8 @@ static inline int skcipher_enqueue_givcrypt(
 static inline struct skcipher_givcrypt_request *skcipher_dequeue_givcrypt(
 	struct crypto_queue *queue)
 {
-	return container_of(ablkcipher_dequeue_request(queue),
-			    struct skcipher_givcrypt_request, creq);
+	return __crypto_dequeue_request(
+		queue, offsetof(struct skcipher_givcrypt_request, creq.base));
 }
 
 static inline void *skcipher_givcrypt_reqctx(

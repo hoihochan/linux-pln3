@@ -26,6 +26,51 @@ static void *get_ipc(ctl_table *table)
 	return which;
 }
 
+#ifdef CONFIG_PROC_SYSCTL
+static int proc_ipc_dointvec(ctl_table *table, int write,
+	void __user *buffer, size_t *lenp, loff_t *ppos)
+{
+	struct ctl_table ipc_table;
+	memcpy(&ipc_table, table, sizeof(ipc_table));
+	ipc_table.data = get_ipc(table);
+
+	return proc_dointvec(&ipc_table, write, buffer, lenp, ppos);
+}
+
+static int proc_ipc_callback_dointvec(ctl_table *table, int write,
+	void __user *buffer, size_t *lenp, loff_t *ppos)
+{
+	struct ctl_table ipc_table;
+	size_t lenp_bef = *lenp;
+	int rc;
+
+	memcpy(&ipc_table, table, sizeof(ipc_table));
+	ipc_table.data = get_ipc(table);
+
+	rc = proc_dointvec(&ipc_table, write, buffer, lenp, ppos);
+
+	if (write && !rc && lenp_bef == *lenp)
+		/*
+		 * Tunable has successfully been changed by hand. Disable its
+		 * automatic adjustment. This simply requires unregistering
+		 * the notifiers that trigger recalculation.
+		 */
+		unregister_ipcns_notifier(current->nsproxy->ipc_ns);
+
+	return rc;
+}
+
+static int proc_ipc_doulongvec_minmax(ctl_table *table, int write,
+	void __user *buffer, size_t *lenp, loff_t *ppos)
+{
+	struct ctl_table ipc_table;
+	memcpy(&ipc_table, table, sizeof(ipc_table));
+	ipc_table.data = get_ipc(table);
+
+	return proc_doulongvec_minmax(&ipc_table, write, buffer,
+					lenp, ppos);
+}
+
 /*
  * Routine that is called when the file "auto_msgmni" has successfully been
  * written.
@@ -49,53 +94,8 @@ static void ipc_auto_callback(int val)
 	}
 }
 
-#ifdef CONFIG_PROC_FS
-static int proc_ipc_dointvec(ctl_table *table, int write, struct file *filp,
-	void __user *buffer, size_t *lenp, loff_t *ppos)
-{
-	struct ctl_table ipc_table;
-	memcpy(&ipc_table, table, sizeof(ipc_table));
-	ipc_table.data = get_ipc(table);
-
-	return proc_dointvec(&ipc_table, write, filp, buffer, lenp, ppos);
-}
-
-static int proc_ipc_callback_dointvec(ctl_table *table, int write,
-	struct file *filp, void __user *buffer, size_t *lenp, loff_t *ppos)
-{
-	struct ctl_table ipc_table;
-	size_t lenp_bef = *lenp;
-	int rc;
-
-	memcpy(&ipc_table, table, sizeof(ipc_table));
-	ipc_table.data = get_ipc(table);
-
-	rc = proc_dointvec(&ipc_table, write, filp, buffer, lenp, ppos);
-
-	if (write && !rc && lenp_bef == *lenp)
-		/*
-		 * Tunable has successfully been changed by hand. Disable its
-		 * automatic adjustment. This simply requires unregistering
-		 * the notifiers that trigger recalculation.
-		 */
-		unregister_ipcns_notifier(current->nsproxy->ipc_ns);
-
-	return rc;
-}
-
-static int proc_ipc_doulongvec_minmax(ctl_table *table, int write,
-	struct file *filp, void __user *buffer, size_t *lenp, loff_t *ppos)
-{
-	struct ctl_table ipc_table;
-	memcpy(&ipc_table, table, sizeof(ipc_table));
-	ipc_table.data = get_ipc(table);
-
-	return proc_doulongvec_minmax(&ipc_table, write, filp, buffer,
-					lenp, ppos);
-}
-
 static int proc_ipcauto_dointvec_minmax(ctl_table *table, int write,
-	struct file *filp, void __user *buffer, size_t *lenp, loff_t *ppos)
+	void __user *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct ctl_table ipc_table;
 	size_t lenp_bef = *lenp;
@@ -106,7 +106,7 @@ static int proc_ipcauto_dointvec_minmax(ctl_table *table, int write,
 	ipc_table.data = get_ipc(table);
 	oldval = *((int *)(ipc_table.data));
 
-	rc = proc_dointvec_minmax(&ipc_table, write, filp, buffer, lenp, ppos);
+	rc = proc_dointvec_minmax(&ipc_table, write, buffer, lenp, ppos);
 
 	if (write && !rc && lenp_bef == *lenp) {
 		int newval = *((int *)(ipc_table.data));
@@ -131,7 +131,7 @@ static int proc_ipcauto_dointvec_minmax(ctl_table *table, int write,
 
 #ifdef CONFIG_SYSCTL_SYSCALL
 /* The generic sysctl ipc data routine. */
-static int sysctl_ipc_data(ctl_table *table, int __user *name, int nlen,
+static int sysctl_ipc_data(ctl_table *table,
 		void __user *oldval, size_t __user *oldlenp,
 		void __user *newval, size_t newlen)
 {
@@ -169,14 +169,13 @@ static int sysctl_ipc_data(ctl_table *table, int __user *name, int nlen,
 	return 1;
 }
 
-static int sysctl_ipc_registered_data(ctl_table *table, int __user *name,
-		int nlen, void __user *oldval, size_t __user *oldlenp,
+static int sysctl_ipc_registered_data(ctl_table *table,
+		void __user *oldval, size_t __user *oldlenp,
 		void __user *newval, size_t newlen)
 {
 	int rc;
 
-	rc = sysctl_ipc_data(table, name, nlen, oldval, oldlenp, newval,
-		newlen);
+	rc = sysctl_ipc_data(table, oldval, oldlenp, newval, newlen);
 
 	if (newval && newlen && rc > 0)
 		/*

@@ -1,8 +1,6 @@
 #ifndef _TFRC_H_
 #define _TFRC_H_
 /*
- *  net/dccp/ccids/lib/tfrc.h
- *
  *  Copyright (c) 2007   The University of Aberdeen, Scotland, UK
  *  Copyright (c) 2005-6 The University of Waikato, Hamilton, New Zealand.
  *  Copyright (c) 2005-6 Ian McDonald <ian.mcdonald@jandi.co.nz>
@@ -17,7 +15,8 @@
 #include <linux/types.h>
 #include <linux/math64.h>
 #include "../../dccp.h"
-/* internal includes that this module exports: */
+
+/* internal includes that this library exports: */
 #include "loss_interval.h"
 #include "packet_history.h"
 
@@ -31,7 +30,7 @@ extern int tfrc_debug;
 /* integer-arithmetic divisions of type (a * 1000000)/b */
 static inline u64 scaled_div(u64 a, u64 b)
 {
-	BUG_ON(b==0);
+	BUG_ON(b == 0);
 	return div64_u64(a * 1000000, b);
 }
 
@@ -66,4 +65,12 @@ extern void tfrc_rx_packet_history_exit(void);
 
 extern int  tfrc_li_init(void);
 extern void tfrc_li_exit(void);
+
+#ifdef CONFIG_IP_DCCP_TFRC_LIB
+extern int  tfrc_lib_init(void);
+extern void tfrc_lib_exit(void);
+#else
+#define tfrc_lib_init() (0)
+#define tfrc_lib_exit()
+#endif
 #endif /* _TFRC_H_ */

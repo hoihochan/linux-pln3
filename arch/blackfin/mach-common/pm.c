@@ -1,35 +1,11 @@
 /*
- * File:         arch/blackfin/mach-common/pm.c
- * Based on:     arm/mach-omap/pm.c
- * Author:       Cliff Brake <cbrake@accelent.com> Copyright (c) 2001
+ * Blackfin power management
  *
- * Created:      2001
- * Description:  Blackfin power management
+ * Copyright 2006-2009 Analog Devices Inc.
  *
- * Modified:     Nicolas Pitre - PXA250 support
- *                Copyright (c) 2002 Monta Vista Software, Inc.
- *               David Singleton - OMAP1510
- *                Copyright (c) 2002 Monta Vista Software, Inc.
- *               Dirk Behme <dirk.behme@de.bosch.com> - OMAP1510/1610
- *                Copyright 2004
- *               Copyright 2004-2008 Analog Devices Inc.
- *
- * Bugs:         Enter bugs at http://blackfin.uclinux.org/
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see the file COPYING, or write
- * to the Free Software Foundation, Inc.,
- * 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ * Licensed under the GPL-2
+ * based on arm/mach-omap/pm.c
+ *    Copyright 2001, Cliff Brake <cbrake@accelent.com> and others
  */
 
 #include <linux/suspend.h>
@@ -38,6 +14,7 @@
 #include <linux/io.h>
 #include <linux/irq.h>
 
+#include <asm/cplb.h>
 #include <asm/gpio.h>
 #include <asm/dma.h>
 #include <asm/dpmc.h>
@@ -71,7 +48,7 @@ void bfin_pm_suspend_standby_enter(void)
 	gpio_pm_wakeup_request(CONFIG_PM_WAKEUP_GPIO_NUMBER, WAKEUP_TYPE);
 #endif
 
-	local_irq_save(flags);
+	local_irq_save_hw(flags);
 	bfin_pm_standby_setup();
 
 #ifdef CONFIG_PM_BFIN_SLEEP_DEEPER
@@ -82,26 +59,27 @@ void bfin_pm_suspend_standby_enter(void)
 
 	bfin_pm_standby_restore();
 
-#if defined(CONFIG_BF54x) || defined(CONFIG_BF52x)  || defined(CONFIG_BF561)
+#ifdef SIC_IWR0
 	bfin_write_SIC_IWR0(IWR_DISABLE_ALL);
-#if defined(CONFIG_BF52x)
+# ifdef SIC_IWR1
 	/* BF52x system reset does not properly reset SIC_IWR1 which
 	 * will screw up the bootrom as it relies on MDMA0/1 waking it
 	 * up from IDLE instructions.  See this report for more info:
 	 * http://blackfin.uclinux.org/gf/tracker/4323
 	 */
-	bfin_write_SIC_IWR1(IWR_ENABLE(10) | IWR_ENABLE(11));
-#else
-	bfin_write_SIC_IWR1(IWR_DISABLE_ALL);
-#endif
-# ifdef CONFIG_BF54x
+	if (ANOMALY_05000435)
+		bfin_write_SIC_IWR1(IWR_ENABLE(10) | IWR_ENABLE(11));
+	else
+		bfin_write_SIC_IWR1(IWR_DISABLE_ALL);
+# endif
+# ifdef SIC_IWR2
 	bfin_write_SIC_IWR2(IWR_DISABLE_ALL);
 # endif
 #else
 	bfin_write_SIC_IWR(IWR_DISABLE_ALL);
 #endif
 
-	local_irq_restore(flags);
+	local_irq_restore_hw(flags);
 }
 
 int bf53x_suspend_l1_mem(unsigned char *memptr)
@@ -131,7 +109,7 @@ int bf53x_resume_l1_mem(unsigned char *memptr)
 	return 0;
 }
 
-#ifdef CONFIG_BFIN_WB
+#if defined(CONFIG_BFIN_EXTMEM_WRITEBACK) || defined(CONFIG_BFIN_L2_WRITEBACK)
 static void flushinv_all_dcache(void)
 {
 	u32 way, bank, subbank, set;
@@ -169,58 +147,6 @@ static void flushinv_all_dcache(void)
 }
 #endif
 
-static inline void dcache_disable(void)
-{
-#ifdef CONFIG_BFIN_DCACHE
-	unsigned long ctrl;
-
-#ifdef CONFIG_BFIN_WB
-	flushinv_all_dcache();
-#endif
-	SSYNC();
-	ctrl = bfin_read_DMEM_CONTROL();
-	ctrl &= ~ENDCPLB;
-	bfin_write_DMEM_CONTROL(ctrl);
-	SSYNC();
-#endif
-}
-
-static inline void dcache_enable(void)
-{
-#ifdef CONFIG_BFIN_DCACHE
-	unsigned long ctrl;
-	SSYNC();
-	ctrl = bfin_read_DMEM_CONTROL();
-	ctrl |= ENDCPLB;
-	bfin_write_DMEM_CONTROL(ctrl);
-	SSYNC();
-#endif
-}
-
-static inline void icache_disable(void)
-{
-#ifdef CONFIG_BFIN_ICACHE
-	unsigned long ctrl;
-	SSYNC();
-	ctrl = bfin_read_IMEM_CONTROL();
-	ctrl &= ~ENICPLB;
-	bfin_write_IMEM_CONTROL(ctrl);
-	SSYNC();
-#endif
-}
-
-static inline void icache_enable(void)
-{
-#ifdef CONFIG_BFIN_ICACHE
-	unsigned long ctrl;
-	SSYNC();
-	ctrl = bfin_read_IMEM_CONTROL();
-	ctrl |= ENICPLB;
-	bfin_write_IMEM_CONTROL(ctrl);
-	SSYNC();
-#endif
-}
-
 int bfin_pm_suspend_mem_enter(void)
 {
 	unsigned long flags;
@@ -245,33 +171,36 @@ int bfin_pm_suspend_mem_enter(void)
 	wakeup |= GPWE;
 #endif
 
-	local_irq_save(flags);
+	local_irq_save_hw(flags);
 
 	ret = blackfin_dma_suspend();
 
 	if (ret) {
-		local_irq_restore(flags);
+		local_irq_restore_hw(flags);
 		kfree(memptr);
 		return ret;
 	}
 
 	bfin_gpio_pm_hibernate_suspend();
 
-	dcache_disable();
-	icache_disable();
+#if defined(CONFIG_BFIN_EXTMEM_WRITEBACK) || defined(CONFIG_BFIN_L2_WRITEBACK)
+	flushinv_all_dcache();
+#endif
+	_disable_dcplb();
+	_disable_icplb();
 	bf53x_suspend_l1_mem(memptr);
 
 	do_hibernate(wakeup | vr_wakeup);	/* Goodbye */
 
 	bf53x_resume_l1_mem(memptr);
 
-	icache_enable();
-	dcache_enable();
+	_enable_icplb();
+	_enable_dcplb();
 
 	bfin_gpio_pm_hibernate_restore();
 	blackfin_dma_resume();
 
-	local_irq_restore(flags);
+	local_irq_restore_hw(flags);
 	kfree(memptr);
 
 	return 0;
@@ -286,7 +215,7 @@ int bfin_pm_suspend_mem_enter(void)
 static int bfin_pm_valid(suspend_state_t state)
 {
 	return (state == PM_SUSPEND_STANDBY
-#ifndef BF533_FAMILY
+#if !(defined(BF533_FAMILY) || defined(CONFIG_BF561))
 	/*
 	 * On BF533/2/1:
 	 * If we enter Hibernate the SCKE Pin is driven Low,

@@ -170,6 +170,9 @@ struct hvcall_ppp_data {
 	u8	unallocated_weight;
 	u16	active_procs_in_pool;
 	u16	active_system_procs;
+	u16	phys_platform_procs;
+	u32	max_proc_cap_avail;
+	u32	entitled_proc_cap_avail;
 };
 
 /*
@@ -191,13 +194,18 @@ struct hvcall_ppp_data {
  *            XX - Unallocated Variable Processor Capacity Weight.
  *              XXXX - Active processors in Physical Processor Pool.
  *                  XXXX  - Processors active on platform.
+ *  R8 (QQQQRRRRRRSSSSSS). if ibm,partition-performance-parameters-level >= 1
+ *	XXXX - Physical platform procs allocated to virtualization.
+ *	    XXXXXX - Max procs capacity % available to the partitions pool.
+ *	          XXXXXX - Entitled procs capacity % available to the
+ *			   partitions pool.
  */
 static unsigned int h_get_ppp(struct hvcall_ppp_data *ppp_data)
 {
 	unsigned long rc;
-	unsigned long retbuf[PLPAR_HCALL_BUFSIZE];
+	unsigned long retbuf[PLPAR_HCALL9_BUFSIZE];
 
-	rc = plpar_hcall(H_GET_PPP, retbuf);
+	rc = plpar_hcall9(H_GET_PPP, retbuf);
 
 	ppp_data->entitlement = retbuf[0];
 	ppp_data->unallocated_entitlement = retbuf[1];
@@ -210,6 +218,10 @@ static unsigned int h_get_ppp(struct hvcall_ppp_data *ppp_data)
 	ppp_data->unallocated_weight = (retbuf[3] >> 4 * 8) & 0xff;
 	ppp_data->active_procs_in_pool = (retbuf[3] >> 2 * 8) & 0xffff;
 	ppp_data->active_system_procs = retbuf[3] & 0xffff;
+
+	ppp_data->phys_platform_procs = retbuf[4] >> 6 * 8;
+	ppp_data->max_proc_cap_avail = (retbuf[4] >> 3 * 8) & 0xffffff;
+	ppp_data->entitled_proc_cap_avail = retbuf[4] & 0xffffff;
 
 	return rc;
 }
@@ -235,13 +247,15 @@ static unsigned h_pic(unsigned long *pool_idle_time,
 static void parse_ppp_data(struct seq_file *m)
 {
 	struct hvcall_ppp_data ppp_data;
+	struct device_node *root;
+	const int *perf_level;
 	int rc;
 
 	rc = h_get_ppp(&ppp_data);
 	if (rc)
 		return;
 
-	seq_printf(m, "partition_entitled_capacity=%ld\n",
+	seq_printf(m, "partition_entitled_capacity=%lld\n",
 	           ppp_data.entitlement);
 	seq_printf(m, "group=%d\n", ppp_data.group_num);
 	seq_printf(m, "system_active_processors=%d\n",
@@ -266,8 +280,30 @@ static void parse_ppp_data(struct seq_file *m)
 		   ppp_data.unallocated_weight);
 	seq_printf(m, "capacity_weight=%d\n", ppp_data.weight);
 	seq_printf(m, "capped=%d\n", ppp_data.capped);
-	seq_printf(m, "unallocated_capacity=%ld\n",
+	seq_printf(m, "unallocated_capacity=%lld\n",
 		   ppp_data.unallocated_entitlement);
+
+	/* The last bits of information returned from h_get_ppp are only
+	 * valid if the ibm,partition-performance-parameters-level
+	 * property is >= 1.
+	 */
+	root = of_find_node_by_path("/");
+	if (root) {
+		perf_level = of_get_property(root,
+				"ibm,partition-performance-parameters-level",
+					     NULL);
+		if (perf_level && (*perf_level >= 1)) {
+			seq_printf(m,
+			    "physical_procs_allocated_to_virtualization=%d\n",
+				   ppp_data.phys_platform_procs);
+			seq_printf(m, "max_proc_capacity_available=%d\n",
+				   ppp_data.max_proc_cap_avail);
+			seq_printf(m, "entitled_proc_capacity_available=%d\n",
+				   ppp_data.entitled_proc_cap_avail);
+		}
+
+		of_node_put(root);
+	}
 }
 
 /**
@@ -435,6 +471,21 @@ static void pseries_cmo_data(struct seq_file *m)
 	seq_printf(m, "cmo_page_size=%lu\n", cmo_get_page_size());
 }
 
+static void splpar_dispatch_data(struct seq_file *m)
+{
+	int cpu;
+	unsigned long dispatches = 0;
+	unsigned long dispatch_dispersions = 0;
+
+	for_each_possible_cpu(cpu) {
+		dispatches += lppaca[cpu].yield_count;
+		dispatch_dispersions += lppaca[cpu].dispersion_count;
+	}
+
+	seq_printf(m, "dispatches=%lu\n", dispatches);
+	seq_printf(m, "dispatch_dispersions=%lu\n", dispatch_dispersions);
+}
+
 static int pseries_lparcfg_data(struct seq_file *m, void *v)
 {
 	int partition_potential_processors;
@@ -461,6 +512,7 @@ static int pseries_lparcfg_data(struct seq_file *m, void *v)
 		parse_ppp_data(m);
 		parse_mpp_data(m);
 		pseries_cmo_data(m);
+		splpar_dispatch_data(m);
 
 		seq_printf(m, "purr=%ld\n", get_purr());
 	} else {		/* non SPLPAR case */
@@ -512,11 +564,11 @@ static ssize_t update_ppp(u64 *entitlement, u8 *weight)
 	} else
 		return -EINVAL;
 
-	pr_debug("%s: current_entitled = %lu, current_weight = %u\n",
-	         __FUNCTION__, ppp_data.entitlement, ppp_data.weight);
+	pr_debug("%s: current_entitled = %llu, current_weight = %u\n",
+		 __func__, ppp_data.entitlement, ppp_data.weight);
 
-	pr_debug("%s: new_entitled = %lu, new_weight = %u\n",
-		 __FUNCTION__, new_entitled, new_weight);
+	pr_debug("%s: new_entitled = %llu, new_weight = %u\n",
+		 __func__, new_entitled, new_weight);
 
 	retval = plpar_hcall_norets(H_SET_PPP, new_entitled, new_weight);
 	return retval;
@@ -559,10 +611,10 @@ static ssize_t update_mpp(u64 *entitlement, u8 *weight)
 		return -EINVAL;
 
 	pr_debug("%s: current_entitled = %lu, current_weight = %u\n",
-	         __FUNCTION__, mpp_data.entitled_mem, mpp_data.mem_weight);
+	         __func__, mpp_data.entitled_mem, mpp_data.mem_weight);
 
-	pr_debug("%s: new_entitled = %lu, new_weight = %u\n",
-	         __FUNCTION__, new_entitled, new_weight);
+	pr_debug("%s: new_entitled = %llu, new_weight = %u\n",
+		 __func__, new_entitled, new_weight);
 
 	rc = plpar_hcall_norets(H_SET_MPP, new_entitled, new_weight);
 	return rc;

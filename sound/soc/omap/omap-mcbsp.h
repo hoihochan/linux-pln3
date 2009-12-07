@@ -3,7 +3,8 @@
  *
  * Copyright (C) 2008 Nokia Corporation
  *
- * Contact: Jarkko Nikula <jarkko.nikula@nokia.com>
+ * Contact: Jarkko Nikula <jhnikula@gmail.com>
+ *          Peter Ujfalusi <peter.ujfalusi@nokia.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -31,6 +32,10 @@ enum omap_mcbsp_clksrg_clk {
 	OMAP_MCBSP_SYSCLK_CLK,		/* Internal ICLK */
 	OMAP_MCBSP_SYSCLK_CLKX_EXT,	/* External CLKX pin */
 	OMAP_MCBSP_SYSCLK_CLKR_EXT,	/* External CLKR pin */
+	OMAP_MCBSP_CLKR_SRC_CLKR,	/* CLKR from CLKR pin */
+	OMAP_MCBSP_CLKR_SRC_CLKX,	/* CLKR from CLKX pin */
+	OMAP_MCBSP_FSR_SRC_FSR,		/* FSR from FSR pin */
+	OMAP_MCBSP_FSR_SRC_FSX,		/* FSR from FSX pin */
 };
 
 /* McBSP dividers */
@@ -38,11 +43,17 @@ enum omap_mcbsp_div {
 	OMAP_MCBSP_CLKGDV,		/* Sample rate generator divider */
 };
 
-/*
- * REVISIT: Preparation for the ASoC v2. Let the number of available links to
- * be same than number of McBSP ports found in OMAP(s) we are compiling for.
- */
-#define NUM_LINKS	1
+#if defined(CONFIG_ARCH_OMAP2420)
+#define NUM_LINKS	2
+#endif
+#if defined(CONFIG_ARCH_OMAP15XX) || defined(CONFIG_ARCH_OMAP16XX)
+#undef  NUM_LINKS
+#define NUM_LINKS	3
+#endif
+#if defined(CONFIG_ARCH_OMAP2430) || defined(CONFIG_ARCH_OMAP34XX)
+#undef  NUM_LINKS
+#define NUM_LINKS	5
+#endif
 
 extern struct snd_soc_dai omap_mcbsp_dai[NUM_LINKS];
 

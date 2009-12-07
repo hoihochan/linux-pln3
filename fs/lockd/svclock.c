@@ -326,6 +326,8 @@ static void nlmsvc_freegrantargs(struct nlm_rqst *call)
 {
 	if (call->a_args.lock.oh.data != call->a_owner)
 		kfree(call->a_args.lock.oh.data);
+
+	locks_release_private(&call->a_args.lock.fl);
 }
 
 /*
@@ -360,7 +362,7 @@ nlmsvc_defer_lock_rqst(struct svc_rqst *rqstp, struct nlm_block *block)
 __be32
 nlmsvc_lock(struct svc_rqst *rqstp, struct nlm_file *file,
 	    struct nlm_host *host, struct nlm_lock *lock, int wait,
-	    struct nlm_cookie *cookie)
+	    struct nlm_cookie *cookie, int reclaim)
 {
 	struct nlm_block	*block = NULL;
 	int			error;
@@ -406,6 +408,15 @@ nlmsvc_lock(struct svc_rqst *rqstp, struct nlm_file *file,
 		goto out;
 	}
 
+	if (locks_in_grace() && !reclaim) {
+		ret = nlm_lck_denied_grace_period;
+		goto out;
+	}
+	if (reclaim && !locks_in_grace()) {
+		ret = nlm_lck_denied_grace_period;
+		goto out;
+	}
+
 	if (!wait)
 		lock->fl.fl_flags &= ~FL_SLEEP;
 	error = vfs_lock_file(file->f_file, F_SETLK, &lock->fl, NULL);
@@ -417,8 +428,15 @@ nlmsvc_lock(struct svc_rqst *rqstp, struct nlm_file *file,
 			ret = nlm_granted;
 			goto out;
 		case -EAGAIN:
+			/*
+			 * If this is a blocking request for an
+			 * already pending lock request then we need
+			 * to put it back on lockd's block list
+			 */
+			if (wait)
+				break;
 			ret = nlm_lck_denied;
-			break;
+			goto out;
 		case FILE_LOCK_DEFERRED:
 			if (wait)
 				break;
@@ -433,10 +451,6 @@ nlmsvc_lock(struct svc_rqst *rqstp, struct nlm_file *file,
 			ret = nlm_lck_denied_nolocks;
 			goto out;
 	}
-
-	ret = nlm_lck_denied;
-	if (!wait)
-		goto out;
 
 	ret = nlm_lck_blocked;
 
@@ -506,6 +520,10 @@ nlmsvc_testlock(struct svc_rqst *rqstp, struct nlm_file *file,
 		goto out;
 	}
 
+	if (locks_in_grace()) {
+		ret = nlm_lck_denied_grace_period;
+		goto out;
+	}
 	error = vfs_test_lock(file->f_file, &lock->fl);
 	if (error == FILE_LOCK_DEFERRED) {
 		ret = nlmsvc_defer_lock_rqst(rqstp, block);
@@ -585,6 +603,9 @@ nlmsvc_cancel_blocked(struct nlm_file *file, struct nlm_lock *lock)
 				lock->fl.fl_pid,
 				(long long)lock->fl.fl_start,
 				(long long)lock->fl.fl_end);
+
+	if (locks_in_grace())
+		return nlm_lck_denied_grace_period;
 
 	mutex_lock(&file->f_mutex);
 	block = nlmsvc_lookup_block(file, lock);
@@ -684,7 +705,7 @@ static int nlmsvc_same_owner(struct file_lock *fl1, struct file_lock *fl2)
 	return fl1->fl_owner == fl2->fl_owner && fl1->fl_pid == fl2->fl_pid;
 }
 
-struct lock_manager_operations nlmsvc_lock_operations = {
+const struct lock_manager_operations nlmsvc_lock_operations = {
 	.fl_compare_owner = nlmsvc_same_owner,
 	.fl_notify = nlmsvc_notify_blocked,
 	.fl_grant = nlmsvc_grant_deferred,

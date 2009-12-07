@@ -185,7 +185,7 @@ struct vma_to_fileoffset_map *create_vma_map(const struct spu *aSpu,
 			goto fail;
 
 		if (shdr_str.sh_type != SHT_STRTAB)
-			goto fail;;
+			goto fail;
 
 		for (j = 0; j < shdr.sh_size / sizeof (sym); j++) {
 			if (copy_from_user(&sym, spu_elf_start +
@@ -229,7 +229,7 @@ struct vma_to_fileoffset_map *create_vma_map(const struct spu *aSpu,
 	 */
 	overlay_tbl_offset = vma_map_lookup(map, ovly_table_sym,
 					    aSpu, &grd_val);
-	if (overlay_tbl_offset < 0) {
+	if (overlay_tbl_offset > 0x10000000) {
 		printk(KERN_ERR "SPU_PROF: "
 		       "%s, line %d: Error finding SPU overlay table\n",
 		       __func__, __LINE__);

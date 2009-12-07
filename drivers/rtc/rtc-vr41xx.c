@@ -1,7 +1,7 @@
 /*
  *  Driver for NEC VR4100 series Real Time Clock unit.
  *
- *  Copyright (C) 2003-2008  Yoichi Yuasa <yoichi_yuasa@tripeaks.co.jp>
+ *  Copyright (C) 2003-2008  Yoichi Yuasa <yuasa@linux-mips.org>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -27,12 +27,13 @@
 #include <linux/rtc.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
+#include <linux/log2.h>
 
 #include <asm/div64.h>
 #include <asm/io.h>
 #include <asm/uaccess.h>
 
-MODULE_AUTHOR("Yoichi Yuasa <yoichi_yuasa@tripeaks.co.jp>");
+MODULE_AUTHOR("Yoichi Yuasa <yuasa@linux-mips.org>");
 MODULE_DESCRIPTION("NEC VR4100 series RTC driver");
 MODULE_LICENSE("GPL v2");
 
@@ -84,8 +85,8 @@ static DEFINE_SPINLOCK(rtc_lock);
 static char rtc_name[] = "RTC";
 static unsigned long periodic_count;
 static unsigned int alarm_enabled;
-static int aie_irq = -1;
-static int pie_irq = -1;
+static int aie_irq;
+static int pie_irq;
 
 static inline unsigned long read_elapsed_second(void)
 {
@@ -208,17 +209,18 @@ static int vr41xx_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *wkalrm)
 
 static int vr41xx_rtc_irq_set_freq(struct device *dev, int freq)
 {
-	unsigned long count;
+	u64 count;
 
+	if (!is_power_of_2(freq))
+		return -EINVAL;
 	count = RTC_FREQUENCY;
 	do_div(count, freq);
 
-	periodic_count = count;
-
 	spin_lock_irq(&rtc_lock);
 
-	rtc1_write(RTCL1LREG, count);
-	rtc1_write(RTCL1HREG, count >> 16);
+	periodic_count = count;
+	rtc1_write(RTCL1LREG, periodic_count);
+	rtc1_write(RTCL1HREG, periodic_count >> 16);
 
 	spin_unlock_irq(&rtc_lock);
 
@@ -360,7 +362,7 @@ static int __devinit rtc_probe(struct platform_device *pdev)
 	spin_unlock_irq(&rtc_lock);
 
 	aie_irq = platform_get_irq(pdev, 0);
-	if (aie_irq < 0 || aie_irq >= NR_IRQS) {
+	if (aie_irq <= 0) {
 		retval = -EBUSY;
 		goto err_device_unregister;
 	}
@@ -371,7 +373,7 @@ static int __devinit rtc_probe(struct platform_device *pdev)
 		goto err_device_unregister;
 
 	pie_irq = platform_get_irq(pdev, 1);
-	if (pie_irq < 0 || pie_irq >= NR_IRQS)
+	if (pie_irq <= 0)
 		goto err_free_irq;
 
 	retval = request_irq(pie_irq, rtclong1_interrupt, IRQF_DISABLED,

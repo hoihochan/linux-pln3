@@ -94,31 +94,11 @@ static void ack_cayman_irq(unsigned int irq)
 	disable_cayman_irq(irq);
 }
 
-static void end_cayman_irq(unsigned int irq)
-{
-	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
-		enable_cayman_irq(irq);
-}
-
-static unsigned int startup_cayman_irq(unsigned int irq)
-{
-	enable_cayman_irq(irq);
-	return 0; /* never anything pending */
-}
-
-static void shutdown_cayman_irq(unsigned int irq)
-{
-	disable_cayman_irq(irq);
-}
-
-struct hw_interrupt_type cayman_irq_type = {
-	.typename	= "Cayman-IRQ",
-	.startup	= startup_cayman_irq,
-	.shutdown	= shutdown_cayman_irq,
-	.enable		= enable_cayman_irq,
-	.disable	= disable_cayman_irq,
-	.ack		= ack_cayman_irq,
-	.end		= end_cayman_irq,
+struct irq_chip cayman_irq_type = {
+	.name		= "Cayman-IRQ",
+	.unmask 	= enable_cayman_irq,
+	.mask		= disable_cayman_irq,
+	.mask_ack	= ack_cayman_irq,
 };
 
 int cayman_irq_demux(int evt)
@@ -162,33 +142,19 @@ int cayman_irq_demux(int evt)
 	return irq;
 }
 
-#if defined(CONFIG_PROC_FS) && defined(CONFIG_SYSCTL)
-int cayman_irq_describe(char* p, int irq)
-{
-	if (irq < NR_INTC_IRQS) {
-		return intc_irq_describe(p, irq);
-	} else if (irq < NR_INTC_IRQS + 8) {
-		return sprintf(p, "(SMSC %d)", irq - NR_INTC_IRQS);
-	} else if ((irq >= NR_INTC_IRQS + 24) && (irq < NR_INTC_IRQS + 32)) {
-		return sprintf(p, "(PCI2 %d)", irq - (NR_INTC_IRQS + 24));
-	}
-
-	return 0;
-}
-#endif
-
 void init_cayman_irq(void)
 {
 	int i;
 
-	epld_virt = onchip_remap(EPLD_BASE, 1024, "EPLD");
+	epld_virt = (unsigned long)ioremap_nocache(EPLD_BASE, 1024);
 	if (!epld_virt) {
 		printk(KERN_ERR "Cayman IRQ: Unable to remap EPLD\n");
 		return;
 	}
 
-	for (i=0; i<NR_EXT_IRQS; i++) {
-		irq_desc[START_EXT_IRQS + i].chip = &cayman_irq_type;
+	for (i = 0; i < NR_EXT_IRQS; i++) {
+		set_irq_chip_and_handler(START_EXT_IRQS + i, &cayman_irq_type,
+					 handle_level_irq);
 	}
 
 	/* Setup the SMSC interrupt */

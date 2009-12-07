@@ -73,7 +73,6 @@ static irqreturn_t camelot_timer_interrupt(int irq, void *dev_id)
 static struct irqaction camelot_timer_irqaction = {
     .handler    = camelot_timer_interrupt,
     .flags      = IRQF_DISABLED,
-    .mask       = CPU_MASK_NONE,
     .name       = "Camelot timer",
 };
 
@@ -85,7 +84,7 @@ void __init plat_time_init(void)
 
     BUG_ON(HZ != 100);
 
-    cd->cpumask             = cpumask_of_cpu(cpu);
+    cd->cpumask             = cpumask_of(cpu);
 
     clockevents_register_device(cd);
     action->dev_id = cd;

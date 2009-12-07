@@ -190,6 +190,13 @@ void __devinit cpu_cache_init(void)
 		camelot_cache_init();
 	}
 #endif
+
+	if (cpu_has_octeon_cache) {
+		extern void __weak octeon_cache_init(void);
+
+		octeon_cache_init();
+	}
+
 	setup_protection_map();
 }
 

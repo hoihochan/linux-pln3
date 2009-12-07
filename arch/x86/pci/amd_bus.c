@@ -2,7 +2,7 @@
 #include <linux/pci.h>
 #include <linux/topology.h>
 #include <linux/cpu.h>
-#include "pci.h"
+#include <asm/pci_x86.h>
 
 #ifdef CONFIG_X86_64
 #include <asm/pci-direct.h>
@@ -14,63 +14,6 @@
  * This discovers the pcibus <-> node mapping on AMD K8.
  * also get peer root bus resource for io,mmio
  */
-
-#ifdef CONFIG_NUMA
-
-#define BUS_NR 256
-
-#ifdef CONFIG_X86_64
-
-static int mp_bus_to_node[BUS_NR];
-
-void set_mp_bus_to_node(int busnum, int node)
-{
-	if (busnum >= 0 &&  busnum < BUS_NR)
-		mp_bus_to_node[busnum] = node;
-}
-
-int get_mp_bus_to_node(int busnum)
-{
-	int node = -1;
-
-	if (busnum < 0 || busnum > (BUS_NR - 1))
-		return node;
-
-	node = mp_bus_to_node[busnum];
-
-	/*
-	 * let numa_node_id to decide it later in dma_alloc_pages
-	 * if there is no ram on that node
-	 */
-	if (node != -1 && !node_online(node))
-		node = -1;
-
-	return node;
-}
-
-#else /* CONFIG_X86_32 */
-
-static unsigned char mp_bus_to_node[BUS_NR];
-
-void set_mp_bus_to_node(int busnum, int node)
-{
-	if (busnum >= 0 &&  busnum < BUS_NR)
-	mp_bus_to_node[busnum] = (unsigned char) node;
-}
-
-int get_mp_bus_to_node(int busnum)
-{
-	int node;
-
-	if (busnum < 0 || busnum > (BUS_NR - 1))
-		return 0;
-	node = mp_bus_to_node[busnum];
-	return node;
-}
-
-#endif /* CONFIG_X86_32 */
-
-#endif /* CONFIG_NUMA */
 
 #ifdef CONFIG_X86_64
 
@@ -94,11 +37,16 @@ struct pci_root_info {
 static int pci_root_num;
 static struct pci_root_info pci_root_info[PCI_ROOT_NR];
 
-void set_pci_bus_resources_arch_default(struct pci_bus *b)
+void x86_pci_root_bus_res_quirks(struct pci_bus *b)
 {
 	int i;
 	int j;
 	struct pci_root_info *info;
+
+	/* don't go for it if _CRS is used already */
+	if (b->resource[0] != &ioport_resource ||
+	    b->resource[1] != &iomem_resource)
+		return;
 
 	/* if only one root bus, don't need to anything */
 	if (pci_root_num < 2)
@@ -111,6 +59,9 @@ void set_pci_bus_resources_arch_default(struct pci_bus *b)
 
 	if (i == pci_root_num)
 		return;
+
+	printk(KERN_DEBUG "PCI: peer root bus %02x res updated from pci conf\n",
+			b->number);
 
 	info = &pci_root_info[i];
 	for (j = 0; j < info->res_num; j++) {
@@ -293,11 +244,6 @@ static int __init early_fill_mp_bus_info(void)
 	u64 val;
 	u32 address;
 
-#ifdef CONFIG_NUMA
-	for (i = 0; i < BUS_NR; i++)
-		mp_bus_to_node[i] = -1;
-#endif
-
 	if (!early_pci_allowed())
 		return -1;
 
@@ -338,7 +284,7 @@ static int __init early_fill_mp_bus_info(void)
 		node = (reg >> 4) & 0x07;
 #ifdef CONFIG_NUMA
 		for (j = min_bus; j <= max_bus; j++)
-			mp_bus_to_node[j] = (unsigned char) node;
+			set_mp_bus_to_node(j, node);
 #endif
 		link = (reg >> 8) & 0x03;
 
@@ -580,7 +526,7 @@ static int __cpuinit amd_cpu_notify(struct notifier_block *self,
 				    unsigned long action, void *hcpu)
 {
 	int cpu = (long)hcpu;
-	switch(action) {
+	switch (action) {
 	case CPU_ONLINE:
 	case CPU_ONLINE_FROZEN:
 		smp_call_function_single(cpu, enable_pci_io_ecs, NULL, 0);

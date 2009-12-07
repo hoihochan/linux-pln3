@@ -55,8 +55,6 @@ struct pt_regs {
 
 #ifdef __powerpc64__
 
-#define __ARCH_WANT_COMPAT_SYS_PTRACE
-
 #define STACK_FRAME_OVERHEAD	112	/* size of minimum stack frame */
 #define STACK_FRAME_LR_SAVE	2	/* Location of LR in stack frame */
 #define STACK_FRAME_REGS_MARKER	ASM_CONST(0x7265677368657265)
@@ -129,7 +127,7 @@ extern int ptrace_put_reg(struct task_struct *task, int regno,
 #define CHECK_FULL_REGS(regs)						      \
 do {									      \
 	if ((regs)->trap & 1)						      \
-		printk(KERN_CRIT "%s: partial register set\n", __FUNCTION__); \
+		printk(KERN_CRIT "%s: partial register set\n", __func__); \
 } while (0)
 #endif /* __powerpc64__ */
 
@@ -137,7 +135,9 @@ do {									      \
  * These are defined as per linux/ptrace.h, which see.
  */
 #define arch_has_single_step()	(1)
+#define arch_has_block_step()	(!cpu_has_feature(CPU_FTR_601))
 extern void user_enable_single_step(struct task_struct *);
+extern void user_enable_block_step(struct task_struct *);
 extern void user_disable_single_step(struct task_struct *);
 
 #endif /* __ASSEMBLY__ */
@@ -289,5 +289,7 @@ extern void user_disable_single_step(struct task_struct *);
 #define PPC_PTRACE_POKEDATA_3264 0x92
 #define PPC_PTRACE_PEEKUSR_3264  0x91
 #define PPC_PTRACE_POKEUSR_3264  0x90
+
+#define PTRACE_SINGLEBLOCK	0x100	/* resume execution until next branch */
 
 #endif /* _ASM_POWERPC_PTRACE_H */

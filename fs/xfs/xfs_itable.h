@@ -71,7 +71,21 @@ xfs_bulkstat_single(
 
 typedef int (*bulkstat_one_fmt_pf)(  /* used size in bytes or negative error */
 	void			__user *ubuffer, /* buffer to write to */
+	int			ubsize,		 /* remaining user buffer sz */
+	int			*ubused,	 /* bytes used by formatter */
 	const xfs_bstat_t	*buffer);        /* buffer to read from */
+
+int
+xfs_bulkstat_one_int(
+	xfs_mount_t		*mp,
+	xfs_ino_t		ino,
+	void			__user *buffer,
+	int			ubsize,
+	bulkstat_one_fmt_pf	formatter,
+	xfs_daddr_t		bno,
+	int			*ubused,
+	void			*dibuff,
+	int			*stat);
 
 int
 xfs_bulkstat_one(
@@ -84,11 +98,6 @@ xfs_bulkstat_one(
 	int			*ubused,
 	void			*dibuff,
 	int			*stat);
-
-int
-xfs_internal_inum(
-	xfs_mount_t		*mp,
-	xfs_ino_t		ino);
 
 typedef int (*inumbers_fmt_pf)(
 	void			__user *ubuffer, /* buffer to write to */
