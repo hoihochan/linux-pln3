@@ -282,7 +282,7 @@ static int erase_sector(struct m25p *flash, u32 offset)
     struct sf_dev *sfd = &g_sfd[flash->dev->id];
 
 	DEBUG(MTD_DEBUG_LEVEL3, "%s: %s %dKiB at 0x%08x\n",
-			flash->dev->dev.bus_id, __func__,
+			dev_name(&flash->dev->dev), __func__,
 			flash->mtd.erasesize / 1024, offset);
 
 	/* Wait until finished previous write command. */
@@ -318,17 +318,18 @@ static int camelot_flash_erase(struct mtd_info *mtd, struct erase_info *instr)
 	u32 addr;
 	int len;
 
-	DEBUG(MTD_DEBUG_LEVEL2, "%s: %s %s 0x%08x, len %d\n",
-			flash->dev->dev.bus_id, __func__, "at",
+	DEBUG(MTD_DEBUG_LEVEL2, "%s: %s %s 0x%08x, len %lld\n",
+			dev_name(&flash->dev->dev), __func__, "at",
 			(u32)instr->addr, instr->len);
 
 	/* sanity checks */
 	if (instr->addr + instr->len > flash->mtd.size)
 		return -EINVAL;
-	if ((instr->addr % mtd->erasesize) != 0
-			|| (instr->len % mtd->erasesize) != 0) {
+
+	/* Assume erase size is always a power of 2 */
+	if ((instr->addr & (mtd->erasesize - 1))
+			|| (instr->len & (mtd->erasesize - 1)))
 		return -EINVAL;
-	}
 
 	addr = instr->addr;
 	len = (int) instr->len;
@@ -373,7 +374,7 @@ static int camelot_flash_read(struct mtd_info *mtd, loff_t from, size_t len,
     int i;
 
 	DEBUG(MTD_DEBUG_LEVEL2, "%s: %s %s 0x%08x, len %zd\n",
-			flash->dev->dev.bus_id, __func__, "from",
+			dev_name(&flash->dev->dev), __func__, "from",
 			(u32)from, len);
 
 	/* sanity checks */
@@ -421,7 +422,7 @@ static int camelot_flash_read(struct mtd_info *mtd, loff_t from, size_t len,
     u32 data;
 
 	DEBUG(MTD_DEBUG_LEVEL2, "%s: %s %s 0x%08x, len %zd\n",
-			flash->dev->dev.bus_id, __func__, "from",
+			dev_name(&flash->dev->dev), __func__, "from",
 			(u32)from, len);
 
 	/* sanity checks */
@@ -501,7 +502,7 @@ static int camelot_flash_write(struct mtd_info *mtd, loff_t to, size_t len,
 	unsigned char *src = (unsigned char *) buf;
 
 	DEBUG(MTD_DEBUG_LEVEL2, "%s: %s %s 0x%08x, len %zd\n",
-			flash->dev->dev.bus_id, __func__, "to",
+			dev_name(&flash->dev->dev), __func__, "to",
 			(u32)to, len);
 
 	if (retlen)
@@ -729,7 +730,7 @@ static int __devinit camelot_flash_probe(struct platform_device *dev)
 		/* unrecognized chip? */
 		if (i == ARRAY_SIZE(m25p_data)) {
 			DEBUG(MTD_DEBUG_LEVEL0, "%s: unrecognized id %s\n",
-					dev->dev.bus_id, data->type);
+					dev_name(&dev->dev), data->type);
 			info = NULL;
 
 		/* recognized; is that chip really what's there? */
@@ -773,7 +774,7 @@ static int __devinit camelot_flash_probe(struct platform_device *dev)
 	if (data && data->name)
 		flash->mtd.name = data->name;
 	else
-		flash->mtd.name = dev->dev.bus_id;
+		flash->mtd.name = dev_name(&dev->dev);
 
 	flash->mtd.type = MTD_NORFLASH;
 	flash->mtd.writesize = 1;
@@ -792,11 +793,11 @@ static int __devinit camelot_flash_probe(struct platform_device *dev)
 		flash->mtd.erasesize = info->sector_size;
 	}
 
-	dev_info(&dev->dev, "%s (%d Kbytes)\n", info->name,
+	dev_info(&dev->dev, "%s (%lld Kbytes)\n", info->name,
 			flash->mtd.size / 1024);
 
 	DEBUG(MTD_DEBUG_LEVEL2,
-		"mtd .name = %s, .size = 0x%.8x (%uMiB) "
+		"mtd .name = %s, .size = 0x%.8llx (%lluMiB) "
 			".erasesize = 0x%.8x (%uKiB) .numeraseregions = %d\n",
 		flash->mtd.name,
 		flash->mtd.size, flash->mtd.size / (1024*1024),
@@ -806,7 +807,7 @@ static int __devinit camelot_flash_probe(struct platform_device *dev)
 	if (flash->mtd.numeraseregions)
 		for (i = 0; i < flash->mtd.numeraseregions; i++)
 			DEBUG(MTD_DEBUG_LEVEL2,
-				"mtd.eraseregions[%d] = { .offset = 0x%.8x, "
+				"mtd.eraseregions[%d] = { .offset = 0x%.8llx, "
 				".erasesize = 0x%.8x (%uKiB), "
 				".numblocks = %d }\n",
 				i, flash->mtd.eraseregions[i].offset,
@@ -837,8 +838,8 @@ static int __devinit camelot_flash_probe(struct platform_device *dev)
 		if (nr_parts > 0) {
 			for (i = 0; i < nr_parts; i++) {
 				DEBUG(MTD_DEBUG_LEVEL2, "partitions[%d] = "
-					"{.name = %s, .offset = 0x%.8x, "
-						".size = 0x%.8x (%uKiB) }\n",
+					"{.name = %s, .offset = 0x%.8llx, "
+						".size = 0x%.8llx (%lluKiB) }\n",
 					i, parts[i].name,
 					parts[i].offset,
 					parts[i].size,
