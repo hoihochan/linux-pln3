@@ -64,7 +64,6 @@ struct nf_conn nf_conntrack_untracked __read_mostly;
 EXPORT_SYMBOL_GPL(nf_conntrack_untracked);
 
 static struct kmem_cache *nf_conntrack_cachep __read_mostly;
-void (*hnat_detach_function)(struct nf_conn *ct);
 
 static int nf_conntrack_hash_rnd_initted;
 static unsigned int nf_conntrack_hash_rnd;
@@ -185,12 +184,6 @@ destroy_conntrack(struct nf_conntrack *nfct)
 	NF_CT_ASSERT(atomic_read(&nfct->use) == 0);
 	NF_CT_ASSERT(!timer_pending(&ct->timeout));
 
-	if(hnat_detach_function)
-		(*hnat_detach_function)(ct);
-
-	nf_conntrack_event(IPCT_DESTROY, ct);
-	set_bit(IPS_DYING_BIT, &ct->status);
-
 	/* To make sure we don't get any weird locking issues here:
 	 * destroy_conntrack() MUST NOT be called with a write lock
 	 * to nf_conntrack_lock!!! -HW */
@@ -235,8 +228,6 @@ void nf_ct_delete_from_lists(struct nf_conn *ct)
 	NF_CT_STAT_INC(net, delete_list);
 	clean_from_lists(ct);
 	spin_unlock_bh(&nf_conntrack_lock);
-	if(hnat_detach_function)
-		(*hnat_detach_function)(ct);
 }
 EXPORT_SYMBOL_GPL(nf_ct_delete_from_lists);
 
@@ -805,13 +796,6 @@ nf_conntrack_in(struct net *net, u_int8_t pf, unsigned int hooknum,
 		NF_CT_STAT_INC_ATOMIC(net, invalid);
 		return NF_ACCEPT;
 	}
-#if 0 //no, it should check it, otherwise, the conntrack will not sync with packet
-	// skip check for hnat
-	if (ct->hnat_cb)
-	{
-		return NF_ACCEPT;
-	}
-#endif
 
 	if (IS_ERR(ct)) {
 		/* Too stressed to deal. */
@@ -887,10 +871,7 @@ void __nf_ct_refresh_acct(struct nf_conn *ct,
 			  int do_acct)
 {
 	NF_CT_ASSERT(ct->timeout.data == (unsigned long)ct);
-	if (do_acct)
-	{
 	NF_CT_ASSERT(skb);
-	}
 
 	/* Only update if this is not a fixed timeout */
 	if (test_bit(IPS_FIXED_TIMEOUT_BIT, &ct->status))

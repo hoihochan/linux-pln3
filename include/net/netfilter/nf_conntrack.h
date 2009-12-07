@@ -121,9 +121,6 @@ struct nf_conn {
 
 	/* Extensions */
 	struct nf_ct_ext *ext;
-
-	/* add for hnat */
-	void *hnat_cb;
 #ifdef CONFIG_NET_NS
 	struct net *ct_net;
 #endif
