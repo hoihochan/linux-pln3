@@ -100,6 +100,12 @@ config SPI_BUTTERFLY
 	  inexpensive battery powered microcontroller evaluation board.
 	  This same cable can be used to flash new firmware.
 
+config SPI_CAMELOT
+        tristate "Camelot SPI master"
+        depends on MIPS_CAMELOT
+        help
+          This enables using the SPI master controller on the Camelot chip
+
 config SPI_GPIO
 	tristate "GPIO-based bitbanging SPI Master"
 	depends on GENERIC_GPIO

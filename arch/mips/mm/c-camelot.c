@@ -1,7 +1,19 @@
-/* 
- *  Copyright (c) 2008, 2009    Acrospeed Inc.    All rights reserved. 
+/*
+ * Donald Chan, donald@plasternetworks.com
+ * Copyright (C) 2009 - 2010 Plaster Networks, LLC.  All rights reserved.
  *
- *  Camelot specific mmu/cache code.
+ * This program is free software; you can distribute it and/or modify it
+ * under the terms of the GNU General Public License (Version 2) as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+ * for more details.
+ *
+ * You should have received a copy of the GNU General Public License along
+ * with this program; if not, write to the Free Software Foundation, Inc.,
+ * 59 Temple Place - Suite 330, Boston MA 02111-1307, USA.
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -20,9 +32,23 @@
 #include <asm/mipsregs.h>
 #include <asm/r4kcache.h>
 
+/*
+ * Cache Control Register fields
+ */
+#define CCTL_DINVAL		(0x00000001)
+#define CCTL_IINVAL		(0x00000002)
+#define CCTL_ILOCK		(0x0000000c)
+#define CCTL_IMEMFILL		(0x00000010)
+#define CCTL_IMEMOFF		(0x00000020)
+#define CCTL_DWB		(0x00000100)
+#define CCTL_DWBINVAL		(0x00000200)
+#define CCTL_DMEMON		(0x00000400)
+#define CCTL_DMEMOFF		(0x00000800)
+
+#define nop()			__asm__ volatile("nop")
+
 static unsigned long icache_size, dcache_size;		/* Size in bytes */
 static unsigned long icache_lsize, dcache_lsize;	/* Size in bytes */
-
 
 static void __cpuinit camelot_probe_cache(void)
 {
@@ -32,157 +58,158 @@ static void __cpuinit camelot_probe_cache(void)
 	dcache_lsize = cpu_dcache_line_size();
 }
 
-/*
- * Cache Control Register fields
- */
-#define CCTL_DINVAL				0x00000001
-#define CCTL_IINVAL				0x00000002
-#define CCTL_ILOCK				0x0000000c
-#define CCTL_IMEMFILL			0x00000010
-#define CCTL_IMEMOFF			0x00000020
-#define CCTL_DWB				0x00000100
-#define CCTL_DWBINVAL			0x00000200
-#define CCTL_DMEMON				0x00000400
-#define CCTL_DMEMOFF			0x00000800
-
-#define nop()			__asm__ volatile("nop")
-
-void camelot_dcache_wback_invalidate_all(void)
+static void camelot_dcache_wback_invalidate_all(void)
 {
-	volatile unsigned int cctl_reg;
-	unsigned long flags;
+	volatile unsigned int cctl_reg = 0;
+	unsigned long flags = 0;
 
 	local_save_flags(flags);
-	local_irq_disable();		
-
+	local_irq_disable();
 
 	cctl_reg = read_c0_cctl();
-	nop(); nop();
+	nop();
+	nop();
 
-	write_c0_cctl( cctl_reg &~ CCTL_DWBINVAL );
-	nop(); nop();
-	write_c0_cctl( cctl_reg | CCTL_DWBINVAL );
-	nop(); nop();
+	write_c0_cctl(cctl_reg & ~CCTL_DWBINVAL);
+	nop();
+	nop();
+	write_c0_cctl(cctl_reg | CCTL_DWBINVAL);
+	nop();
+	nop();
 
-	/* delay to allow cache to be flushed */
+	/* Wait till cache flush */
 	__asm__ __volatile__(".set\tnoreorder\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t" "nop\n\t" ".set\treorder\n\t");
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				".set\treorder\n\t");
 
-
-	write_c0_cctl( cctl_reg );
-	nop(); nop();
+	write_c0_cctl(cctl_reg);
+	nop();
+	nop();
 
 	local_irq_restore(flags);
 }
 
-void camelot_dcache_invalidate_all(void)
+static void camelot_dcache_invalidate_all(void)
 {
-	volatile unsigned int cctl_reg;
-	unsigned long flags;
+	volatile unsigned int cctl_reg = 0;
+	unsigned long flags = 0;
 
 	local_save_flags(flags);
-	local_irq_disable();		
-
+	local_irq_disable();
 
 	cctl_reg = read_c0_cctl();
-	nop(); nop();
+	nop();
+	nop();
 
-	write_c0_cctl( cctl_reg &~ CCTL_DINVAL );
-	nop(); nop();
-	write_c0_cctl( cctl_reg | CCTL_DINVAL );
-	nop(); nop();
+	write_c0_cctl(cctl_reg & ~CCTL_DINVAL);
+	nop();
+	nop();
+	write_c0_cctl(cctl_reg | CCTL_DINVAL);
+	nop();
+	nop();
 
-	/* delay to allow cache to be flushed */
+	/* Wait till cache flush */
 	__asm__ __volatile__(".set\tnoreorder\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t" "nop\n\t" ".set\treorder\n\t");
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				".set\treorder\n\t");
 
-
-	write_c0_cctl( cctl_reg );
-	nop(); nop();
+	write_c0_cctl(cctl_reg);
+	nop();
+	nop();
 
 	local_irq_restore(flags);
 }
 
-void camelot_dcache_wback_all(void)
+static void camelot_dcache_wback_all(void)
 {
-	volatile unsigned int cctl_reg;
-	unsigned long flags;
+	volatile unsigned int cctl_reg = 0;
+	unsigned long flags = 0;
 
 	local_save_flags(flags);
-	local_irq_disable();		
-
+	local_irq_disable();
 
 	cctl_reg = read_c0_cctl();
-	nop(); nop();
+	nop();
+	nop();
 
-	write_c0_cctl( cctl_reg &~ CCTL_DWB );
-	nop(); nop();
-	write_c0_cctl( cctl_reg | CCTL_DWB );
-	nop(); nop();
+	write_c0_cctl(cctl_reg & ~CCTL_DWB);
+	nop();
+	nop();
+	write_c0_cctl(cctl_reg | CCTL_DWB);
+	nop();
+	nop();
 
-	/* delay to allow cache to be flushed */
+	/* Wait till cache flush */
 	__asm__ __volatile__(".set\tnoreorder\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t" "nop\n\t" ".set\treorder\n\t");
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				".set\treorder\n\t");
 
-
-	write_c0_cctl( cctl_reg );
-	nop(); nop();
+	write_c0_cctl(cctl_reg);
+	nop();
+	nop();
 
 	local_irq_restore(flags);
 }
 
-void camelot_icache_invalidate_all(void)
+static void camelot_icache_invalidate_all(void)
 {
-	volatile unsigned int cctl_reg;
-	unsigned long flags;
+	volatile unsigned int cctl_reg = 0;
+	unsigned long flags = 0;
 
 	local_save_flags(flags);
-	local_irq_disable();		
-
+	local_irq_disable();
 
 	cctl_reg = read_c0_cctl();
-	nop(); nop();
+	nop();
+	nop();
 
-	write_c0_cctl( cctl_reg &~ CCTL_IINVAL );
-	nop(); nop();
-	write_c0_cctl( cctl_reg | CCTL_IINVAL );
-	nop(); nop();
+	write_c0_cctl(cctl_reg & ~CCTL_IINVAL);
+	nop();
+	nop();
+	write_c0_cctl(cctl_reg | CCTL_IINVAL);
+	nop();
+	nop();
 
-	/* delay to allow cache to be flushed */
+	/* Wait till cache flush */
 	__asm__ __volatile__(".set\tnoreorder\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t"
-						 "nop\n\t" "nop\n\t" ".set\treorder\n\t");
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				"nop\n\t"
+				".set\treorder\n\t");
 
-
-	write_c0_cctl( cctl_reg );
-	nop(); nop();
+	write_c0_cctl(cctl_reg);
+	nop();
+	nop();
 
 	local_irq_restore(flags);
 }
@@ -195,30 +222,29 @@ static void camelot_flush_cache_all(void)
 
 static void camelot_flush_icache_range(unsigned long start, unsigned long end)
 {
-	/* implement by invaliding the whole icache in camelot platform */
 	camelot_icache_invalidate_all();
 }
 
 static void camelot_flush_dcache_range(unsigned long start, unsigned long end)
 {
-	int size = end - start;
-
-	if (size >= dcache_size) {
+	if ((end - start) >= dcache_size) {
 		camelot_dcache_wback_invalidate_all();
 	} else {
-		blast_dcache_range(start, start + size);
+		blast_dcache_range(start, end);
 	}
 }
 
 static void camelot_flush_cache_mm(struct mm_struct *mm)
 {
-	/* checked and left to be blank */
+	/* Nothing to do */
+	;
 }
 
 static void camelot_flush_cache_range(struct vm_area_struct *vma,
 				  unsigned long start, unsigned long end)
 {
-	/* checked to left to be blank */
+	/* Nothing to do */
+	;
 }
 
 static void camelot_flush_cache_page(struct vm_area_struct *vma,
@@ -255,20 +281,32 @@ static void camelot_flush_cache_page(struct vm_area_struct *vma,
 
 static void local_camelot_flush_data_cache_page(void *addr)
 {
-	if(PAGE_SIZE >= dcache_size)
-	{
+	if (PAGE_SIZE >= dcache_size) {
 		camelot_dcache_wback_invalidate_all();
-	}
-	else
-	{
-		if(dcache_lsize == 32) 
+	} else {
+		switch (dcache_lsize) {
+		case 32:
+			blast_dcache32_page((unsigned long)addr);
+			break;
+		case 16:
+			blast_dcache16_page((unsigned long)addr);
+			break;
+		case 0:
+			break;
+		default:
+			BUG_ON(1);
+			break;
+		}
+#if 0
+		if (dcache_lsize == 32) {
 			blast_dcache32_page((unsigned long) addr);
-		else if(dcache_lsize == 16)
+		} else if(dcache_lsize == 16) {
 			blast_dcache16_page((unsigned long) addr);
 		else if(dcache_lsize == 0)
 			return;
 		else
 			BUG_ON(1);
+#endif
 	}
 }
 
@@ -277,22 +315,14 @@ static void camelot_flush_data_cache_page(unsigned long addr)
 	local_camelot_flush_data_cache_page((void*) addr);
 }
 
-
 static void camelot_flush_cache_sigtramp(unsigned long addr)
 {
-	/*
-	 * Traditional R3000 processors flush the first three
-	 * words ot the cache starting at addr. We must flush
-	 * the entire cache.
-	 */
-
 	camelot_icache_invalidate_all();
 }
 
 static void camelot_dma_cache_inv(unsigned long start, unsigned long size)
 {
-	/* Catch bad driver code */
-	BUG_ON(size == 0);
+	BUG_ON(!size);
 
 	iob();
 
@@ -301,31 +331,24 @@ static void camelot_dma_cache_inv(unsigned long start, unsigned long size)
 	} else {
 		blast_inv_dcache_range(start, start + size);
 	}
-
-	//camelot_flush_dcache_range(start, start + size);
 }
 
 static void camelot_dma_cache_wback(unsigned long start, unsigned long size)
 {
-	/* Catch bad driver code */
-	BUG_ON(size == 0);
+	BUG_ON(!size);
 
 	iob();
 
 	if (size >= dcache_size) {
 		camelot_dcache_wback_all();
 	} else {
-		/* use wback invalidate instead of wback */
 		blast_dcache_range(start, start + size);
 	}
-
-	//camelot_flush_dcache_range(start, start + size);
 }
 
 static void camelot_dma_cache_wback_inv(unsigned long start, unsigned long size)
 {
-	/* Catch bad driver code */
-	BUG_ON(size == 0);
+	BUG_ON(!size);
 
 	iob();
 
@@ -342,8 +365,6 @@ void __cpuinit camelot_cache_init(void)
 	extern void build_copy_page(void);
 
 	camelot_probe_cache();
-
-	wbflush_setup();
 
 	flush_cache_all = camelot_flush_cache_all;
 	__flush_cache_all = camelot_flush_cache_all;
@@ -369,4 +390,3 @@ void __cpuinit camelot_cache_init(void)
 	build_clear_page();
 	build_copy_page();
 }
-

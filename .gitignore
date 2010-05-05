@@ -75,4 +75,3 @@ GTAGS
 *.orig
 *~
 \#*#
-!arch/mips/camelot/generic/cml_hnat.o.gz

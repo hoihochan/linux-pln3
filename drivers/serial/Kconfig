@@ -277,6 +277,14 @@ config SERIAL_8250_RM9K
 
 comment "Non-8250 serial port support"
 
+config SERIAL_CAMELOT
+	bool "Camelot serial port support"
+	depends on MIPS_CAMELOT
+	select SERIAL_CORE
+	select SERIAL_CONSOLE
+	help
+	  Support for serial port and console on MIPS Camelot
+
 config SERIAL_AMBA_PL010
 	tristate "ARM AMBA PL010 serial port support"
 	depends on ARM_AMBA && (BROKEN || !ARCH_VERSATILE)

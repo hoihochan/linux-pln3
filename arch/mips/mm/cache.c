@@ -183,13 +183,11 @@ void __devinit cpu_cache_init(void)
 		tx39_cache_init();
 	}
 
-#if defined(CONFIG_MIPS_CAMELOT)
-	{
+	if (cpu_has_camelot_cache) {
 		extern void __weak camelot_cache_init(void);
 
 		camelot_cache_init();
 	}
-#endif
 
 	if (cpu_has_octeon_cache) {
 		extern void __weak octeon_cache_init(void);

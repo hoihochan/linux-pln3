@@ -1789,6 +1789,13 @@ config CPMAC
 	help
 	  TI AR7 CPMAC Ethernet support
 
+config CAMELOT_MAC
+	tristate "Camelot MAC Ethernet support (EXPERIMENTAL)"
+	depends on NET_ETHERNET && EXPERIMENTAL && MIPS_CAMELOT
+	select PHYLIB
+	help
+	  Camelot MAC Ethernet support
+
 config NET_POCKET
 	bool "Pocket and portable adapters"
 	depends on PARPORT

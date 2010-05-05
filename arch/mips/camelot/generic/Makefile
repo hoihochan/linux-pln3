@@ -1,23 +1,5 @@
 #
-# Copyright (c) 2008, 2009    Acrospeed Inc.    All rights reserved.
+# Donald Chan, donald@plasternetworks.com
+# Copyright (C) 2009 - 2010 Plaster Networks, LLC.  All rights reserved.
 #
-obj-y				:= init.o setup.o reset.o \
-				   wbflush.o prom.o time.o int.o \
-				   serial.o c-camelot.o gpio.o
-obj-y += cml_eth.o cml_hnat.o cml_hnat_sdmz.o
-obj-y += nf_hnat.o
-# 175d drive
-obj-y += 175d.o
-
-ifeq "" "$(wildcard $(srctree)/$(src)/cml_hnat.c)"
-$(obj)/cml_hnat.o: $(src)/cml_hnat.o.gz
-	gzip -d -c $< > $@
-endif
-
-#obj-$(CONFIG_EARLY_PRINTK)	+=
-
-EXTRA_CFLAGS += -Werror
-#
-# 	Uncomment to use Switch Port0 as WAN port
-#
-#EXTRA_CFLAGS += -DCML_ETH_WAN_P0
+obj-y	:= prom.o setup.o platform.o time.o irq.o gpio.o
