@@ -32,8 +32,8 @@ void  __init prom_init_cmdline(void)
 
 void __init prom_meminit(void)
 {
-	/* Add 16MB of RAM */
-	add_memory_region(0, 0x1000000, BOOT_MEM_RAM);
+	/* Add 32MB of RAM */
+	add_memory_region(0, 0x2000000, BOOT_MEM_RAM);
 }
 
 void __init prom_init(void)
