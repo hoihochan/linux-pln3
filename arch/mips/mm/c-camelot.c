@@ -297,16 +297,6 @@ static void local_camelot_flush_data_cache_page(void *addr)
 			BUG_ON(1);
 			break;
 		}
-#if 0
-		if (dcache_lsize == 32) {
-			blast_dcache32_page((unsigned long) addr);
-		} else if(dcache_lsize == 16) {
-			blast_dcache16_page((unsigned long) addr);
-		else if(dcache_lsize == 0)
-			return;
-		else
-			BUG_ON(1);
-#endif
 	}
 }
 
