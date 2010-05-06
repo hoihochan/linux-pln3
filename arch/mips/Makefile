@@ -328,7 +328,7 @@ load-$(CONFIG_LEMOTE_FULOONG2E) +=0xffffffff80100000
 #
 # Camelot Platform
 #
-core-$(CONFIG_MIPS_CAMELOT)	+= arch/mips/camelot/generic/
+core-$(CONFIG_MIPS_CAMELOT)	+= arch/mips/camelot/
 cflags-$(CONFIG_MIPS_CAMELOT)	+= -I$(srctree)/arch/mips/include/asm/camelot
 load-$(CONFIG_MIPS_CAMELOT)	+= 0xffffffff80000400
 all-$(CONFIG_MIPS_CAMELOT)	:= kernel.img
