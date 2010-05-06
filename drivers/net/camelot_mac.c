@@ -359,53 +359,6 @@ static void camelot_mac_set_macaddr(u8 mac[6])
 }
 
 /*=============================================================*
- *  cml_eth_macatable_rd:
- *=============================================================*/
-/*!
- * \brief Get the information from switch address table.
- *
- * \param mac: Pointer to a 6-byte array which contain the address
- * \param fid: the number of fid
- * \param num: entry number
- * \param databuf: data pointer for storing entry information
- *
- * \return None
- */
-static void cml_eth_macatable_rd(unsigned char *mac, char fid, char num, unsigned short *databuf)
-{
-	unsigned short idx;
-
-	if(camelot_mac_mdio_read(camelot_mac_mii, 20, 13) & 0x8)
-	{
-		idx = fid ^ mac[0] ^ mac[1] ^ mac[2] ^ mac[3] ^ mac[4] ^ mac[5];
-		if(mac[0] & 1)
-			idx = idx<<2|num|(1<<11);
-		else
-			idx = idx<<2|num;
-	}
-	else
-	{
-		idx =	(fid<<3 | (mac[0]>>5)) ^ 
-		((((short)mac[0]&0x1f) << 4)|((((short)mac[1]) >> 4))) ^  
-		((((short)mac[1]&0xf) << 5)|((((short)mac[2]) >> 3))) ^
-		((((short)mac[2]&0x7) << 6)|((((short)mac[3]) >> 2))) ^
-		((((short)mac[3]&0x3) << 7)|((((short)mac[4]) >> 1))) ^
-		((((short)mac[4]&0x1) << 8)|(((short)mac[5])));
-
-		idx = idx<<2|num;
-	}
-
-	camelot_mac_mdio_write(camelot_mac_mii, 21, 14, idx|(2<<11)|(1<<15));
-	while((camelot_mac_mdio_read(camelot_mac_mii, 21, 14) & 0x2000) == 0);
-
-	databuf[0] = camelot_mac_mdio_read(camelot_mac_mii, 21, 15);
-	databuf[1] = camelot_mac_mdio_read(camelot_mac_mii, 21, 16);
-	databuf[2] = camelot_mac_mdio_read(camelot_mac_mii, 21, 17);
-	databuf[3] = camelot_mac_mdio_read(camelot_mac_mii, 21, 18);
-	databuf[4] = camelot_mac_mdio_read(camelot_mac_mii, 21, 19);
-}
-
-/*=============================================================*
  *  cml_eth_macatable_wr:
  *=============================================================*/
 /*!
