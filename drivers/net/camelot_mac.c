@@ -40,11 +40,13 @@ MODULE_ALIAS("platform:camelot_mac");
 #define CAMELOT_MAC_PHY_ID		5
 #define CAMELOT_MAC_SKB_SIZE		1700
 #define CAMELOT_OFFSET			0
+#define	NUM_MBUF			(NUM_RX_DESC + 24 + 2)
 
 static int debug_level = 8;
 module_param(debug_level, int, 0444);
 MODULE_PARM_DESC(debug_level, "Number of NETIF_MSG bits to enable");
 
+static void *hw_buffer_list[NUM_MBUF];
 static int mdio_irqs[PHY_MAX_ADDR]= { PHY_POLL, };
 static struct mii_bus *camelot_mac_mii;
 
@@ -52,7 +54,6 @@ static struct mii_bus *camelot_mac_mii;
 #define MRXCR_INIT	0x8201004 //defulat=0x8321004
 #define ML3_INIT	0x071505dc
 
-#define	NUM_MBUF	 	(NUM_RX_DESC+24+2)
 
 static void cml_eth_macatable_wr(unsigned char *mac, char fid, char num, unsigned short info, unsigned short flag);
 
@@ -278,7 +279,7 @@ static struct phy_config switch_config[] =
 	{ 20, 13, (1 << 3) | 1 },
 
 	/* VLAN type settings: tag-based VLANs on all ports */
-	{ 22, 0, VLAN_TAG_VLAN(1, 1, 1, 1, 1, 1) },
+	{ 22, 0, VLAN_TAG_VLAN(1, 1, 1, 1, 1, 1) | (1 << 12) },
 
 	/*
 	 * VLAN entries 0 and 1 are valid
@@ -314,7 +315,9 @@ static struct phy_config switch_config[] =
 	 *
 	 * VLAN0: Remove tag on Port 0, 1, 2, and 5
 	 */
-	{ 23, 16, VLAN0(VLAN_DEL_TAG(1, 1, 1, 0, 0, 0)) },
+	{ 23, 16, VLAN0(VLAN_DEL_TAG(1, 0, 0, 0, 0, 0)) },
+
+	{ 23, 2, 0x01 },
 
 	/* Enable port forwarding all on ports */
 	{ 20, 6, 0x3f3f },
@@ -343,6 +346,13 @@ static void camelot_switch_init(void)
 		camelot_mac_mdio_write(camelot_mac_mii, 20, 19, val | 0x0ff);
 	}
 
+	/* Enable special tagging */
+	val = camelot_mac_mdio_read(camelot_mac_mii, 21, 22);
+	camelot_mac_mdio_write(camelot_mac_mii, 21, 22, val | 0x02);
+
+	/* Disable VLAN ingress filter */
+	val = camelot_mac_mdio_read(camelot_mac_mii, 22, 1);
+	camelot_mac_mdio_write(camelot_mac_mii, 22, 1, val & ~0x3F);
 }
 
 static void camelot_mac_set_macaddr(u8 mac[6])
@@ -436,7 +446,7 @@ static struct sk_buff *camelot_mac_get_skb(u32 buffer)
 	return skb;
 }
 
-static char *camelot_mac_get_buffer(struct net_device *dev)
+static char *camelot_mac_get_buffer(struct net_device *dev, int index)
 {
 	struct sk_buff *skb = NULL;
 
@@ -457,6 +467,9 @@ static char *camelot_mac_get_buffer(struct net_device *dev)
 	/* We hide the skb's address 4 bytes behind of skb->data */
 	*((unsigned int *)(skb->data - 4)) = (unsigned int)skb;
 
+	if (index != -1)
+		hw_buffer_list[index] = skb;
+
 	return skb->data;
 }
 
@@ -467,7 +480,7 @@ static void camelot_mac_rx_desc_init(struct net_device *dev,
 	struct camelot_desc *prxd = prxc->prxd;
 
 	for (i = 0; i < NUM_RX_DESC; i++, prxd++) {
-		u8 *ptr = camelot_mac_get_buffer(dev);
+		u8 *ptr = camelot_mac_get_buffer(dev, -1);
 
 		BUG_ON(!ptr);
 
@@ -511,6 +524,20 @@ static inline void camelot_mac_tx_start(void)
 		MAC_CTRL_REG);
 }
 
+static void camelot_mac_hw_buffer_free(void)
+{
+	int i = 0;
+	struct sk_buff *skb = NULL;
+
+	for (i = 0; i < NUM_MBUF - 1; i++) {
+		if (hw_buffer_list[i] == NULL)
+			break;
+
+		skb = hw_buffer_list[i];
+		dev_kfree_skb_any(skb);
+	}
+}
+
 static int camelot_mac_hw_buffer_init(struct net_device *dev)
 {
 	int i = 0, j = 0;
@@ -518,7 +545,7 @@ static int camelot_mac_hw_buffer_init(struct net_device *dev)
 	struct sk_buff *skb = NULL;
 	void *current_buff = 0, *next_buff = 0;
 
-	if (!(current_buff = camelot_mac_get_buffer(dev)))
+	if (!(current_buff = camelot_mac_get_buffer(dev, i)))
 		goto no_buffer;
 
 	writel(virt_to_phys(current_buff) + CAMELOT_OFFSET,
@@ -530,7 +557,7 @@ static int camelot_mac_hw_buffer_init(struct net_device *dev)
 		/* Save the current buffer */
 		buffer_list[i] = (u32)current_buff;
 
-		if (!(next_buff = camelot_mac_get_buffer(dev)))
+		if (!(next_buff = camelot_mac_get_buffer(dev, i + 1)))
 			goto free;
 
 		/*
@@ -558,6 +585,7 @@ free:
 
 		skb = camelot_mac_get_skb(buffer_list[j]);
 		dev_kfree_skb(skb);
+		hw_buffer_list[j] = NULL;
 	}
 no_buffer:
 	return -ENOMEM;
@@ -698,7 +726,7 @@ static void camelot_mac_rx_irq(struct net_device *dev)
 
 		dev->stats.rx_packets++;
 
-		if ((ptr = camelot_mac_get_buffer(dev))) {
+		if ((ptr = camelot_mac_get_buffer(dev, -1))) {
 			if (!phys_to_virt(w1 & 0xffffff))
 				goto next;
 
@@ -887,6 +915,11 @@ static int camelot_mac_stop(struct net_device *dev)
 	dma_free_coherent(&dev->dev,
 		sizeof(*priv->rx.prxd) * (NUM_TOTAL_DESC),
 		priv->dma_ring, priv->dma_handle);
+
+	//camelot_mac_hw_reset();
+
+	/* Free HW buffer */
+	//camelot_mac_hw_buffer_free();
 	
 	return 0;
 }
