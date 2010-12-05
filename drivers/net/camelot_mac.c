@@ -174,8 +174,8 @@ static void camelot_mac_switch_preset(void)
 	/* Clear all settings except MDIO clock */
 	writel(MAC_CTRL_INIT & 0xff000000, MAC_CTRL_REG);
 
-	/* TODO */
-	camelot_mac_mdio_write(camelot_mac_mii, 20, 6, 0x0f3f);
+	/* Enable packet forwarding and address learning on all ports */
+	camelot_mac_mdio_write(camelot_mac_mii, 20, 6, 0x3f3f);
 }
 
 struct phy_config
@@ -330,11 +330,13 @@ static void camelot_switch_init(void)
 	struct phy_config *reg_config = switch_config;
 	unsigned short val = 0;
 
+#if 0
 	while (reg_config->phy != -1) {
 		camelot_mac_mdio_write(camelot_mac_mii, reg_config->phy,
 				reg_config->reg, reg_config->val);
 		reg_config++;
 	}
+#endif
 	/* Broadcast Storm Protection enable */
 	{
 		val = camelot_mac_mdio_read(camelot_mac_mii, 20, 16);
@@ -349,10 +351,6 @@ static void camelot_switch_init(void)
 	/* Enable special tagging */
 	val = camelot_mac_mdio_read(camelot_mac_mii, 21, 22);
 	camelot_mac_mdio_write(camelot_mac_mii, 21, 22, val | 0x02);
-
-	/* Disable VLAN ingress filter */
-	val = camelot_mac_mdio_read(camelot_mac_mii, 22, 1);
-	camelot_mac_mdio_write(camelot_mac_mii, 22, 1, val & ~0x3F);
 }
 
 static void camelot_mac_set_macaddr(u8 mac[6])
